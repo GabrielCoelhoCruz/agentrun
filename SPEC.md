@@ -647,7 +647,7 @@ Answered without a model call:
 - A model failure arrives as `message_end` with `message.stopReason: "error"` and `message.errorMessage`, followed by `agent_end` and `agent_settled`. This matches the B5 mapping.
 - Event sequence observed for one prompt: `agent_start`, `turn_start`, `message_start`, `message_end`, `turn_end`, `agent_end`, `agent_settled`.
 
-Blocked on authentication: the Anthropic OAuth token stored by Pi had expired (`Refresh token expired`), so no run reached a tool call. Still open after the re-login: writes land in the right `cwd`, `abort()` on one session leaves the others running, a child `sleep` dies with the abort, and whether built-in tools prompt for approval.
+Blocked twice before any tool call. First run: the Anthropic OAuth token stored by Pi had expired (`Refresh token expired`). After re-login, second run: the Anthropic API answered 400 `You're out of extra usage`, a quota limit on the subscription workspace, not a Pi or SDK problem. The failure surfaced the same way both times, as `message_end` with `stopReason: "error"`, which is useful evidence for the adapter. Still open after the re-login: writes land in the right `cwd`, `abort()` on one session leaves the others running, a child `sleep` dies with the abort, and whether built-in tools prompt for approval.
 
 ## Claude spike
 
