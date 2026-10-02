@@ -33,7 +33,7 @@ type Summary = {
 
 async function makeSession(cwd: string) {
 	const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")
-	const settingsManager = SettingsManager.inMemory()
+	const settingsManager = SettingsManager.inMemory({ defaultProvider: "openai", defaultModel: "gpt-6-astra" })
 	const resourceLoader = new DefaultResourceLoader({
 		cwd,
 		agentDir,

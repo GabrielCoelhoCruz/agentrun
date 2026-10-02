@@ -59,7 +59,7 @@ Each decision records what was chosen and why. Change a decision only when the r
 | Provider | Path in v1 | Reason |
 |---|---|---|
 | Claude Code | SDK (`query()`) | Typed messages, `abortController`, `maxBudgetUsd`, `settingSources: []`. The SDK already runs the binary in a subprocess, so the isolation is the same. |
-| Pi | Decided by spike C1 | The SDK runs the agent inside your process. It must prove that N sessions with different `cwd` values run in parallel without interference. If the spike fails, use `pi --mode json` in a subprocess. |
+| Pi | SDK (`createAgentSession`), decided by spike C1 on 2026-10-02 | Three in-process sessions with distinct `cwd` wrote to the right directories, `abort()` on one left the others running and killed the agent's `sleep` child, peak RSS was 159 MB for four sessions. See the spike log. |
 
 **D3. Capabilities declared per provider.** Not every provider accepts `maxBudgetUsd` or `maxTurns`. Each adapter declares `AgentCapabilities`. The `TASKS.md` parse fails with `UnsupportedOption` when a task asks for what the provider does not have. Nothing is ignored silently.
 
@@ -405,7 +405,7 @@ This table is the heart of multi-provider support. A new adapter fills in one co
 | `Text` | `type: "assistant"`, `text` blocks from `message.content` | `message_end` with `message.role === "assistant"`, assembled text | `item.completed` with `item.type === "agent_message"` |
 | `ToolCall` | `tool_use` block in `assistant` (`id`, `name`, `input`) | `tool_execution_start` (`toolCallId`, `toolName`, `args`) | `item.started` for `command_execution`, `file_change`, `mcp_tool_call` |
 | `ToolResult` | `type: "user"` with `tool_use_result` | `tool_execution_end` (`toolCallId`, `result`, `isError`) | `item.completed` of the same types |
-| `Usage` | `usage` field in `assistant` | `message_update.usage` (per assistant response, `cost.total`) | `turn.completed.usage` |
+| `Usage` | `usage` field in `assistant` | SDK: `message_end.message.usage` on assistant messages. JSON mode: top-level `message_update.usage`. Per assistant response, `cost.total` | `turn.completed.usage` |
 | `Retry` | `type: "system", subtype: "api_retry"` (`attempt`, `error`) | `auto_retry_start` | not documented |
 | `Completed` | `type: "result"`, `is_error: false` (`result`, `total_cost_usd`, `num_turns`) | `agent_settled`, when no `auto_retry_end` with `success: false` and no `error` occurred | `turn.completed` |
 | `Failed` | `type: "result"`, `is_error: true` or an error `subtype` | `agent_settled`, when there was an `auto_retry_end` with `success: false` (`finalError`) or an `error` event | `turn.failed`, `error` |
@@ -635,19 +635,26 @@ Write the list of failures before the code of each step. Each item below is a fa
 
 # Spike log
 
-## Pi spike, 2026-10-02, partial
+## Pi spike, 2026-10-02, passed
 
-Script: `spikes/pi/parallel-sessions.ts`. Run with `mise exec -- node spikes/pi/parallel-sessions.ts`. Pi 1.0.0, SDK in process, default model `anthropic/claude-opus-4-8` from the local Pi settings.
+Script: `spikes/pi/parallel-sessions.ts`. Run with `mise exec -- node spikes/pi/parallel-sessions.ts`. Pi 1.0.0, SDK in process. Model `openai/gpt-6-astra` through Pi's OpenAI OAuth login, selected with `SettingsManager.inMemory({ defaultProvider, defaultModel })`.
 
-Answered without a model call:
+Decision: the Pi adapter uses the SDK in process.
 
-- Four in-process sessions with distinct `cwd`, `SessionManager.inMemory()`, `SettingsManager.inMemory()`, and a `DefaultResourceLoader` with every discovery option off start together and settle without blocking. Peak RSS with the four active was 151 MB.
-- The discovery options are `noExtensions`, `noSkills`, `noPromptTemplates`, `noThemes`, `noContextFiles` on `DefaultResourceLoaderOptions`. `agentDir` is required. `createAgentSession` takes `cwd`, `tools`, `sessionManager`, `settingsManager`, `resourceLoader`, `model`, `thinkingLevel`.
-- For the subprocess path, `pi --help` confirms `--mode json`, `--print`, `--no-session`, `--no-extensions`, `--no-skills`, `--no-context-files`, `--no-prompt-templates`, `--no-themes`, `--tools`, `--exclude-tools`, `--model`, `--provider`, `--approve`, `--no-approve`. There is no `cwd` flag. The adapter sets `cwd` on spawn.
-- A model failure arrives as `message_end` with `message.stopReason: "error"` and `message.errorMessage`, followed by `agent_end` and `agent_settled`. This matches the B5 mapping.
-- Event sequence observed for one prompt: `agent_start`, `turn_start`, `message_start`, `message_end`, `turn_end`, `agent_end`, `agent_settled`.
+Measured on the passing run (9.2 s total, four sessions):
 
-Blocked twice before any tool call. First run: the Anthropic OAuth token stored by Pi had expired (`Refresh token expired`). After re-login, second run: the Anthropic API answered 400 `You're out of extra usage`, a quota limit on the subscription workspace, not a Pi or SDK problem. The failure surfaced the same way both times, as `message_end` with `stopReason: "error"`, which is useful evidence for the adapter. Still open after the re-login: writes land in the right `cwd`, `abort()` on one session leaves the others running, a child `sleep` dies with the abort, and whether built-in tools prompt for approval.
+- Three sessions with distinct temp `cwd` each wrote `hello-N.txt` with the right content in their own directory. No cross-writes.
+- `abort()` on the fourth session returned in 2 ms. The other three finished normally. The `sleep 123` child started by that session's `bash` tool was alive before the abort and gone after it. The session emitted a `toolResult` with `Command aborted` and then `message_end` with `stopReason: "error"` and `errorMessage: "This operation was aborted"`.
+- Built-in tools (`write`, `bash`) ran without any approval prompt. Embedded Pi has no permission step. The `tools` allowlist and the worktree are the only guards (D22).
+- Peak RSS with four sessions active was 159 MB.
+- Event sequence for a one-tool prompt: `agent_start`, `turn_start`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_end`, `message_start`, `message_end`, `turn_end`, `agent_end`, `agent_settled`.
+- In the SDK, `usage` is on `event.message.usage` of assistant messages, not on the event itself. JSON mode puts it top-level on `message_update`.
+
+Facts that hold for both transports:
+
+- Discovery options are `noExtensions`, `noSkills`, `noPromptTemplates`, `noThemes`, `noContextFiles` on `DefaultResourceLoaderOptions`. `agentDir` is required. `SessionManager.inMemory()` only affects history.
+- `pi --help` confirms `--mode json`, `--print`, `--no-session`, `--no-extensions`, `--no-skills`, `--no-context-files`, `--no-prompt-templates`, `--no-themes`, `--tools`, `--exclude-tools`, `--model`, `--provider`, `--approve`, `--no-approve`. There is no `cwd` flag.
+- A model failure arrives as `message_end` with `stopReason: "error"` and `errorMessage`, then `agent_end` and `agent_settled`. Seen twice before the passing run, once for an expired Anthropic OAuth token and once for an Anthropic quota limit (`You're out of extra usage`).
 
 ## Claude spike
 
