@@ -1,14 +1,16 @@
 import errno, fcntl, hashlib, json, os, pathlib, pty, select, signal, struct, subprocess, sys, termios, time
 if os.environ.get('AGENTRUN_E2E_REAL') != '1':
  raise SystemExit('Set AGENTRUN_E2E_REAL=1 to authorize one paid run')
-if len(sys.argv) != 3:
- raise SystemExit('Usage: python3 run-report-e2e.py <node24> <new-private-directory>')
+if len(sys.argv) != 4:
+ raise SystemExit('Usage: python3 run-report-e2e.py <node24> <new-private-directory> <installed-cli>')
+bin = str(pathlib.Path(sys.argv[3]).resolve())
+if not pathlib.Path(bin).is_file():
+ raise SystemExit('CLI target does not exist')
 root = pathlib.Path(sys.argv[2]).resolve()
 root.mkdir(mode=0o700)
 repo = root / 'repo'; repo.mkdir()
 node = str(pathlib.Path(sys.argv[1]).resolve())
-checkout = pathlib.Path(__file__).resolve().parents[3]
-bin = str(checkout / 'packages/cli/dist/bin.mjs')
+target = pathlib.Path(bin).parent
 def capture(name, args, cwd=repo, timeout=30):
  r = subprocess.run(args,cwd=cwd,capture_output=True,text=True,timeout=timeout)
  (root / (name+'.private.json')).write_text(json.dumps({'command':args,'cwd':str(cwd),'exitCode':r.returncode,'stdout':r.stdout,'stderr':r.stderr},indent=2))
@@ -38,14 +40,14 @@ capture('add',['git','add','TASKS.md','.gitignore'])
 capture('base-commit',['git','-c','user.name=Integration Test','-c','user.email=test@example.invalid','commit','-m','test: prepare report tasks'])
 base = capture('base-sha',['git','rev-parse','HEAD']).strip()
 capture('doctor',[node,bin,'doctor','--json'])
-model = capture('model',[node,'--input-type=module','-e', '''import {ModelRuntime,getAgentDir} from '@earendil-works/pi-coding-agent'; import {join} from 'node:path'; const dir=getAgentDir(); const r=await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:join(dir,'models.json')}); const m=r.getAvailableSnapshot().find(m=>m.provider==='openai'&&m.id==='gpt-6-astra'); if(!m)throw Error('openai/gpt-6-astra unavailable'); console.log(JSON.stringify({provider:m.provider,id:m.id}));'''],checkout/'packages/core')
+model = capture('model',[node,'--input-type=module','-e', '''import {ModelRuntime,getAgentDir} from '@earendil-works/pi-coding-agent'; import {join} from 'node:path'; const dir=getAgentDir(); const r=await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:join(dir,'models.json')}); const m=r.getAvailableSnapshot().find(m=>m.provider==='openai'&&m.id==='gpt-6-astra'); if(!m)throw Error('openai/gpt-6-astra unavailable'); console.log(JSON.stringify({provider:m.provider,id:m.id}));'''],target)
 master,slave=pty.openpty()
 fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',24,100,0,0))
 args=[node,bin,'run','TASKS.md','--concurrency','1']
 env=dict(os.environ,TERM='xterm-256color',NO_COLOR='1')
 p=subprocess.Popen(args,cwd=repo,env=env,stdin=slave,stdout=slave,stderr=slave)
 os.close(slave)
-(root/'owner.private.json').write_text(json.dumps({'pid':p.pid,'launcherPid':os.getpid(),'cwd':str(repo),'command':args,'baseSHA':base,'checkout':str(checkout),'ports':[],'containers':[]},indent=2))
+(root/'owner.private.json').write_text(json.dumps({'pid':p.pid,'launcherPid':os.getpid(),'cwd':str(repo),'command':args,'baseSHA':base,'installedCLI':bin,'ports':[],'containers':[]},indent=2))
 raw=bytearray();start=time.monotonic();interrupted=False
 try:
  while True:

@@ -1,6 +1,6 @@
 # agentrun. Specification for v1
 
-Version 1, frozen on 2026-10-02 after two external reviews. Author: Gabriel, with assisted review.
+Version 1, frozen on 2026-10-02 after two external reviews. Author: Gabriel.
 From here on, change this document only through an ADR in `docs/adr/` that names the number of the affected decision. The items marked "spike C1" are the only open gaps. The spike log closes them.
 Project: a local runner that runs code agents in parallel, one git worktree per task, with clean cancellation and `resume`. Written in Effect v4.
 
@@ -14,7 +14,7 @@ The document has three parts. Read them in order the first time. After that, use
 | B. Contracts | reference | What is the exact shape of each piece? |
 | C. Plan | step by step | What do I do first, and how do I know it is done? |
 
-Every API named here was verified against the packages published on 2026-10-02. B1 lists the versions. The appendix lists the sources.
+The release preparation on 2026-10-03 updates the contracts to match the shipped source. The scope stays frozen. ADRs 001–003 record the implemented decisions.
 
 ---
 
@@ -58,12 +58,12 @@ Each decision records what was chosen and why. Change a decision only when the r
 
 | Provider | Path in v1 | Reason |
 |---|---|---|
-| Claude Code | SDK (`query()`) | Typed messages, `abortController`, `maxBudgetUsd`, `settingSources: []`. The SDK already runs the binary in a subprocess, so the isolation is the same. |
-| Pi | SDK (`createAgentSession`), decided by spike C1 on 2026-10-02 | Three in-process sessions with distinct `cwd` wrote to the right directories, `abort()` on one left the others running and killed the agent's `sleep` child, peak RSS was 159 MB for four sessions. See the spike log. |
+| Claude Code | SDK (`query()`) inside an isolated CLI worker | Typed messages, cancellation, budget limits, and disabled project settings by default. |
+| Pi | SDK (`createAgentSession`) inside an isolated CLI worker | Three in-process sessions with distinct `cwd` wrote to the right directories, `abort()` on one left the others running and killed the agent's `sleep` child, peak RSS was 159 MB for four sessions. See the spike log. |
 
 **D3. Capabilities declared per provider.** Not every provider accepts `maxBudgetUsd` or `maxTurns`. Each adapter declares `AgentCapabilities`. The `TASKS.md` parse fails with `UnsupportedOption` when a task asks for what the provider does not have. Nothing is ignored silently.
 
-**D4. State in JSON, one file per run, atomic write.** `resume` needs the task list, status, attempts, worktree path, and branch. This fits in a file encoded by Schema with a `version` field. Writing to a temporary file and then `rename` avoids corruption. SQLite comes in when there is a queryable event log.
+**D4. State in JSON, one file per run, atomic write.** `resume` needs the task list, status, attempts, worktree path, and branch. This fits in a file encoded by Schema with a `version` field. Writing to a temporary file and then `rename` avoids partial replacement. This does not guarantee power-loss durability through fsync. SQLite comes in when there is a queryable event log.
 
 **D5. Worktrees outside the repository.** In `~/.agentrun/worktrees/<repo-hash>/<run-id>/<task-id>`. Inside the repository they pollute `git status` and confuse the agent with a nested repo.
 
@@ -71,11 +71,11 @@ Each decision records what was chosen and why. Change a decision only when the r
 
 **D7. Every write to the shared `.git` goes through a semaphore with 1 permit.** Commits inside each worktree are safe because each worktree has its own index and `HEAD`. What collides is `worktree add`, `worktree remove`, `branch`, `fetch`, `prune`, and `packed-refs`. The `Worktrees` service serializes these operations. The agent is forbidden from running `git worktree` and from running `git checkout` of another branch.
 
-**D8. On interruption the worktree stays. On success or failure the worktree goes and the branch stays.** The release of `Effect.acquireRelease` receives the `Exit`. `Exit.hasInterrupts(exit)` decides. The `--keep-worktrees` flag keeps all of them.
+**D8. Retain interrupted and unsafe worktrees.** Ordinary completion removes clean worktrees without force. Interruption, dirtiness, or a failure after tools start retains the directory. The branch stays. `--keep-worktrees` retains task directories.
 
 **D9. The parallelism limit is a `Semaphore` in the `Runner` layer.** `Effect.forEach` with `concurrency` would already limit a single run. The semaphore exists because the future MCP server will have several callers in the same process, and they must share the same pool. Document this in the README so it does not look like excess.
 
-**D10. Retry only before the agent starts to work.** `AgentSpawnError`, and `AgentCrashed` when the process died before the first `ToolCall`, retry with `Schedule.exponential("1 second").pipe(Schedule.jittered, Schedule.upTo({ times: 2 }))`. After the first `ToolCall` the worktree can have partial effects, and repeating the prompt repeats effects. In that case the task goes to `failed` and the worktree stays for inspection. `AgentTaskFailed` is not transient. Interruption never retries.
+**D10. Retry only before the agent starts to work.** `AgentSpawnError`, and `AgentCrashed` when the process died before the first `ToolCall`, get at most three attempts, with jitter around one-second and two-second delays. Storage failures are not retryable. After the first `ToolCall` the worktree can have partial effects, and repeating the prompt repeats effects. In that case the task goes to `failed` and the worktree stays for inspection. `AgentTaskFailed` is not transient. Interruption never retries.
 
 **D11. Two time limits per task.** Stall timeout, default 5 minutes without any `AgentEvent`. Absolute ceiling, default 60 minutes. Both are configurable in the frontmatter and per task.
 
@@ -85,21 +85,21 @@ Each decision records what was chosen and why. Change a decision only when the r
 
 **D14. Durations come from `Clock`, never from `Date.now()`.** This makes the timeout and retry tests deterministic with `TestClock`.
 
-**D15. One run per repository at a time.** D7 serializes git inside one run. Two `agentrun run` commands in the same repository in different terminals still fight over the same `.git` and the same `state.json`. `run` and `resume` acquire a lock file at `~/.agentrun/locks/<repo-hash>.lock` with `Effect.acquireRelease`, opened with the `wx` flag of `FileSystem`, containing the PID. A lock whose PID no longer exists is considered stale and replaced. Fails with `RunLocked`.
+**D15. One run per repository at a time.** A kernel lease serializes claims through a permanent reclaim marker. macOS uses `lockf`; Linux uses `flock`. A live PID claim causes `RunLocked`. A dead PID claim can be replaced only while holding that lease. See ADR 001.
 
-**D16. The `setup` runs in `runTask`, not inside `Worktrees.acquire`.** If `setup` fails inside the acquire, the acquire fails, the release is never registered, and the worktree becomes an orphan. Outside the acquire, a `setup` failure becomes `SetupError`, the task goes to `failed`, and the worktree stays for inspection with the release already registered. The acquire of `Effect.acquireRelease` is uninterruptible by default. The `{ interruptible: true }` option exists, but it does not solve the orphan problem, so it is not the reason for the decision.
+**D16. The `setup` runs in `runTask`, not inside `Worktrees.acquire`.** If `setup` fails inside the acquire, the acquire fails, the release is never registered, and the worktree becomes an orphan. Outside the acquire, a `setup` failure becomes `SetupError`, the task goes to `failed`, and the worktree stays for inspection with the release already registered. The implementation uses interruptible acquisition after saving worktree intent. A canceled partial acquisition is reconciled on resume. This does not move setup into acquisition.
 
 **D17. A task error does not bring down the run.** Every error in a task becomes status `failed` for that task, with a `reason`. Only errors of the whole run escape `Runner.run`. Exit code 1 comes from the statuses, not from a runner error.
 
-**D18. The runner makes the commit. Success only after the deliverable is saved.** The spec does not require the agent to commit, and `git diff <base>...<branch>` does not see uncommitted changes or new files without `git add`. Removing a dirty worktree fails, and `--force` loses the work. So, after `Completed`, `runTask` runs `git add -A` and `git commit -m "agentrun(<task-id>): <title>"` in the worktree, if there is a change. Only then does it generate `diff.patch` with `git diff <baseSha>..<branch>`, write the task report, and mark `succeeded`. The release removes the worktree without `--force`. If removal fails, the worktree stays and the report warns.
+**D18. Save delivery before success.** The runner stages changed and new files, creates an immutable commit with `commit-tree`, saves its identity, and publishes with a compare-and-swap update. It saves the binary patch and report before success. Recovery uses the recorded commit without replaying provider work. Dirty worktrees are never force removed. See ADR 002.
 
 **D19. A single state writer, and intent before resource.** Several tasks transition at the same time. With concurrent `save`, the last write erases the transition of the other. The `Runner` keeps the `RunState` in a `SynchronizedRef`. Every transition is a `SynchronizedRef.updateEffect` that updates and persists inside the same critical section. The worktree path and the branch name are deterministic from `runId` and `taskId`, and the transition to `running` writes both before `git worktree add`. So, after a crash, `reconcile` knows what to look for.
 
-**D20. Identity per run.** Branch `agentrun/<task-id>-<short-run-id>` and directory `~/.agentrun/worktrees/<repo-hash>/<run-id>/<task-id>`. Repeating a `task-id` in another run never collides. `base` is resolved to a SHA at the start of the run and recorded as `baseSha`. `resume` uses the recorded `baseSha` and rejects `--base`. The identity of the repository is the real path of `git rev-parse --git-common-dir`, so that two worktrees of the same repository share the same lock.
+**D20. Identity per run.** Branch `agentrun/<task-id>-<short-run-id>` and directory `~/.agentrun/worktrees/<repo-hash>/<run-id>/<task-id>`. The branch suffix uses the last four run ID characters. A suffix collision can cause Git refusal; uniqueness across arbitrary runs is not guaranteed. `base` is resolved to a SHA at the start of the run and recorded as `baseSha`. `resume` uses the recorded `baseSha` and rejects `--base`. The identity of the repository is the real path of `git rev-parse --git-common-dir`, so that two worktrees of the same repository share the same lock.
 
-**D21. Control of the process tree.** Agent tools and `setup` create child processes. Subprocess adapters use `detached: true` to create their own process group and kill the group with `process.kill(-pid, signal)`, with `forceKillAfter` to escalate from `SIGINT` to `SIGTERM` and `SIGKILL`. The `pgid` is recorded in `worktrees[taskId]`. On `resume`, if the `pgid` is still alive, the runner kills the group before it starts another agent. For Claude through the SDK, `query.close()` ends the CLI, and the CLI ends the process tree of the Bash commands when it receives `SIGTERM`. Spike C1 observes this.
+**D21. Own processes before starting work.** The production CLI records a worker process group and random ownership token before provider work. Resume validates ownership and stops the old group. Git commands use their own recorded group journals. Cleanup uses bounded queries and signal escalation; unproved ownership causes refusal. Escaped daemons and Windows are unsupported. Direct core adapters do not supply the CLI worker boundary. See ADR 001.
 
-**D22. Explicit permission policy per adapter.** `acceptEdits` does not unlock Bash, and without `canUseTool` a permission request falls back to the mode. Claude uses `permissionMode: "dontAsk"`, an explicit list in `allowedTools`, and scoped rules in `disallowedTools`, which apply in any mode. Pi uses an in-memory `settingsManager`, a `resourceLoader` with discovery of extensions, skills, and context files turned off, and an explicit `tools` list. Spike C1 confirms the names of these options and whether built-in tools ask for approval. The tool list is configurable in the frontmatter under `allowedTools`.
+**D22. Explicit permission policy per adapter.** `acceptEdits` does not unlock Bash, and without `canUseTool` a permission request falls back to the mode. Claude uses `permissionMode: "dontAsk"`, an explicit list in `allowedTools`, and scoped rules in `disallowedTools`, which apply in any mode. Pi uses an in-memory `settingsManager`, a `resourceLoader` with discovery of extensions, skills, and context files turned off, and an explicit `tools` list. Spike C1 confirms the names of these options and whether built-in tools ask for approval. The tool lists are fixed in v1. Frontmatter does not accept `allowedTools`.
 
 ## A4. Risks and mitigations
 
@@ -162,7 +162,7 @@ maxDuration: 60 minutes
 
 ## fix-login: Fix the login timeout
 agent: pi
-maxTurns: 40
+model: provider/modelId
 
 The POST /login endpoint returns 504 when Redis is slow.
 Add a 2s timeout to the client and a test.
@@ -175,7 +175,7 @@ Create GET /health that returns 200 and the package version.
 Rules:
 
 - Optional YAML frontmatter. Keys: `base` (default `HEAD`), `concurrency` (default 2), `agent` (default `claude-code`), `setup` (command run in each worktree after creation), `stallTimeout`, `maxDuration`, `model`, `maxTurns`, `maxBudgetUsd`.
-- Each task starts with `## <id>: <title>`. `id` is kebab-case, unique in the file, and becomes the branch name.
+- Each task starts with `## <id>: <title>`. `id` is kebab-case and unique in the file. The branch combines the task ID and run suffix.
 - `key: value` lines right after the title override the frontmatter for that task. Same keys as the frontmatter, except `base`, `concurrency`, and `setup`.
 - The rest of the section, up to the next `##`, is the prompt. It cannot be empty.
 - Every unknown key is an error.
@@ -188,12 +188,14 @@ TASKS.md:14: task "fix-login": maxBudgetUsd is not supported by agent "pi"
 
 ## B3. Domain model
 
-Main types. The order here is the order to write them in the code.
+Main domain shapes. The exported source is authoritative. The fragments below omit imports shared with earlier fragments.
 
 ```ts
 import { Schema } from "effect"
 
-export const TaskId = Schema.String.pipe(Schema.brand("TaskId"))
+export const TaskId = Schema.String.check(
+  Schema.isPattern(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, { message: "task id must be kebab-case" }),
+).pipe(Schema.brand("TaskId"))
 export const AgentId = Schema.Literals(["claude-code", "pi"])
 
 export class Task extends Schema.Class<Task>("agentrun/Task")({
@@ -226,7 +228,7 @@ Allowed transitions. Any other transition is a defect.
 | From | To | Who triggers | Persisted before continuing |
 |---|---|---|---|
 | `pending` | `running` | runner acquires worktree | yes |
-| `running` | `succeeded` | `AgentEvent.Completed` without error | yes |
+| `running` | `succeeded` | completion and saved delivery | yes |
 | `running` | `failed` | `AgentEvent.Failed`, or crash after retries | yes |
 | `running` | `interrupted` | fiber interrupted | yes, in `onExit` |
 | `interrupted` | `running` | `resume` | yes |
@@ -242,9 +244,10 @@ Reconciliation at the start of `resume`, per task. `dir` is the directory record
 | `running` | no | yes or no | worktree lost. Becomes `failed` with `reason: "worktree missing"`. |
 | `interrupted` | yes | yes | resumes in the same worktree. |
 | `interrupted` | no | yes | recreates the worktree from the branch. |
-| `succeeded` or `failed` | yes | yes | release did not finish. Tries to remove the directory without `--force`. Warns if it fails. |
+| `succeeded`, or `failed` before tools | yes | yes | removes without force unless retained. Warns on refusal. |
+| `failed` after tools | yes | yes | retains the directory for inspection. |
 
-Run state on disk. One file. `version` allows future migration.
+Run state on disk. One file. `version` allows future migration. The snippet uses the exported `TaskReport` schema.
 
 ```ts
 export class RunState extends Schema.Class<RunState>("agentrun/RunState")({
@@ -256,10 +259,13 @@ export class RunState extends Schema.Class<RunState>("agentrun/RunState")({
 	concurrency: Schema.Int,
 	tasks: Schema.Array(Task),
 	status: Schema.Record(TaskId, TaskStatus),
+	setup: Schema.optional(Schema.String),
+	taskReports: Schema.optional(Schema.Record(TaskId, TaskReport)),
 	worktrees: Schema.Record(TaskId, Schema.Struct({
 		path: Schema.String,
 		branch: Schema.String,
 		pgid: Schema.optional(Schema.Int),
+		processToken: Schema.optional(Schema.String),
 	})),
 }) {}
 ```
@@ -273,7 +279,7 @@ export const AgentEvent = Schema.Union([
 	Schema.TaggedStruct("ToolCall", { id: Schema.String, name: Schema.String, input: Schema.Unknown }),
 	Schema.TaggedStruct("ToolResult", { id: Schema.String, isError: Schema.Boolean, summary: Schema.String }),
 	Schema.TaggedStruct("Usage", { inputTokens: Schema.Int, outputTokens: Schema.Int, costUsd: Schema.optional(Schema.Finite) }),
-	Schema.TaggedStruct("Retry", { attempt: Schema.Int, reason: Schema.String }),
+	Schema.TaggedStruct("Retry", { attempt: Schema.Int, reason: Schema.String, source: Schema.optional(Schema.Literals(["runner", "provider"])) }),
 	Schema.TaggedStruct("Completed", { result: Schema.String, costUsd: Schema.optional(Schema.Finite), turns: Schema.optional(Schema.Int) }),
 	Schema.TaggedStruct("Failed", { reason: Schema.String }),
 ])
@@ -290,31 +296,19 @@ Stream rules:
 Agent input and capabilities.
 
 ```ts
-export interface AgentInput {
-	readonly prompt: string
-	readonly cwd: string
-	readonly model: Option.Option<string>
-	readonly maxTurns: Option.Option<number>
-	readonly maxBudgetUsd: Option.Option<number>
-}
+import type { AgentInput, AgentCapabilities } from "@agentrun/core"
 
-export interface AgentCapabilities {
-	readonly maxTurns: boolean
-	readonly maxBudgetUsd: boolean
-	readonly model: boolean
-	readonly costReporting: boolean
-}
 ```
 
-Errors. All are `Data.TaggedError`. Anything outside this list is a defect and goes up with `Effect.orDie`.
+Errors use `Schema.TaggedError`. `ReportError` covers report and artifact failures. `RunNotFound` covers a missing saved run. Platform failures remain typed where the service declares them.
 
 | Error | Fields | Transient |
 |---|---|---|
 | `TaskFileError` | `path`, `line`, `message` | no |
 | `UnsupportedOption` | `taskId`, `agent`, `option` | no |
 | `GitError` | `command`, `exitCode`, `stderr` | no |
-| `AgentSpawnError` | `agent`, `cause` | yes |
-| `AgentCrashed` | `agent`, `exitCode`, `lastEvent` | yes |
+| `AgentSpawnError` | `agent`, `cause`, optional `retryable` | only before tools and when not explicitly false or caused by typed storage failure |
+| `AgentCrashed` | `agent`, `exitCode`, `lastEvent` | only before the first tool call |
 | `AgentProtocolError` | `agent`, `line`, `issue` | no |
 | `AgentTaskFailed` | `agent`, `reason` | no |
 | `AgentStalled` | `agent`, `idleFor` | no |
@@ -330,70 +324,29 @@ export type TaskError =
 	| GitError | SetupError | AgentSpawnError | AgentCrashed | AgentProtocolError
 	| AgentTaskFailed | AgentStalled | AgentTimedOut
 
-export type RunnerError = RunLocked | StateCorrupted | GitError | PlatformError
+export type RunnerError = RunLocked | StateCorrupted | GitError | PlatformError | ReportError
 ```
 
 `GitError` appears in both. In `runTask` it comes from the `acquire` of a task. In `Runner.run` it comes from the `reconcile` at the start of the run.
 
 ## B4. Services and layers
 
-Exact shape in v4. `Context.Service`, not `Context.Tag` or `Effect.Service`.
+The exported source declarations are the exact API. The [core README](packages/core/README.md) gives a small installed-package example and the layer composition requirements.
 
-```ts
-import { Context, Effect, Layer, Scope, Stream } from "effect"
+- [Agents](packages/core/src/Agents.ts): `get(id)` returns `Option<AgentAdapter>`. The layer provides the two constant SDK adapters.
+- [Runner](packages/core/src/Runner.ts): `run`, scoped `subscribe`, and `events`. Its layer requires Agents, StateStore, Worktrees, RunLock, Report, and Node services.
+- [Worktrees](packages/core/src/Worktrees.ts): scoped acquisition, `locate`, `snapshot`, `publish`, `commit`, `diff`, `reconcile`, and Git process recovery. `diff` returns `Uint8Array`. `reconcile` returns typed `Reconciled` actions.
+- [StateStore](packages/core/src/StateStore.ts): `load`, `save`, `latest`, file and memory layers. Missing runs use `RunNotFound`.
+- [RunLock](packages/core/src/RunLock.ts): scoped acquisition, kernel lease utilities, and a PID claim.
+- [Report](packages/core/src/Report.ts): awaited event append, patch bytes, event offsets, state-derived report save, and checked report load.
 
-export interface AgentAdapter {
-	readonly id: AgentId
-	readonly capabilities: AgentCapabilities
-	readonly run: (input: AgentInput) => Stream.Stream<AgentEvent, AgentError, Scope.Scope>
-}
+Private [TaskReport](packages/core/src/domain/TaskReport.ts) checkpoints are optional for legacy state. They include delivery identity, pending event, attempts, setup completion, and failure decisions. Public report JSON excludes these recovery fields and worker ownership tokens. Reports still contain prompts and paths.
 
-export class Agents extends Context.Service<Agents, {
-	readonly get: (id: AgentId) => AgentAdapter
-}>()("agentrun/Agents") {}
+The runner acquires the repository lock, recovers owned Git processes, reconciles worktrees, and runs tasks under its semaphore. It records task intent before interruptible acquisition. Setup runs outside worktree acquisition. Recreating a directory clears setup completion; reuse preserves it.
 
-export interface Worktree {
-	readonly taskId: TaskId
-	readonly path: string
-	readonly branch: string
-}
+A successful completion is checkpointed before delivery. Immutable commit identity and patch digest make delivery recoverable without another provider call. State updates use a synchronized reference and awaited file writes. Events are persisted in the task flow, rather than through an unbounded log subscriber.
 
-export class Worktrees extends Context.Service<Worktrees, {
-	readonly acquire: (task: Task, base: string) => Effect.Effect<Worktree, GitError, Scope.Scope>
-	readonly reconcile: (state: RunState) => Effect.Effect<ReadonlyArray<TaskId>, GitError>
-	readonly diff: (worktree: Worktree, base: string) => Effect.Effect<string, GitError>
-}>()("agentrun/Worktrees") {}
-
-export class StateStore extends Context.Service<StateStore, {
-	readonly load: (runId: string) => Effect.Effect<RunState, StateCorrupted | NotFound>
-	readonly save: (state: RunState) => Effect.Effect<void, PlatformError>
-	readonly latest: Effect.Effect<Option.Option<string>>
-}>()("agentrun/StateStore") {}
-
-export class Runner extends Context.Service<Runner, {
-	readonly run: (state: RunState) => Effect.Effect<RunState, RunnerError>
-	readonly events: Stream.Stream<RunEvent>
-}>()("agentrun/Runner") {}
-
-export class RunLock extends Context.Service<RunLock, {
-	readonly acquire: (repoRoot: string) => Effect.Effect<void, RunLocked | PlatformError, Scope.Scope>
-}>()("agentrun/RunLock") {}
-```
-
-Implementation rules:
-
-- `Agents.layer` builds each adapter inside `make`, reading `ChildProcessSpawner` and whatever else it needs with `yield*`. The adapter keeps the dependencies in its closure. This is the constructor pattern, not an improper capture.
-- `Worktrees.acquire` uses `Effect.acquireRelease`. The release receives the `Exit` and applies D8. Internally, `Semaphore.make(1)` and `sem.withPermits(1)` around each git command that touches the shared `.git`.
-- `Runner.run` acquires `RunLock` first, resolves `baseSha` if it does not exist yet, runs `Worktrees.reconcile`, and then does `Effect.forEach(tasks, runTask, { concurrency: "unbounded" })` and lets the layer `Semaphore` set the limit. Interrupting the parent fiber interrupts all children.
-- Each `runTask` is an `Effect.fn("Runner.runTask")` with this order. Transition to `running` with `path` and `branch` already recorded (D19). `Effect.scoped` with `Worktrees.acquire`. The `setup` command through `ChildProcessSpawner` (D16). `Agents.get(task.agent).run`, consumed until the final event. Commit by the runner, `diff.patch`, and the task report (D18). `Effect.onExit` that persists the final transition. Every `TaskError` is caught inside `runTask` and becomes status `failed` (D17).
-- The `RunState` lives in a `SynchronizedRef` in the `Runner` layer. `StateStore.save` is only called inside `SynchronizedRef.updateEffect`. No other code writes state.
-- The release of `Worktrees.acquire` removes the worktree without `--force`. A dirty worktree is never removed. The D18 commit is what leaves it clean.
-- The report shows cost only when `capabilities.costReporting` is true. Otherwise the column shows `n/a`.
-- `Runner.events` is a `PubSub` exposed as `Stream.fromPubSub`. The panel subscribes. The `events.jsonl` log subscribes.
-- `Effect.timeout` does not wrap the whole run. The stall timeout operates on the event stream. The absolute ceiling is an `Effect.timeoutOrElse` around the task, which fails with `AgentTimedOut`.
-- Retry wraps the adapter's `run`, only for the errors marked as transient in B3.
-- No `Effect.runPromise` inside the core. Only `NodeRuntime.runMain` in the CLI.
-- `Live.layer` composes everything on top of `NodeServices.layer`. `Test.layer` swaps `Agents` for fake adapters and `StateStore` for memory.
+Transient adapter retries stop after three attempts and do not apply after tools start. The stall watchdog observes event activity. The absolute deadline covers acquisition, setup, retry waits, provider work, and delivery. It starts cancellation; scoped cleanup can outlast it. Each Git command has a sixty-second bound, including recovery and cleanup.
 
 ## B5. Event mapping per provider
 
@@ -401,7 +354,7 @@ This table is the heart of multi-provider support. A new adapter fills in one co
 
 | `AgentEvent` | Claude Code (SDK `SDKMessage`) | Pi (`--mode json` or `session.subscribe`) | Codex (roadmap, `codex exec --json`) |
 |---|---|---|---|
-| `Started` | `type: "system", subtype: "init"`, `session_id` | `type: "session"` record (json mode only), `id` | `thread.started` |
+| `Started` | `type: "system", subtype: "init"`, `session_id` | SDK session identity before prompt; JSON fixture session record | `thread.started` |
 | `Text` | `type: "assistant"`, `text` blocks from `message.content` | `message_end` with `message.role === "assistant"`, assembled text | `item.completed` with `item.type === "agent_message"` |
 | `ToolCall` | `tool_use` block in `assistant` (`id`, `name`, `input`) | `tool_execution_start` (`toolCallId`, `toolName`, `args`) | `item.started` for `command_execution`, `file_change`, `mcp_tool_call` |
 | `ToolResult` | `type: "user"` with `tool_use_result` | `tool_execution_end` (`toolCallId`, `result`, `isError`) | `item.completed` of the same types |
@@ -444,27 +397,13 @@ Why this combination. `dontAsk` denies everything that would ask for confirmatio
 
 Wrap it in `Effect.acquireRelease` to call `abort()` and `close()` when the scope closes. Consume it with `Stream.fromAsyncIterable`.
 
-There is no Claude adapter through the CLI in v1. One path per provider.
+The adapter calls the SDK, which supplies its bundled Claude executable. The agentrun CLI adds its own isolated worker.
 
-Pi through a subprocess. Reference command line:
+Pi uses `createAgentSession` in the isolated worker. It subscribes before prompting, uses in-memory conversation history, and calls `abort()` before `dispose()` on release. Explicit model references use `provider/modelId`.
 
-```
-pi --mode json "<prompt>"
-```
+The adapter uses `DefaultResourceLoader` with `noExtensions`, `noSkills`, `noPromptTemplates`, `noThemes`, and `noContextFiles`. It also clears SYSTEM.md and APPEND_SYSTEM.md discovery. Project settings are off by default. Opt-in loads Pi project settings only. Pi supports model selection and cost reporting, but rejects turn and budget limits.
 
-The flags for `cwd`, model, and approval are not on the integration page. Confirm them in `packages/coding-agent/docs/cli.md` of the `earendil-works/pi` repository during spike C1 and record them here.
-
-Pi through the SDK, if the spike approves.
-
-```ts
-const { session } = await createAgentSession({ cwd: input.cwd, sessionManager: SessionManager.inMemory() })
-session.subscribe(handler)
-await session.prompt(input.prompt)
-```
-
-`abort()` stops the active operation. `dispose()` in the scope release. Subscribe before you call `prompt()`. `SessionManager.inMemory()` only affects the conversation history. Discovery of settings, extensions, skills, and context files is controlled by `settingsManager`, `resourceLoader`, and `cwd`. The exact names of the options that turn discovery off are left to spike C1 (D22).
-
-Pi through a subprocess uses `ChildProcess.make("pi", [...], { cwd, detached: true, killSignal: "SIGINT", forceKillAfter: "10 seconds" })` and the adapter kills the process group on release (D21).
+The worker supplies a Bash implementation that keeps ordinary children inside its owned process group. This is process cleanup, not a security sandbox.
 
 ## B7. Files on disk
 
@@ -479,18 +418,18 @@ Pi through a subprocess uses `ChildProcess.make("pi", [...], { cwd, detached: tr
 		report.json
 		tasks/<task-id>/
 			events.jsonl                       todos os AgentEvent, um por linha
-			diff.patch                         git diff <base>...<branch>
+			diff.patch                         git diff --binary <baseSha>..<deliveryCommit>
 			stderr.log                         só para adaptadores em subprocesso
 ```
 
-`<run-id>` is a compact ISO timestamp plus 4 random characters. `.agentrun/` goes into the target repository's `.gitignore` as a suggestion from `doctor`, never through an automatic write.
+`<run-id>` is a compact ISO timestamp plus 16 random hexadecimal characters. `.agentrun/` goes into the target repository's `.gitignore` as a suggestion from `doctor`, never through an automatic write.
 
 ## B8. CLI
 
 | Command | Does | Flags |
 |---|---|---|
 | `agentrun run <TASKS.md>` | creates the run, executes it, reports | `--concurrency n`, `--base ref`, `--keep-worktrees`, `--json`, `--dry-run`, `--load-project-settings` |
-| `agentrun resume [run-id]` | resumes the most recent run or the given one | `--retry-failed`, same flags as `run` |
+| `agentrun resume [run-id]` | resumes the most recent run or the given one | `--retry-failed`, `--concurrency`, `--keep-worktrees`, `--json`, `--dry-run`, `--load-project-settings` |
 | `agentrun doctor` | checks git, binaries, minimum versions, authentication | `--json` |
 | `agentrun report [run-id]` | reprints the report | `--json` |
 
@@ -518,44 +457,11 @@ Result: <final agent text>
 Reason: AgentTaskFailed: tests failed after 3 attempts
 ```
 
-`report.json` is the `RunState` plus, per task, `durationMs`, `costUsd`, `diffStat`, and `result`. This JSON is the output that the MCP server will return later.
+`report.json` is `RunReport`: state-derived task status plus optional duration, cost, diff statistics, result, delivery commit, and patch digest. It excludes private checkpoints and process ownership tokens. Prompts, result text, paths, and diffs still require review before sharing. `run --json` emits JSON Lines events; `report --json` emits one JSON object. Successful duration ends at provider completion, before delivery. Failed and interrupted duration ends at the saved transition. Costs are provider-reported, not invoice checks.
 
 ## B10. Monorepo structure
 
-```
-agentrun/
-	package.json  pnpm-workspace.yaml  tsconfig.base.json  eslint.config.js
-	.github/workflows/ci.yml           lint, typecheck, test, build
-	docs/
-		SPEC.md                          this file
-		adr/                             one A3 decision per file, when it changes
-	packages/
-		core/                            @agentrun/core
-			src/
-				index.ts
-				domain/
-					Task.ts  TaskStatus.ts  RunState.ts  AgentEvent.ts  RunEvent.ts  Errors.ts
-				TaskFile.ts                  parse + Schema. Funções puras.
-				Agents.ts                    serviço + layer
-				agents/
-					ClaudeCode.ts
-					Pi.ts
-					Jsonl.ts                   decode de linhas para adaptadores em subprocesso
-				Worktrees.ts
-				StateStore.ts  StateStoreMemory.ts
-				RunLock.ts
-				Runner.ts
-				Report.ts
-				Live.ts                      Layer composto
-			test/
-				fixtures/fake-claude.sh  fixtures/fake-pi.sh
-				fixtures/claude/*.jsonl  fixtures/pi/*.jsonl   recorded from real runs
-		cli/                             agentrun
-			src/
-				bin.ts  cli.ts
-				commands/run.ts  resume.ts  doctor.ts  report.ts
-				ui/Panel.ts  ui/ansi.ts
-```
+`packages/core` ships the exported domain, services, and provider adapters. `packages/cli` ships the command entry, isolated worker, and terminal panel. Tests and provider recordings stay outside the tarballs. The [source inventory](docs/evidence/release-v1/candidate.json) binds release evidence to this uncommitted candidate.
 
 ---
 
@@ -592,7 +498,7 @@ Each step ends with a "done when" that you can observe.
 
 Write the list of failures before the code of each step. Each item below is a failure that the test must detect. Core with `@effect/vitest`. Fake agents through `Test.layer`. Real processes only in `it.live`.
 
-1. **Cancellation.** Fake agent that emits events without stopping. Three tasks, limit 2. Interrupt the run fiber. Detected failures: handle did not receive kill; worktree of an interrupted task was removed; state does not show 2 `interrupted` and 1 `pending`; some task became `succeeded`. `it.live` variant with a real `sleep 60`. The PID is still alive after the interruption.
+1. **Cancellation.** Fake agent that emits events without stopping. Three tasks, limit 2. Interrupt the run fiber. Detected failures: handle did not receive kill; worktree of an interrupted task was removed; state does not show 2 `interrupted` and 1 `pending`; some task became `succeeded`. `it.live` variant with a real `sleep 60`. The child PID must be gone after owned cleanup.
 2. **Parallelism limit.** Fake agent increments a `Ref` when it starts and decrements when it ends. Detected failure: maximum in flight greater than the limit. With `TestClock`.
 3. **Retry.** `AgentCrashed` before the first `ToolCall` twice, success on the third. Detected failures: fewer than 3 attempts; delay outside the Schedule (measured with `TestClock.adjust`); `AgentCrashed` after a `ToolCall` retried; `AgentTaskFailed` retried; interruption retried.
 4. **Crash and resume (E2E).** Run the real CLI as a child process with `fake-claude.sh` on the `PATH`. `SIGKILL` in the middle. Run `agentrun resume`. Detected failures: duplicate worktree; task completed twice; unreadable `state.json`; orphan branch.
@@ -628,7 +534,7 @@ Write the list of failures before the code of each step. Each item below is a fa
 - `.d.ts` files downloaded from npm for `effect@4.0.0`, `@effect/platform-node@4.0.0`, and `@effect/vitest@4.0.0`.
 - v4 docs: `effect.website/docs/v4/requirements-management/services`, `.../layers`, `.../concurrency/fibers`, `.../resource-management/scope`, `.../error-management/retrying`, `.../scheduling/choosing-and-combining-schedules`, `.../schema/classes`, `.../schema/error-formatters`.
 - Claude Code: `code.claude.com/docs/en/cli-reference`, `.../headless`, `.../agent-sdk/typescript`, `.../agent-sdk/permissions`. SDK `@anthropic-ai/claude-agent-sdk@0.3.287`.
-- Two external reviews on 2026-10-02, one by a Claude session and one by `gpt-6.1-sol` at high effort. The second one led to D18 to D22, the reconciliation table, and tests C3.5b to C3.5d.
+- The reviews on 2026-10-02 led to D18 to D22, the reconciliation table, and tests C3.5b to C3.5d.
 - Pi: `github.com/earendil-works/pi`, files `packages/coding-agent/docs/sdk.md`, `json.md`, `cli-integration.md`. Package `@earendil-works/pi-coding-agent@1.0.0`.
 - Codex: `learn.chatgpt.com/docs/non-interactive-mode`, `github.com/openai/codex/sdk/typescript/README.md`. Package `@openai/codex-sdk@0.160.0`.
 - Lalph: `github.com/tim-smart/lalph`, `src/Worktree.ts`, `src/Workers.ts`, `src/Persistence.ts`, `src/CliAgent/claude.ts`. It uses `4.0.0-beta.94`, which is why it imports `effect/unstable/process`. In 4.0.0 the path is `effect/process`.
@@ -650,7 +556,7 @@ Measured on the passing run (9.2 s total, four sessions):
 - Event sequence for a one-tool prompt: `agent_start`, `turn_start`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_end`, `message_start`, `message_end`, `turn_end`, `agent_end`, `agent_settled`.
 - In the SDK, `usage` is on `event.message.usage` of assistant messages, not on the event itself. JSON mode puts it top-level on `message_update`.
 
-Facts that hold for both transports:
+Facts verified by the spike:
 
 - Discovery options are `noExtensions`, `noSkills`, `noPromptTemplates`, `noThemes`, `noContextFiles` on `DefaultResourceLoaderOptions`. `agentDir` is required. `SessionManager.inMemory()` only affects history.
 - `pi --help` confirms `--mode json`, `--print`, `--no-session`, `--no-extensions`, `--no-skills`, `--no-context-files`, `--no-prompt-templates`, `--no-themes`, `--tools`, `--exclude-tools`, `--model`, `--provider`, `--approve`, `--no-approve`. There is no `cwd` flag.
@@ -658,4 +564,4 @@ Facts that hold for both transports:
 
 ## Claude spike
 
-Pending. Deferred by decision on 2026-10-02.
+The Claude adapter and cancellation cases are implemented and covered by fixture replay and process E2E. The production CLI uses its own worker group; the old SDK-only spike is not the isolation proof.
