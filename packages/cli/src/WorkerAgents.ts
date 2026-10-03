@@ -17,6 +17,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { spawn } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import { fileURLToPath } from "node:url"
+import { diagnostic } from "./ui/output.js"
 
 const WireInput = Schema.Struct({
   taskId: Schema.optional(TaskId),
@@ -85,7 +86,8 @@ export const workerAgents = (worker: URL) =>
               if (child.pid === undefined) return yield* error("Worker did not start")
               // Capture errors before persistence; never start the provider before its ownership is saved.
               child.on("error", () => {})
-              child.stderr.on("data", (chunk) => process.stderr.write(chunk))
+              child.stderr.setEncoding("utf8")
+              child.stderr.on("data", (chunk: string) => diagnostic(chunk, input.taskId))
               if (input.registerProcess === undefined) {
                 return yield* error("Worker requires durable process registration")
               }
