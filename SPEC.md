@@ -130,14 +130,14 @@ Each decision records what was chosen and why. Change a decision only when the r
 | `effect` | 4.0.0 (`latest`) | Core. Includes `effect/cli`, `effect/process`, `effect/testing`, `effect/persistence`. |
 | `@effect/platform-node` | 4.0.0 | `NodeServices.layer` (FileSystem, Path, ChildProcessSpawner), `NodeRuntime.runMain`. |
 | `@effect/vitest` | 4.0.0 | `it.effect`, `it.live`, `it.layer`, `TestClock`. |
-| `@effect/language-service` | 0.87 | TypeScript plugin. |
-| `@effect/eslint-plugin` | 0.3 | Lint. |
+| `@effect/tsgo` | 0.48 | Effect language service for TypeScript 7. Its `effect-tsgo patch` runs in `prepare`. The tsconfig plugin name stays `@effect/language-service`. The `@effect/language-service` package targets TypeScript 5 and is not installed. |
+| `@effect/eslint-plugin` | 0.3 | Formatting rule (`@effect/dprint`), loaded as a JS plugin by oxlint. Needs `@typescript-eslint/utils` installed, an undeclared peer. |
 | `@anthropic-ai/claude-agent-sdk` | 0.3.287 | Claude Code adapter. |
 | `@earendil-works/pi-coding-agent` | 1.0.0 | Pi adapter, if the spike approves the SDK. The `@mariozechner/*` scope is legacy. |
 | `yaml` | 2.9 | `TASKS.md` frontmatter. |
 | `typescript` | 7.0, strict | Effect v4 requires 5.9 or newer and recommends 7 for the tooling. Flags: `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`. |
 | `vitest` | 5.0 | `@effect/vitest@4` requires `>=5 <6`. |
-| `eslint` | 10 | With `@effect/eslint-plugin`. The plugin declares no peer. Compatibility with eslint 10 is checked in step 1. If it breaks, switch to `oxlint`, which is what Lalph uses. |
+| `oxlint` | 1.86 | Linter. eslint 10 was tried first and rejected: `typescript-eslint` 8.71 does not accept TypeScript 7. Decided in step 1 on 2026-10-02. |
 | `tsdown` | 0.23 | Build of both packages. |
 | Node | 24 LTS | Effect v4 requires 22.18 or newer. `.nvmrc` and `engines` point to 24. |
 | `pi` (global binary) | 1.0.0, same as `latest` | Spike C1 and Pi adapter. Installed at `~/.local/lib/node_modules/@earendil-works/pi-coding-agent`. |

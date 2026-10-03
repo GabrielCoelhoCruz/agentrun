@@ -1,0 +1,27 @@
+{
+  "name": "agentrun-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.29.3",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "lint": "oxlint --config oxlint.config.js --deny-warnings .",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "build": "pnpm -r build",
+    "prepare": "effect-tsgo patch --typescript"
+  },
+  "devDependencies": {
+    "@effect/eslint-plugin": "^0.3.2",
+    "@effect/tsgo": "^0.48.0",
+    "@types/node": "^24.19.1",
+    "@typescript-eslint/utils": "^8.71.0",
+    "oxlint": "^1.86.0",
+    "tsdown": "^0.23.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

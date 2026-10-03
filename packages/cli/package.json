@@ -1,0 +1,28 @@
+{
+  "name": "agentrun",
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "bin": {
+    "agentrun": "./dist/bin.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown src/index.ts src/bin.ts --format esm --dts --sourcemap"
+  },
+  "dependencies": {
+    "@agentrun/core": "workspace:*",
+    "@effect/platform-node": "^4.0.0",
+    "effect": "^4.0.0"
+  }
+}
