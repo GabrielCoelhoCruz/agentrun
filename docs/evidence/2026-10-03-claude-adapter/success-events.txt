@@ -1,0 +1,7 @@
+{"_tag":"Started","sessionId":"d93e696f-8243-4030-b7da-0f2d7af474a1"}
+{"_tag":"ToolCall","id":"toolu_01VqvTocRfUHqoQe2vYoocYH","name":"Write","input":{"file_path":"<cwd>/hello.txt","content":"hello"}}
+{"_tag":"Usage","inputTokens":2,"outputTokens":32}
+{"_tag":"ToolResult","id":"toolu_01VqvTocRfUHqoQe2vYoocYH","isError":false,"summary":"File created successfully at: <cwd>/hello.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"Text","text":"I created `hello.txt` in the working directory. It contains only the word `hello`, with no newline at the end."}
+{"_tag":"Usage","inputTokens":2,"outputTokens":36}
+{"_tag":"Completed","result":"I created `hello.txt` in the working directory. It contains only the word `hello`, with no newline at the end.","costUsd":0.2542562,"turns":2}
