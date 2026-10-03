@@ -137,7 +137,7 @@ export const make = (deps: { readonly query: typeof query }): AgentAdapter => {
             options: {
               cwd: input.cwd,
               permissionMode: "dontAsk",
-              settingSources: [],
+              settingSources: input.loadProjectSettings ? ["project", "local"] : [],
               allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
               disallowedTools: [
                 "Bash(git worktree *)",

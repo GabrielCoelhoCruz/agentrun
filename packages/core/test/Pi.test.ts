@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agents } from "../src/Agents.js"
-import { make } from "../src/agents/Pi.js"
+import { make, workerBashOperations } from "../src/agents/Pi.js"
 import type { Session } from "../src/agents/Pi.js"
 import type { AgentInput } from "../src/domain/Agent.js"
 import type { AgentEvent } from "../src/domain/AgentEvent.js"
@@ -316,6 +316,47 @@ describe("Pi", () => {
           },
         })
         yield* Effect.scoped(Stream.runCollect(adapter.run({ ...input, cwd })))
+      } finally {
+        rmSync(cwd, { recursive: true })
+      }
+    }))
+
+  it.effect("loads only project settings into memory on explicit opt-in", () =>
+    Effect.gen(function*() {
+      const cwd = mkdtempSync(join(tmpdir(), "agentrun-pi-optin-"))
+      try {
+        mkdirSync(join(cwd, ".pi"))
+        writeFileSync(join(cwd, ".pi", "settings.json"), "{\"defaultProvider\":\"optin-test\"}")
+        writeFileSync(join(cwd, "AGENTS.md"), "must remain disabled")
+        const adapter = make({
+          createAgentSession: (options) => {
+            assert.strictEqual(options.settingsManager?.getDefaultProvider(), "optin-test")
+            assert.deepStrictEqual(options.resourceLoader?.getAgentsFiles().agentsFiles, [])
+            return Promise.resolve({ session: new FakeSession([assistant(), settled]) })
+          },
+        })
+        yield* Effect.scoped(Stream.runDrain(adapter.run({ ...input, cwd, loadProjectSettings: true })))
+        assert.strictEqual(
+          readFileSync(join(cwd, ".pi", "settings.json"), "utf8"),
+          "{\"defaultProvider\":\"optin-test\"}",
+        )
+      } finally {
+        rmSync(cwd, { recursive: true })
+      }
+    }))
+
+  it.effect("replaces the SDK Bash backend only inside an owned worker group", () =>
+    Effect.gen(function*() {
+      const cwd = mkdtempSync(join(tmpdir(), "agentrun-pi-group-"))
+      try {
+        const adapter = make({
+          createAgentSession: (options) => {
+            assert.strictEqual(options.customTools?.[0]?.name, "bash")
+            assert.strictEqual(typeof workerBashOperations.exec, "function")
+            return Promise.resolve({ session: new FakeSession([assistant(), settled]) })
+          },
+        })
+        yield* Effect.scoped(Stream.runDrain(adapter.run({ ...input, cwd, workerProcessGroup: true })))
       } finally {
         rmSync(cwd, { recursive: true })
       }

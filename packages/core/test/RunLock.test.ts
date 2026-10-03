@@ -132,3 +132,34 @@ it.live("keeps a stale lock when a crashed reclaim guard exists", () =>
       assert.strictEqual(yield* fixture.fs.exists(`${file}.reclaim`), true)
     })
   ))
+
+for (const guard of ["", "unknown version\n"]) {
+  it.live(`refuses legacy guard ${JSON.stringify(guard)} even without a PID file`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const hash = yield* repoHash(fixture.repoRoot)
+        const file = fixture.path.join(fixture.home, ".agentrun", "locks", `${hash}.lock`)
+        yield* fixture.fs.makeDirectory(fixture.path.dirname(file), { recursive: true })
+        yield* fixture.fs.writeFileString(`${file}.reclaim`, guard)
+        const error = yield* Effect.flip(Effect.scoped((yield* RunLock).acquire(fixture.repoRoot)))
+        assert.strictEqual(error._tag, "RunLocked")
+        assert.strictEqual(yield* fixture.fs.readFileString(`${file}.reclaim`), guard)
+      })
+    ))
+}
+it.live("keeps the same recognizable mutex inode across release and stale recovery", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const hash = yield* repoHash(fixture.repoRoot)
+      const file = fixture.path.join(fixture.home, ".agentrun", "locks", `${hash}.lock`)
+      const lock = yield* RunLock
+      yield* Effect.scoped(lock.acquire(fixture.repoRoot))
+      assert.strictEqual(yield* fixture.fs.readFileString(`${file}.reclaim`), "agentrun-reclaim-v1\n")
+      const before = yield* fixture.fs.stat(`${file}.reclaim`)
+      yield* fixture.fs.writeFileString(file, String(2 ** 22 - 1))
+      yield* Effect.scoped(lock.acquire(fixture.repoRoot))
+      const after = yield* fixture.fs.stat(`${file}.reclaim`)
+      assert.deepStrictEqual(before.ino, after.ino)
+      assert.strictEqual(yield* fixture.fs.exists(file), false)
+    })
+  ))

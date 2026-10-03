@@ -569,7 +569,7 @@ for (const code of ["ESRCH", "EPERM"]) {
         let calls = 0
         const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
           assert.strictEqual(pid, -999999)
-          if (signal === 0) return true
+          if (signal === 0 && code === "EPERM") return true
           throw Object.assign(new Error(code), { code })
         })
         yield* Effect.gen(function*() {

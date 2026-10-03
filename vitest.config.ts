@@ -15,6 +15,7 @@ export default defineConfig({
       {
         test: {
           name: "cli",
+          globalSetup: ["./test/build.ts"],
           root: "./packages/cli",
           include: ["test/**/*.test.ts"],
           passWithNoTests: true,

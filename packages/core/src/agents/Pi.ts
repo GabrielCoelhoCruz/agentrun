@@ -1,14 +1,17 @@
 import {
   createAgentSession,
+  createBashToolDefinition,
   DefaultResourceLoader,
   getAgentDir,
   ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent"
-import type { CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent"
+import type { CreateAgentSessionOptions, ToolDefinition } from "@earendil-works/pi-coding-agent"
 import { Effect, Option, Queue, Schema, Stream } from "effect"
 import { join } from "node:path"
+import { workerBashOperationsFor } from "./PiBash.js"
+export { workerBashOperations } from "./PiBash.js"
 import type { AgentAdapter } from "../Agents.js"
 import type { AgentInput } from "../domain/Agent.js"
 import type { AgentEvent } from "../domain/AgentEvent.js"
@@ -85,13 +88,42 @@ const SdkEvent = Schema.Union([
   }),
 ])
 
+const workerBashTool = (cwd: string, shell: string | undefined): ToolDefinition => {
+  const tool = createBashToolDefinition(cwd, { operations: workerBashOperationsFor(shell) })
+  return {
+    name: tool.name,
+    label: tool.label,
+    description: tool.description,
+    parameters: tool.parameters,
+    execute: (id, params, signal, onUpdate, context) => {
+      const decoded = Schema.decodeUnknownSync(
+        Schema.Struct({ command: Schema.String, timeout: Schema.optional(Schema.Finite) }),
+      )(params)
+      return tool.execute(
+        id,
+        {
+          command: decoded.command,
+          ...(decoded.timeout === undefined ? {} : { timeout: decoded.timeout }),
+        },
+        signal,
+        onUpdate,
+        context,
+      )
+    },
+  }
+}
+
 const setup = Effect.fn("Pi.setup")(function*(input: AgentInput) {
   const spawnError = (cause: unknown) => new AgentSpawnError({ agent: "pi", cause })
   if (Option.isSome(input.maxTurns) || Option.isSome(input.maxBudgetUsd)) {
     return yield* spawnError(new Error("Pi does not support maxTurns or maxBudgetUsd"))
   }
   const agentDir = getAgentDir()
-  const settingsManager = SettingsManager.inMemory()
+  const settingsManager = SettingsManager.inMemory(
+    input.loadProjectSettings
+      ? SettingsManager.create(input.cwd, agentDir).getProjectSettings()
+      : {},
+  )
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.cwd,
     agentDir,
@@ -114,6 +146,7 @@ const setup = Effect.fn("Pi.setup")(function*(input: AgentInput) {
     resourceLoader,
     sessionManager: SessionManager.inMemory(input.cwd),
     tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+    ...(input.workerProcessGroup ? { customTools: [workerBashTool(input.cwd, settingsManager.getShellPath())] } : {}),
   }
   if (Option.isSome(input.model)) {
     const reference = input.model.value

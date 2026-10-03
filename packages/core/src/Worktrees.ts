@@ -29,6 +29,7 @@ interface Options {
   readonly repoRoot: string
   readonly runId: string
   readonly home: string
+  readonly keepWorktrees?: boolean
   readonly permits?: number
 }
 
@@ -109,7 +110,7 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
         return worktree
       }),
       (worktree, exit) =>
-        Exit.hasInterrupts(exit) ? Effect.void : remove(worktree).pipe(
+        options.keepWorktrees === true || Exit.hasInterrupts(exit) ? Effect.void : remove(worktree).pipe(
           Effect.catchTag("GitError", (error) => Effect.logWarning("Worktree removal failed", error)),
         ),
     )
@@ -157,7 +158,9 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
           yield* git(["worktree", "add", worktree.path, worktree.branch], repo).pipe(semaphore.withPermits(1))
           actions.push({ _tag: "Recreated", taskId })
         }
-      } else if ((status?._tag === "succeeded" || status?._tag === "failed") && dir && branch) {
+      } else if (
+        !options.keepWorktrees && (status?._tag === "succeeded" || status?._tag === "failed") && dir && branch
+      ) {
         const removed = yield* remove(worktree).pipe(Effect.result)
         if (removed._tag === "Failure") {
           yield* Effect.logWarning("Worktree removal failed", removed.failure)

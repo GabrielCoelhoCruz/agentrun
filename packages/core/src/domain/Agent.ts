@@ -1,6 +1,13 @@
-import type { Option } from "effect"
+import type { Effect, Option } from "effect"
+import type { AgentError } from "./Errors.js"
+import type { TaskId } from "./Task.js"
 
 export interface AgentInput {
+  readonly taskId?: TaskId
+  readonly loadProjectSettings?: boolean
+  readonly setup?: string
+  readonly workerProcessGroup?: boolean
+  readonly registerProcess?: (pgid: number, token: string) => Effect.Effect<void, AgentError>
   readonly prompt: string
   readonly cwd: string
   readonly model: Option.Option<string>
