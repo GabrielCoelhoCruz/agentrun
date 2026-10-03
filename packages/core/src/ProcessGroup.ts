@@ -6,6 +6,27 @@ import { isAlive } from "./RunLock.js"
 
 const exec = promisify(execFile)
 
+// A zombie has exited but can retain its PID and group until its parent reaps it.
+const processTable = Effect.fn("ProcessGroup.table")(function*() {
+  const error = (cause: unknown) => systemError({ _tag: "Unknown", module: "ProcessGroup", method: "table", cause })
+  const table = yield* Effect.tryPromise({
+    try: () => exec("ps", ["-axo", "pid=,ppid=,pgid=,stat="], { timeout: 5000 }),
+    catch: error,
+  })
+  return yield* Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({
+    pid: Schema.Int.check(Schema.isGreaterThan(0)),
+    parent: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+    group: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+    state: Schema.NonEmptyString,
+  })))(
+    table.stdout.trim().split("\n").map((line) => {
+      const [pid, parent, group, state] = line.trim().split(/\s+/)
+      return { pid: Number(pid), parent: Number(parent), group: Number(group), state }
+    }),
+  ).pipe(Effect.mapError(error))
+})
+const running = (state: string) => !state.startsWith("Z")
+
 // Only groups with a recorded, unguessable worker argument can be recovered.
 export const stopProcessGroup = Effect.fn("stopProcessGroup")(function*(pgid: number, token?: string) {
   const error = (cause: unknown) => systemError({ _tag: "Unknown", module: "ProcessGroup", method: "stop", cause })
@@ -14,6 +35,13 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(function*(pgid: nu
   if (token === undefined || !/^[a-f0-9]{32}$/.test(token)) {
     return yield* error("Live process group has no verified ownership token; recovery refused")
   }
+  const rows = yield* processTable()
+  const members = rows.filter((row) => row.group === pgid)
+  if (members.length === 0) {
+    if (!(yield* isAlive(-pgid))) return
+    return yield* error("Live process group absent from process table; recovery refused")
+  }
+  if (members.every((row) => !running(row.state))) return
   const command = yield* Effect.tryPromise({
     try: () => exec("ps", ["-p", String(pgid), "-o", "command="], { timeout: 5000 }),
     catch: error,
@@ -21,20 +49,6 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(function*(pgid: nu
   if (!command.stdout.trim().split(/\s+/).includes(`agentrun-worker-${token}`)) {
     return yield* error("Process group ownership changed; recovery refused")
   }
-  const table = yield* Effect.tryPromise({
-    try: () => exec("ps", ["-axo", "pid=,ppid=,pgid="], { timeout: 5000 }),
-    catch: error,
-  })
-  const rows = yield* Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({
-    pid: Schema.Int.check(Schema.isGreaterThan(0)),
-    parent: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-    group: Schema.Int.check(Schema.isGreaterThan(0)),
-  })))(
-    table.stdout.trim().split("\n").map((line) => {
-      const [pid, parent, group] = line.trim().split(/\s+/).map(Number)
-      return { pid, parent, group }
-    }),
-  ).pipe(Effect.mapError(error))
   const owned = new Set([pgid])
   let previousSize = 0
   while (previousSize !== owned.size) {
@@ -44,7 +58,9 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(function*(pgid: nu
   const groups = new Set([pgid])
   for (const row of rows) {
     if (!owned.has(row.pid)) continue
-    if (!owned.has(row.group)) return yield* error("Descendant joined an unowned group; cleanup refused")
+    if (row.group <= 1 || !owned.has(row.group)) {
+      return yield* error("Descendant joined an unowned group; cleanup refused")
+    }
     groups.add(row.group)
   }
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
@@ -57,7 +73,13 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(function*(pgid: nu
       )
     }
     for (let attempt = 0; attempt < 40; attempt++) {
-      for (const group of groups) if (!(yield* isAlive(-group))) groups.delete(group)
+      const current = yield* processTable()
+      for (const group of groups) {
+        const members = current.filter((row) => row.group === group)
+        if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
+          groups.delete(group)
+        }
+      }
       if (groups.size === 0) return
       yield* Effect.sleep("50 millis")
     }

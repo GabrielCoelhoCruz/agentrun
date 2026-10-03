@@ -5,6 +5,7 @@ import { spawn } from "node:child_process"
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import { serveWorker } from "../../src/WorkerAgents.js"
+import { alive } from "../process-state.js"
 NodeRuntime.runMain(
   serveWorker((input) =>
     input.prompt.includes("protocol-error")
@@ -22,11 +23,7 @@ NodeRuntime.runMain(
           const prior = existsSync(starts)
           if (prior && existsSync(join(root, `child-${id}`))) {
             const pid = Number(readFileSync(join(root, `child-${id}`), "utf8"))
-            let status = "gone"
-            try {
-              process.kill(pid, 0)
-              status = "alive"
-            } catch { /* absent */ }
+            const status = alive(pid) ? "alive" : "gone"
             writeFileSync(join(root, "old-child-at-start"), status)
           }
           appendFileSync(starts, `${process.pid}\n`)

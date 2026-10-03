@@ -14,6 +14,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { expect, test } from "vitest"
+import { alive } from "./process-state.js"
 
 const bin = fileURLToPath(new URL("../dist/bin.mjs", import.meta.url))
 const fakeBin = fileURLToPath(new URL("./fixtures/dist/entry.mjs", import.meta.url))
@@ -92,14 +93,6 @@ const statePath = (f: Fixture) => {
   return existsSync(runs) ? join(runs, readdirSync(runs).sort().at(-1) ?? "", "state.json") : ""
 }
 const state = (f: Fixture): Saved => JSON.parse(readFileSync(statePath(f), "utf8"))
-const alive = (pid: number) => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
 const lockPath = (f: Fixture) => {
   const common = realpathSync(join(f.repo, git(f.repo, ["rev-parse", "--git-common-dir"])))
   return join(f.home, ".agentrun/locks", `${createHash("sha256").update(common).digest("hex").slice(0, 12)}.lock`)
