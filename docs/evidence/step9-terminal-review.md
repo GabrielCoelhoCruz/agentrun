@@ -14,7 +14,8 @@ JSON stdout remains parseable. Piped output uses simple lines and stderr diagnos
 
 - Branch: `feat/terminal-panel`.
 - Starting commit: `84e871d573f574306cc7cff4efd947329bc741f9`.
-- Changes remain uncommitted for review.
+- Verified implementation commit: `0e586dddf7661ac66e170723ad19e27503c95ffa`.
+- The implementation files match the source hashes recorded before the full test run.
 - Node 24.21.0; lint, typecheck, 165 tests, both package builds and diff checks passed on macOS.
 - Real PTY fixtures use explicitly injected fake providers. They do not call paid providers.
 - Inspected rendered running, success, failed, interrupted, resized, resume and non-TTY states.
