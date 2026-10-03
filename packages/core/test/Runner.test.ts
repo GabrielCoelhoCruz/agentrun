@@ -12,6 +12,7 @@ import {
   Option,
   Path,
   Ref,
+  Schedule,
   Schema,
   Stream,
 } from "effect"
@@ -23,6 +24,7 @@ import { vi } from "vitest"
 import { Agents } from "../src/Agents.js"
 import type { AgentInput } from "../src/domain/Agent.js"
 import type { AgentEvent } from "../src/domain/AgentEvent.js"
+import { AgentCrashed, AgentProtocolError, AgentSpawnError, ReportError } from "../src/domain/Errors.js"
 import type { AgentError } from "../src/domain/Errors.js"
 import type { RunEvent } from "../src/domain/RunEvent.js"
 import { RunState } from "../src/domain/RunState.js"
@@ -204,11 +206,12 @@ describe("Runner", () => {
         const twoInterrupted = yield* Deferred.make<void>()
         const collector = yield* collect(runner, (event) =>
           Effect.gen(function*() {
+            if (event._tag === "TaskAgentEvent" && event.event._tag === "Started") {
+              if ((yield* Ref.updateAndGet(running, (n) => n + 1)) === 2) yield* Deferred.succeed(twoRunning, undefined)
+              return
+            }
             if (event._tag !== "TaskTransition") return
             if (event.status._tag === "running") {
-              if ((yield* Ref.updateAndGet(running, (n) => n + 1)) === 2) {
-                yield* Deferred.succeed(twoRunning, undefined)
-              }
             } else if (event.status._tag === "interrupted") {
               if ((yield* Ref.updateAndGet(interrupted, (n) => n + 1)) === 2) {
                 yield* Deferred.succeed(twoInterrupted, undefined)
@@ -579,7 +582,9 @@ for (const code of ["ESRCH", "EPERM"]) {
           worktrees: { [task().id]: { ...located, pgid: 999999 } },
         })
         let calls = 0
+        const originalKill = process.kill.bind(process)
         const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+          if (pid !== -999999) return originalKill(pid, signal)
           assert.strictEqual(pid, -999999)
           if (signal === 0 && code === "EPERM") return true
           throw Object.assign(new Error(code), { code })
@@ -604,4 +609,403 @@ for (const code of ["ESRCH", "EPERM"]) {
         )
       })
     ))
+}
+
+const deadlineLayer = (
+  agents: Layer.Layer<Agents>,
+  concurrency = 1,
+  append: Report["Service"]["append"] = () => Effect.void,
+  spawnerLayer: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner> = NodeServices.layer,
+) =>
+  testLayer(agents, concurrency).pipe(Layer.provide(Layer.mergeAll(
+    clockWorktrees,
+    Layer.succeed(Report, {
+      lastEvent: () => Effect.succeed(Option.none()),
+      append,
+      eventSize: () => Effect.succeed(0),
+      readPatch: () => Effect.succeed(Option.none()),
+      patch: () => Effect.void,
+      save: () => Effect.void,
+      load: () => Effect.die("not used"),
+    }),
+    Layer.succeed(RunLock, { acquire: () => Effect.void }),
+    NodeServices.layer,
+    spawnerLayer,
+  )))
+
+const crashed = new AgentCrashed({ agent: "claude-code", exitCode: 3, lastEvent: Option.none() })
+const limitedTask = (id = "first-task", stallMs = 1000, maxMs = 5000) =>
+  new Task({ ...task(id), stallTimeout: Duration.millis(stallMs), maxDuration: Duration.millis(maxMs) })
+
+it.effect("retries twice within exponential jitter bounds and records runner retry events", () => {
+  let calls = 0
+  const events: AgentEvent[] = []
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const collector = yield* collect(runner)
+    const fiber = yield* Effect.forkChild(runner.run(runState([task()])))
+    yield* TestClock.adjust(799)
+    assert.strictEqual(calls, 1)
+    yield* TestClock.adjust(401)
+    assert.strictEqual(calls, 2)
+    yield* TestClock.adjust(1599)
+    assert.strictEqual(calls, 2)
+    yield* TestClock.adjust(801)
+    const result = yield* Fiber.join(fiber)
+    yield* Fiber.join(collector)
+    assert.strictEqual(calls, 3)
+    assert.strictEqual(result.status[task().id]?._tag, "succeeded")
+    assert.deepStrictEqual(events.filter((e) => e._tag === "Retry").map((e) => e.attempt), [2, 3])
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(deadlineLayer(
+      fakeAgents(() =>
+        Stream.unwrap(Effect.sync(() => {
+          calls++
+          return calls < 3 ? Stream.fail(crashed) : success
+        }))
+      ),
+      1,
+      (_state, _id, event) =>
+        Effect.sync(() => {
+          events.push(event)
+        }),
+    )),
+  )
+})
+
+for (const mode of ["exhausted", "spawn", "tool-text", "tool-usage", "protocol", "failed", "spawn-storage"] as const) {
+  it.effect(`bounds retries for ${mode}`, () => {
+    let calls = 0
+    return Effect.gen(function*() {
+      const runner = yield* Runner
+      const collector = yield* collect(runner)
+      const fiber = yield* Effect.forkChild(runner.run(runState([task()])))
+      yield* TestClock.adjust(0)
+      yield* TestClock.adjust(4000)
+      const result = yield* Fiber.join(fiber)
+      yield* Fiber.join(collector)
+      assert.strictEqual(calls, mode === "exhausted" || mode === "spawn" ? 3 : 1)
+      assert.strictEqual(result.status[task().id]?._tag, "failed")
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        deadlineLayer(fakeAgents(() =>
+          Stream.unwrap(Effect.sync((): Stream.Stream<AgentEvent, AgentError> => {
+            calls++
+            if (mode === "spawn") return Stream.fail(new AgentSpawnError({ agent: "claude-code", cause: "spawn" }))
+            if (mode === "spawn-storage") {
+              return Stream.fail(
+                new AgentSpawnError({
+                  agent: "claude-code",
+                  cause: new ReportError({ path: "/unused", issue: "storage" }),
+                }),
+              )
+            }
+            if (mode === "protocol") {
+              return Stream.fail(new AgentProtocolError({ agent: "claude-code", line: "bad", issue: "bad" }))
+            }
+            if (mode === "failed") return Stream.fromIterable<AgentEvent>([{ _tag: "Failed", reason: "bad" }])
+            if (mode.startsWith("tool-")) {
+              return Stream.fromIterable<AgentEvent>([
+                { _tag: "ToolCall", id: "1", name: "write", input: {} },
+                mode === "tool-text"
+                  ? { _tag: "Text", text: "later" }
+                  : { _tag: "Usage", inputTokens: 1, outputTokens: 1 },
+              ]).pipe(Stream.concat(Stream.fail(crashed)))
+            }
+            return Stream.fail(crashed)
+          }))
+        )),
+      ),
+    )
+  })
+}
+
+it.effect("interrupts backoff without another adapter call and drains final events", () => {
+  let calls = 0
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const store = yield* StateStore
+    const collector = yield* collect(runner)
+    const fiber = yield* Effect.forkChild(runner.run(runState([task()])))
+    yield* TestClock.adjust(100)
+    yield* Fiber.interrupt(fiber)
+    yield* Fiber.join(collector)
+    yield* TestClock.adjust(10000)
+    assert.strictEqual(calls, 1)
+    assert.strictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id]?._tag, "interrupted")
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(deadlineLayer(fakeAgents(() =>
+      Stream.unwrap(Effect.sync(() => {
+        calls++
+        return Stream.fail(crashed)
+      }))
+    ))),
+  )
+})
+
+it.effect("resets stall on events but enforces the hard ceiling and releases the permit", () => {
+  let active = 0
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const store = yield* StateStore
+    const collector = yield* collect(runner)
+    const fiber = yield* Effect.forkChild(runner.run(runState([limitedTask(), limitedTask("second-task")])))
+    yield* TestClock.adjust(4500)
+    const queuedState = yield* store.load("20261003T1200-a1b2")
+    assert.strictEqual(queuedState.status[task().id]?._tag, "running")
+    assert.strictEqual(queuedState.status[task("second-task").id]?._tag, "pending")
+    yield* TestClock.adjust(500)
+    const result = yield* Fiber.join(fiber)
+    yield* Fiber.join(collector)
+    const failed = result.status[task().id]
+    assert.ok(failed?._tag === "failed")
+    assert.match(failed.reason, /^AgentTimedOut:/)
+    assert.strictEqual(result.status[task("second-task").id]?._tag, "succeeded")
+    assert.strictEqual(active, 0)
+    yield* TestClock.adjust(10000)
+    assert.strictEqual(active, 0)
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      deadlineLayer(
+        fakeAgents((input) =>
+          input.prompt === "second-task" ? success : Stream.unwrap(Effect.gen(function*() {
+            yield* Effect.acquireRelease(
+              Effect.sync(() => {
+                active++
+              }),
+              () =>
+                Effect.sync(() => {
+                  active--
+                }),
+            )
+            return Stream.fromEffect(Effect.sleep(500).pipe(Effect.as<AgentEvent>({ _tag: "Text", text: "alive" })))
+              .pipe(
+                Stream.repeat(Schedule.forever),
+              )
+          }))
+        ),
+      ),
+    ),
+  )
+})
+
+it.effect("stalls after the last event and cleans the adapter scope", () => {
+  let active = 0
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const collector = yield* collect(runner)
+    const fiber = yield* Effect.forkChild(runner.run(runState([limitedTask()])))
+    yield* TestClock.adjust(0)
+    yield* TestClock.adjust(999)
+    assert.strictEqual(active, 1)
+    yield* TestClock.adjust(1)
+    const result = yield* Fiber.join(fiber)
+    yield* Fiber.join(collector)
+    const failed = result.status[task().id]
+    assert.ok(failed?._tag === "failed")
+    assert.match(failed.reason, /^AgentStalled:/)
+    assert.strictEqual(active, 0)
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(deadlineLayer(fakeAgents(() =>
+      Stream.unwrap(Effect.gen(function*() {
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            active++
+          }),
+          () =>
+            Effect.sync(() => {
+              active--
+            }),
+        )
+        return Stream.succeed<AgentEvent>({ _tag: "Started" }).pipe(Stream.concat(Stream.never))
+      }))
+    ))),
+  )
+})
+
+it.effect("counts retry waiting time inside the ceiling", () => {
+  let calls = 0
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const collector = yield* collect(runner)
+    const fiber = yield* Effect.forkChild(runner.run(runState([limitedTask("first-task", 1000, 700)])))
+    yield* TestClock.adjust(700)
+    const result = yield* Fiber.join(fiber)
+    yield* Fiber.join(collector)
+    const failed = result.status[task().id]
+    assert.ok(failed?._tag === "failed")
+    assert.match(failed.reason, /^AgentTimedOut:/)
+    assert.strictEqual(calls, 1)
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(deadlineLayer(fakeAgents(() =>
+      Stream.unwrap(Effect.sync(() => {
+        calls++
+        return Stream.fail(crashed)
+      }))
+    ))),
+  )
+})
+
+it.effect("report append failures escape without retry", () => {
+  let calls = 0
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const collector = yield* collect(runner)
+    const error = yield* Effect.flip(runner.run(runState([task()])))
+    yield* Fiber.join(collector)
+    assert.strictEqual(error._tag, "ReportError")
+    assert.strictEqual(calls, 1)
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(deadlineLayer(
+      fakeAgents(() => {
+        calls++
+        return success
+      }),
+      1,
+      () => Effect.fail(new ReportError({ path: "/unused", issue: "cannot append" })),
+    )),
+  )
+})
+
+it.effect("completion totals replace current attempt usage and keep earlier attempt cost", () => {
+  let calls = 0
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const collector = yield* collect(runner)
+    const fiber = yield* Effect.forkChild(runner.run(runState([task()])))
+    yield* TestClock.adjust(0)
+    yield* TestClock.adjust(4000)
+    const result = yield* Fiber.join(fiber)
+    yield* Fiber.join(collector)
+    const status = result.status[task().id]
+    assert.ok(status?._tag === "succeeded")
+    assert.strictEqual(status.costUsd, 0.7)
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(deadlineLayer(fakeAgents(() =>
+      Stream.unwrap(Effect.sync(() => {
+        calls++
+        const usage = Stream.succeed<AgentEvent>({ _tag: "Usage", inputTokens: 1, outputTokens: 1, costUsd: 0.2 })
+        return usage.pipe(
+          Stream.concat(
+            calls === 1 ? Stream.fail(crashed) : Stream.succeed<AgentEvent>({ ...completed, costUsd: 0.5 }),
+          ),
+        )
+      }))
+    ))),
+  )
+})
+
+it.effect("the hard ceiling includes hanging setup and never calls the adapter", () => {
+  let calls = 0
+  const hangingSpawner = Layer.effect(
+    ChildProcessSpawner.ChildProcessSpawner,
+    Effect.gen(function*() {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+      return { ...spawner, spawn: () => Effect.never }
+    }),
+  ).pipe(Layer.provide(NodeServices.layer))
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const collector = yield* collect(runner)
+    const fiber = yield* Effect.forkChild(
+      runner.run(runState([limitedTask("first-task", 1000, 500)], { setup: "hang" })),
+    )
+    yield* TestClock.adjust(500)
+    const result = yield* Fiber.join(fiber)
+    yield* Fiber.join(collector)
+    const failed = result.status[task().id]
+    assert.ok(failed?._tag === "failed")
+    assert.match(failed.reason, /^AgentTimedOut:/)
+    assert.strictEqual(calls, 0)
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(deadlineLayer(
+      fakeAgents(() => {
+        calls++
+        return success
+      }),
+      1,
+      () => Effect.void,
+      hangingSpawner,
+    )),
+  )
+})
+
+for (const mode of ["protocol", "stall", "ceiling"] as const) {
+  it.effect(`review persists ${mode} before waiting for the adapter finalizer`, () => {
+    let saved: RunState | undefined
+    return Effect.gen(function*() {
+      const release = yield* Deferred.make<void>()
+      const cleaning = yield* Deferred.make<void>()
+      const agents = fakeAgents(() =>
+        Stream.unwrap(Effect.gen(function*() {
+          yield* Effect.addFinalizer(() =>
+            Deferred.succeed(cleaning, undefined).pipe(Effect.andThen(Deferred.await(release)))
+          )
+          return mode === "protocol"
+            ? Stream.fail(new AgentProtocolError({ agent: "claude-code", line: "bad", issue: "bad" }))
+            : Stream.never
+        }))
+      )
+      const layer = Runner.layer({ concurrency: 1 }).pipe(Layer.provide(Layer.mergeAll(
+        agents,
+        Layer.succeed(StateStore, {
+          save: (state) =>
+            Effect.sync(() => {
+              saved = state
+            }),
+          load: () => Effect.die("unused"),
+          latest: Effect.die("unused"),
+        }),
+        clockWorktrees,
+        Layer.succeed(Report, {
+          lastEvent: () => Effect.succeed(Option.none()),
+          append: () => Effect.void,
+          eventSize: () => Effect.succeed(0),
+          readPatch: () => Effect.succeed(Option.none()),
+          patch: () => Effect.void,
+          save: () => Effect.void,
+          load: () => Effect.die("unused"),
+        }),
+        Layer.succeed(RunLock, { acquire: () => Effect.void }),
+        NodeServices.layer,
+      )))
+      yield* Effect.gen(function*() {
+        const runner = yield* Runner
+        const fiber = yield* Effect.forkChild(
+          runner.run(
+            runState([limitedTask("first-task", mode === "stall" ? 100 : 10000, mode === "ceiling" ? 100 : 10000)]),
+          ),
+        )
+        yield* TestClock.adjust(0)
+        if (mode !== "protocol") yield* TestClock.adjust(100)
+        yield* Deferred.await(cleaning)
+        const snapshot = saved
+        if (mode !== "ceiling") yield* TestClock.adjust(10000)
+        yield* Deferred.succeed(release, undefined)
+        const result = yield* Fiber.join(fiber)
+        assert.strictEqual(result.status[task().id]?._tag, "failed")
+        const status = result.status[task().id]
+        assert.strictEqual(
+          status?._tag === "failed" ? status.reason : "",
+          snapshot?.taskReports?.[task().id]?.failureReason,
+        )
+        assert.strictEqual(snapshot?.taskReports?.[task().id]?.phase, "failed")
+        assert.match(
+          snapshot?.taskReports?.[task().id]?.failureReason ?? "",
+          new RegExp(
+            `^${mode === "protocol" ? "AgentProtocolError" : mode === "stall" ? "AgentStalled" : "AgentTimedOut"}:`,
+          ),
+        )
+      }).pipe(Effect.provide(layer))
+    }).pipe(Effect.scoped)
+  })
 }

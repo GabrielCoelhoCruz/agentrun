@@ -14,8 +14,8 @@ git('init', '-q')
 (repo / 'seed').write_text('base\n')
 git('add', '.')
 git('-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-qm', 'base')
-prompt = 'panel-demo hold' if scenario == 'interrupted' else 'panel-demo'
-(repo / 'TASKS.md').write_text('---\nconcurrency: 3\n---\n' + '\n'.join(
+prompt = 'retry-success' if scenario == 'retry' else 'deadline-active' if scenario == 'timeout' else 'panel-demo hold' if scenario == 'interrupted' else 'panel-demo'
+(repo / 'TASKS.md').write_text(('---\nconcurrency: 3\nstallTimeout: 2 seconds\nmaxDuration: 10 seconds\n---\n' if scenario == 'retry' else '---\nconcurrency: 3\nstallTimeout: 2 seconds\nmaxDuration: 5 seconds\n---\n' if scenario == 'timeout' else '---\nconcurrency: 3\n---\n') + '\n'.join(
     f'## task{n}: Task {n} 界 👩‍💻 long title for narrow terminals\n{prompt}' + (' fail' if scenario == 'failed' and n == 1 else '') + '\n'
     for n in range(3)))
 env = {k: v for k, v in os.environ.items() if not any(s in k.upper() for s in ['TOKEN', 'SECRET', 'API_KEY', 'CREDENTIAL', 'AUTH'])}
@@ -78,7 +78,7 @@ else:
                     if error.errno != errno.EIO: raise
                     break
             elapsed = time.monotonic() - start
-            if not running and b'task2 [running]' in raw and b'Tool result: checked file' in raw:
+            if not running and b'task2 [running]' in raw and (b'Tool result: checked file' in raw or b'Runner retry 2' in raw):
                 (root / 'running.ansi').write_bytes(raw)
                 frames.append({'name': 'running', 'columns': 80, 'rows': 24, 'bytes': len(raw)})
                 running = True

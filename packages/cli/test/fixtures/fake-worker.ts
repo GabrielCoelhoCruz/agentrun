@@ -1,4 +1,4 @@
-import { AgentProtocolError, AgentSpawnError, Pi } from "@agentrun/core"
+import { AgentProtocolError, AgentSpawnError, Pi, ReportError } from "@agentrun/core"
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Effect, Stream } from "effect"
 import { spawn } from "node:child_process"
@@ -8,7 +8,11 @@ import { serveWorker } from "../../src/WorkerAgents.js"
 import { alive } from "../process-state.js"
 NodeRuntime.runMain(
   serveWorker((input) =>
-    input.prompt.includes("protocol-error")
+    input.prompt.includes("spawn-storage")
+      ? Stream.fail(
+        new AgentSpawnError({ agent: "claude-code", cause: new ReportError({ path: input.cwd, issue: "storage" }) }),
+      )
+      : input.prompt.includes("protocol-error")
       ? Stream.fail(
         new AgentProtocolError({ agent: "claude-code", line: "bad wire", issue: "injected protocol error" }),
       )
@@ -21,6 +25,7 @@ NodeRuntime.runMain(
           if (!root) throw new Error("Missing explicit test records directory")
           const starts = join(root, `starts-${id}`)
           const prior = existsSync(starts)
+          const count = prior ? readFileSync(starts, "utf8").trim().split("\n").length : 0
           if (prior && existsSync(join(root, `child-${id}`))) {
             const pid = Number(readFileSync(join(root, `child-${id}`), "utf8"))
             const status = alive(pid) ? "alive" : "gone"
@@ -31,6 +36,33 @@ NodeRuntime.runMain(
           yield { _tag: "Started" as const }
           if (input.prompt.includes("slow-cleanup")) {
             process.on("SIGTERM", () => writeFileSync(join(root, "cleanup-started"), "ready"))
+          }
+          if (input.prompt.includes("retry-success") || input.prompt.includes("retry-exhaust")) {
+            yield { _tag: "Usage" as const, inputTokens: 1, outputTokens: 1, costUsd: 0.2 }
+            if (input.prompt.includes("retry-exhaust") || count < 2) process.exit(3)
+          }
+          if (input.prompt.includes("partial-crash")) {
+            yield { _tag: "ToolCall" as const, id: "partial", name: "inspect", input: {} }
+            yield { _tag: "Text" as const, text: "after tool" }
+            process.exit(3)
+          }
+          if (input.prompt.includes("deadline-active")) {
+            yield { _tag: "ToolCall" as const, id: "partial", name: "inspect", input: {} }
+            while (true) {
+              await new Promise((resolve) => setTimeout(resolve, 100))
+              yield { _tag: "Text" as const, text: "alive" }
+            }
+          }
+          if (input.prompt.includes("cleanup-protocol")) {
+            yield { _tag: "Text" as const, text: "before protocol" }
+            process.stdout.write("bad wire\n")
+            await new Promise(() => {})
+          }
+          if (
+            input.prompt.includes("setup-dependency") && (!existsSync(join(input.cwd, "dependency")) || count === 0)
+          ) {
+            yield { _tag: "Failed" as const, reason: "dependency or first failure" }
+            return
           }
           if (input.prompt.includes("worker-exit")) process.exit(3)
           if (input.prompt.includes("owned-bash") && !prior) {

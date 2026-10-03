@@ -16,5 +16,9 @@ export const TaskReport = Schema.Struct({
   attempt: Schema.optional(Schema.Int),
   eventOffset: Schema.optional(Schema.Int),
   failureReason: Schema.optional(Schema.String),
+  toolsStarted: Schema.optional(Schema.Boolean),
+  setupCompleted: Schema.optional(Schema.Boolean),
+  adapterAttempt: Schema.optional(Schema.Int),
+  elapsedBeforeMs: Schema.optional(Schema.Int),
 })
 export type TaskReport = typeof TaskReport.Type

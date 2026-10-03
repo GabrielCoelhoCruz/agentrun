@@ -49,3 +49,24 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
     }
   }, 35000)
 }
+
+for (const scenario of ["retry", "timeout"]) {
+  test(`real PTY: ${scenario} renders runner retries and timeout failures`, () => {
+    const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
+    const result = spawnSync("python3", [
+      fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
+      scenario,
+      root,
+      process.execPath,
+    ], { encoding: "utf8", timeout: 30000 })
+    expect(result.status, result.stderr).toBe(0)
+    const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
+    const output = readFileSync(join(root, "capture.ansi"), "utf8")
+    expect(saved.exitCode).toBe(scenario === "retry" ? 0 : 1)
+    expect(output).toContain(scenario === "retry" ? "Runner retry 2" : "AgentTimedOut")
+    expect(output).toContain("\x1b[?25h")
+    expect(Object.values(saved.savedStatus).map((s) => (s as { _tag: string })._tag)).toEqual(
+      Array(3).fill(scenario === "retry" ? "succeeded" : "failed"),
+    )
+  }, 35000)
+}

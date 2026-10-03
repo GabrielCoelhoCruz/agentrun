@@ -39,7 +39,7 @@ const agentDetail = (event: Extract<RunEvent, { _tag: "TaskAgentEvent" }>["event
     case "Completed":
       return event.result
     case "Retry":
-      return `Retry ${event.attempt}: ${event.reason}`
+      return `${event.source === "runner" ? "Runner retry" : "Provider retry"} ${event.attempt}: ${event.reason}`
     case "Usage":
       return `Tokens: ${event.inputTokens} in, ${event.outputTokens} out`
     case "Started":
