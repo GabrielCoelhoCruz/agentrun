@@ -10,7 +10,11 @@ export const AgentEvent = Schema.Union([
     outputTokens: Schema.Int,
     costUsd: Schema.optional(Schema.Finite),
   }),
-  Schema.TaggedStruct("Retry", { attempt: Schema.Int, reason: Schema.String }),
+  Schema.TaggedStruct("Retry", {
+    attempt: Schema.Int,
+    reason: Schema.String,
+    source: Schema.optional(Schema.Literals(["runner", "provider"])),
+  }),
   Schema.TaggedStruct("Completed", {
     result: Schema.String,
     costUsd: Schema.optional(Schema.Finite),

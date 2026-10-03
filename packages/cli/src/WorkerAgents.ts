@@ -6,6 +6,7 @@ import {
   AgentSpawnError,
   ClaudeCode,
   Pi,
+  retryableSpawnError,
   SetupError,
   stopProcessGroup,
   TaskId,
@@ -38,6 +39,7 @@ const WireError = Schema.Union([
     _tag: Schema.Literal("AgentSpawnError"),
     agent: Schema.Literals(["claude-code", "pi"]),
     cause: Schema.String,
+    retryable: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     _tag: Schema.Literal("AgentCrashed"),
@@ -45,7 +47,11 @@ const WireError = Schema.Union([
     exitCode: Schema.Int,
   }),
 ])
-const WireMessage = Schema.Union([AgentEvent, Schema.Struct({ _tag: Schema.Literal("WorkerError"), error: WireError })])
+const WireMessage = Schema.Union([
+  Schema.TaggedStruct("WorkerSetupCompleted", {}),
+  AgentEvent,
+  Schema.Struct({ _tag: Schema.Literal("WorkerError"), error: WireError }),
+])
 const fromWire = (error: typeof WireError.Type): AgentError => {
   switch (error._tag) {
     case "SetupError":
@@ -115,9 +121,15 @@ export const workerAgents = (worker: URL) =>
                 Stream.mapEffect((event) =>
                   Schema.decodeUnknownEffect(WireMessage)(event).pipe(Effect.mapError(protocolError))
                 ),
-                Stream.mapEffect((message) =>
-                  message._tag === "WorkerError" ? Effect.fail(fromWire(message.error)) : Effect.succeed(message)
-                ),
+                Stream.mapEffect((message) => {
+                  if (message._tag === "WorkerError") return Effect.fail(fromWire(message.error))
+                  if (message._tag === "WorkerSetupCompleted") {
+                    return (input.setupCompleted?.() ?? Effect.void).pipe(Effect.as(Option.none<AgentEvent>()))
+                  }
+                  return Effect.succeed(Option.some(message))
+                }),
+                Stream.filter(Option.isSome),
+                Stream.map((event) => event.value),
                 Stream.tap((event) => Ref.set(last, Option.some(event))),
                 Stream.takeUntil((event) => event._tag === "Completed" || event._tag === "Failed"),
                 Stream.concat(
@@ -144,6 +156,19 @@ export const serveWorker = (
       process.stdout.write(`${JSON.stringify(value)}\n`)
     })
   const main = Effect.gen(function*() {
+    // Reader closure must not kill the group leader before the owner stops its children.
+    const outputError = (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE") throw error
+    }
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        process.stdout.on("error", outputError)
+      }),
+      () =>
+        Effect.sync(() => {
+          process.stdout.off("error", outputError)
+        }),
+    )
     const first = yield* NodeStream.fromReadable({ evaluate: () => process.stdin, onError: protocolError })
       .pipe(Stream.decodeText(), Stream.splitLines, Stream.runHead)
     if (Option.isNone(first)) return
@@ -188,6 +213,7 @@ export const serveWorker = (
         ),
       )
     }
+    yield* send({ _tag: "WorkerSetupCompleted" })
     yield* Stream.runForEach(run(input, wire.agent), send)
     return yield* Effect.never
   }).pipe(
@@ -195,7 +221,9 @@ export const serveWorker = (
     Effect.catch((error) =>
       send({
         _tag: "WorkerError",
-        error: error._tag === "AgentSpawnError" ? { ...error, cause: String(error.cause) } : error,
+        error: error._tag === "AgentSpawnError"
+          ? { ...error, retryable: retryableSpawnError(error), cause: String(error.cause) }
+          : error,
       }).pipe(Effect.andThen(Effect.never))
     ),
     Effect.catchCause((cause) =>
