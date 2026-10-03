@@ -68,5 +68,13 @@ for (const scenario of ["retry", "timeout"]) {
     expect(Object.values(saved.savedStatus).map((s) => (s as { _tag: string })._tag)).toEqual(
       Array(3).fill(scenario === "retry" ? "succeeded" : "failed"),
     )
+    for (let n = 0; n < 3; n++) {
+      const starts = readFileSync(join(root, `starts-task${n}`), "utf8").trim().split("\n")
+      expect(starts).toHaveLength(scenario === "retry" ? 3 : 1)
+      if (scenario === "timeout") {
+        expect(saved.savedStatus[`task${n}`].reason).toMatch(/^AgentTimedOut:/)
+      }
+    }
+    if (scenario === "timeout") expect(output).toContain("alive")
   }, 35000)
 }

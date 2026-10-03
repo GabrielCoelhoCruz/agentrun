@@ -1303,7 +1303,8 @@ for (const crash of [false, true]) {
   test(
     `review hanging delivery Git preserves immutable recovery without provider replay (${crash ? "crash" : "timeout"})`,
     async () => {
-      const f = timedFixture("success", "20 seconds", "2 seconds")
+      // The deadline must reach publication after real Git and worker startup.
+      const f = timedFixture("success", "20 seconds", "10 seconds")
       hangingGit(f, "delivery")
       const c = child(f, ["run", "TASKS.md", "--json", "--keep-worktrees"])
       try {

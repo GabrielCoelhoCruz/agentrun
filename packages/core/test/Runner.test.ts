@@ -639,6 +639,7 @@ const limitedTask = (id = "first-task", stallMs = 1000, maxMs = 5000) =>
 
 it.effect("retries twice within exponential jitter bounds and records runner retry events", () => {
   let calls = 0
+  const starts: number[] = []
   const events: AgentEvent[] = []
   return Effect.gen(function*() {
     const runner = yield* Runner
@@ -648,19 +649,23 @@ it.effect("retries twice within exponential jitter bounds and records runner ret
     assert.strictEqual(calls, 1)
     yield* TestClock.adjust(401)
     assert.strictEqual(calls, 2)
-    yield* TestClock.adjust(1599)
+    // Earliest third attempt: 800ms for the first delay plus 1600ms for the second.
+    yield* TestClock.adjust(1199)
     assert.strictEqual(calls, 2)
-    yield* TestClock.adjust(801)
+    yield* TestClock.adjust(1201)
     const result = yield* Fiber.join(fiber)
     yield* Fiber.join(collector)
     assert.strictEqual(calls, 3)
+    assert.ok(starts[1]! - starts[0]! >= 800 && starts[1]! - starts[0]! <= 1200)
+    assert.ok(starts[2]! - starts[1]! >= 1600 && starts[2]! - starts[1]! <= 2400)
     assert.strictEqual(result.status[task().id]?._tag, "succeeded")
     assert.deepStrictEqual(events.filter((e) => e._tag === "Retry").map((e) => e.attempt), [2, 3])
   }).pipe(
     Effect.scoped,
     Effect.provide(deadlineLayer(
       fakeAgents(() =>
-        Stream.unwrap(Effect.sync(() => {
+        Stream.unwrap(Effect.gen(function*() {
+          starts.push(DateTime.toEpochMillis(yield* DateTime.now))
           calls++
           return calls < 3 ? Stream.fail(crashed) : success
         }))
