@@ -9,6 +9,7 @@ export class RunState extends Schema.Class<RunState>("agentrun/RunState")({
   base: Schema.String,
   baseSha: Schema.String,
   concurrency: Schema.Int,
+  setup: Schema.optional(Schema.String),
   tasks: Schema.Array(Task),
   status: Schema.Record(TaskId, TaskStatus),
   worktrees: Schema.Record(
