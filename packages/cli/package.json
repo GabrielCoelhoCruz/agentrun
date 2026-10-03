@@ -1,6 +1,6 @@
 {
   "name": "agentrun",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "engines": {
     "node": "24.x"
@@ -15,10 +15,11 @@
     "agentrun": "./dist/bin.mjs"
   },
   "files": [
-    "dist"
+    "dist",
+    "demo.gif"
   ],
   "scripts": {
-    "build": "tsdown src/index.ts src/bin.ts src/worker.ts --format esm --dts --sourcemap",
+    "build": "tsdown src/index.ts src/bin.ts src/worker.ts --format esm --dts",
     "build:test": "tsdown test/fixtures/entry.ts test/fixtures/fake-worker.ts --format esm --out-dir test/fixtures/dist"
   },
   "dependencies": {
@@ -28,5 +29,23 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.1"
-  }
+  },
+  "description": "Run Claude Code and Pi tasks in isolated Git worktrees",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GabrielCoelhoCruz/agentrun.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/GabrielCoelhoCruz/agentrun/issues"
+  },
+  "homepage": "https://github.com/GabrielCoelhoCruz/agentrun#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ]
 }

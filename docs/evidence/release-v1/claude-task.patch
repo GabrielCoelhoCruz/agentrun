@@ -1,0 +1,8 @@
+diff --git a/claude-result.txt b/claude-result.txt
+new file mode 100644
+index 0000000..5df230e
+--- /dev/null
++++ b/claude-result.txt
+@@ -0,0 +1 @@
++claude-ok
+\ No newline at end of file

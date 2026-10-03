@@ -1,6 +1,6 @@
 # Claude adapter verification
 
-Target: `~/Projects/agentrun`, branch `feat/claude-adapter`, HEAD `833d8aa06f963f9c47cedf5918f1d78065510a94`, with local changes.
+Target: `<checkout>`, branch `feat/claude-adapter`, HEAD `833d8aa06f963f9c47cedf5918f1d78065510a94`, with local changes.
 The package manifest and lockfile had changes before this task. This task preserved those changes.
 
 ## Order
@@ -14,15 +14,16 @@ The package manifest and lockfile had changes before this task. This task preser
 
 ## Commands
 
-Run these commands from the repository root. Node 24.21.0 is installed at the path below.
+Run these commands from the repository root. The original check used Node 24.21.0.
 The shell default used Node 22.23.2 for the first red test. The real runs and final checks use Node 24.
 The script imports the built core package, so build before running it on a fresh checkout.
 
 ```sh
-export PATH="~/.local/share/mise/installs/node/24/bin:$PATH"
+PRIVATE_DIR="$(mktemp -d)"
+node --version # requires Node 24
 pnpm build
-pnpm --dir packages/core exec node scripts/run-claude.ts 'Create a file named hello.txt containing the single word hello.' /tmp/agentrun-claude-evidence.LecA6F/success.raw.jsonl
-pnpm --dir packages/core exec node scripts/run-claude.ts 'Create ten files named f1.txt to f10.txt, each with its own name as content, one file per tool call.' /tmp/agentrun-claude-evidence.LecA6F/failed.raw.jsonl 1
+pnpm --dir packages/core exec node scripts/run-claude.ts 'Create a file named hello.txt containing the single word hello.' "$PRIVATE_DIR/success.raw.jsonl"
+pnpm --dir packages/core exec node scripts/run-claude.ts 'Create ten files named f1.txt to f10.txt, each with its own name as content, one file per tool call.' "$PRIVATE_DIR/failed.raw.jsonl" 1
 pnpm lint
 pnpm typecheck
 pnpm test
@@ -43,20 +44,17 @@ Both real commands exited with code 0. A `Failed` event is a task outcome, so th
 - Final lint, typecheck, test, build, and check each exited with code 0.
 - tsdown reports the existing TypeScript 7 experimental API warning. Build exits successfully.
 
-Fixtures contain 5 and 23 lines. Neither required shortening. Session IDs are preserved.
+Fixtures contain 5 and 23 lines. The current fixtures retain protocol records and omit irrelevant local metadata. Session and tool IDs are synthetic in the current fixtures.
 The temporary directory path and its `/private` alias were replaced with `<cwd>`.
-Literal `token` matches numeric accounting keys in assistant and result messages.
-To preserve the required messages while applying the literal filter, `usage`, `modelUsage`, and keys containing the restricted strings were removed before filtering lines.
-No remaining fixture line contains `api_key`, `token`, or `Bearer`. No whole line needed removal after this sanitization.
-Usage mapping is tested separately with fake messages.
+The current fixtures use synthetic session, message, and tool IDs. They retain small synthetic usage and cost values for protocol checks. Irrelevant local plugin, socket, and model metadata is removed. The original raw recordings remain private.
 
-Raw recordings are in the private temporary directory `/tmp/agentrun-claude-evidence.LecA6F`. The saved event output has normalized directory paths.
+Raw recordings are in the private temporary directory `<private-evidence>`. The saved event output has normalized directory paths.
 
 ## Resource ownership
 
 This task started SDK CLI runs only. It did not start an application server, database, or Compose project.
 Process inventory through `ps` was denied by the execution sandbox. Existing processes were not stopped.
-The script recorded its own process IDs: success `80917`, failure `82626`. Both commands exited.
+Both recorded script commands exited. Original process IDs remain private.
 The SDK query finalizer calls `abort()` before `close()`. The cancellation test verifies that order.
 Both scoped working directories were confirmed absent after their commands exited.
 The completed commands left no script process running. An independent SDK child PID check was not available in this sandbox.

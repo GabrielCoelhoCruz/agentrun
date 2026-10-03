@@ -1,0 +1,151 @@
+{
+  "agentrun-core-0.1.0.tgz": {
+    "sha256": "41a393513fb13a7d96fb239c32d8c751e948ac53880ec0e611f66e83a7a3dceb",
+    "files": [
+      {
+        "path": "package/LICENSE",
+        "size": 1069,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/package.json",
+        "size": 1130,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/index.d.mts.map",
+        "size": 3955,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/index.mjs.map",
+        "size": 186352,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/README.md",
+        "size": 2985,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/index.mjs",
+        "size": 91653,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/rolldown-runtime-8H4AJuhK.mjs",
+        "size": 382,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/index.d.mts",
+        "size": 29036,
+        "mode": "0o644"
+      }
+    ],
+    "name": "@agentrun/core",
+    "version": "0.1.0"
+  },
+  "agentrun-0.1.0.tgz": {
+    "sha256": "6fb11f2d1c38e17de70c657e6464ff4fdcc8cc314b8be6cc1b11c81271f4cdc9",
+    "files": [
+      {
+        "path": "package/LICENSE",
+        "size": 1069,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/demo.gif",
+        "size": 77433,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/package.json",
+        "size": 1185,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/bin.mjs.map",
+        "size": 677,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/index.d.mts.map",
+        "size": 656,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/output-BzgATL6y.mjs.map",
+        "size": 1442,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/src-Bvs9LjAJ.mjs.map",
+        "size": 32502,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/worker.mjs.map",
+        "size": 692,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/WorkerAgents-CfWvesPQ.mjs.map",
+        "size": 15683,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/README.md",
+        "size": 4975,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/bin.mjs",
+        "size": 518,
+        "mode": "0o755"
+      },
+      {
+        "path": "package/dist/index.mjs",
+        "size": 327,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/output-BzgATL6y.mjs",
+        "size": 767,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/src-Bvs9LjAJ.mjs",
+        "size": 16244,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/worker.mjs",
+        "size": 486,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/WorkerAgents-CfWvesPQ.mjs",
+        "size": 7906,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/bin.d.mts",
+        "size": 9,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/index.d.mts",
+        "size": 2718,
+        "mode": "0o644"
+      },
+      {
+        "path": "package/dist/worker.d.mts",
+        "size": 9,
+        "mode": "0o644"
+      }
+    ],
+    "name": "agentrun",
+    "version": "0.1.0"
+  }
+}

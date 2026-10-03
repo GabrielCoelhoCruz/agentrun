@@ -2,7 +2,7 @@
 
 Run Claude Code and Pi tasks in separate Git worktrees. Each successful task keeps a branch, a binary patch, and a report. The CLI runs each provider in its own worker process.
 
-![Deterministic terminal demo](docs/evidence/release-v1/demo.gif)
+![Deterministic terminal demo](demo.gif)
 
 The demo uses explicit test adapters. It does not call a paid provider.
 
@@ -73,4 +73,4 @@ Worktrees and tool restrictions are not a security sandbox. Do not run untrusted
 
 Exit codes: 0 for success, 1 for failed or unfinished tasks, 2 for configuration errors, and 130 for interruption.
 
-See the [core API](packages/core/README.md), [SPEC](SPEC.md), and [release evidence](docs/evidence/release-v1/README.md). MIT license.
+See the [core API](https://github.com/GabrielCoelhoCruz/agentrun/tree/main/packages/core), [SPEC](https://github.com/GabrielCoelhoCruz/agentrun/blob/main/SPEC.md), and [release evidence](https://github.com/GabrielCoelhoCruz/agentrun/tree/main/docs/evidence/release-v1). MIT license.

@@ -1,6 +1,6 @@
 {
   "name": "@agentrun/core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "engines": {
     "node": "24.x"
@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsdown src/index.ts --format esm --dts --sourcemap"
+    "build": "tsdown src/index.ts --format esm --dts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.288",
@@ -28,5 +28,23 @@
     "@effect/vitest": "^4.0.0",
     "@types/node": "^24.19.1",
     "vitest": "^5.0.3"
-  }
+  },
+  "description": "Local code agent orchestration with isolated Git worktrees",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GabrielCoelhoCruz/agentrun.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/GabrielCoelhoCruz/agentrun/issues"
+  },
+  "homepage": "https://github.com/GabrielCoelhoCruz/agentrun#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ]
 }
