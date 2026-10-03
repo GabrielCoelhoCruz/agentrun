@@ -230,6 +230,17 @@ describe("Claude Code adapter", () => {
       assert.notStrictEqual(first.abortController, second.abortController)
     }))
 
+  it.effect("loads project and local settings only on explicit opt-in", () =>
+    Effect.gen(function*() {
+      const adapter = make({
+        query: fakeQuery((params) => {
+          assert.deepStrictEqual(params.options?.settingSources, ["project", "local"])
+          return messages([init, success])
+        }),
+      })
+      yield* Effect.scoped(Stream.runDrain(adapter.run({ ...input, loadProjectSettings: true })))
+    }))
+
   it.effect("types a throw from query as AgentSpawnError", () =>
     Effect.gen(function*() {
       const cause = new Error("spawn failed")

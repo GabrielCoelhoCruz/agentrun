@@ -18,7 +18,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsdown src/index.ts src/bin.ts --format esm --dts --sourcemap"
+    "build": "tsdown src/index.ts src/bin.ts src/worker.ts --format esm --dts --sourcemap",
+    "build:test": "tsdown test/fixtures/entry.ts test/fixtures/fake-worker.ts --format esm --out-dir test/fixtures/dist"
   },
   "dependencies": {
     "@agentrun/core": "workspace:*",
