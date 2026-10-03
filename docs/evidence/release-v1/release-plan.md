@@ -2,7 +2,7 @@
 
 Both names remain candidates: `@agentrun/core` and `agentrun`. npm is not authenticated here. A registry 404 does not establish permission to publish. Confirm the intended npm account, control of the `agentrun` organization, and availability of the unscoped name. If a name must change, update metadata and repeat packing and installed checks before release.
 
-1. Review the uncommitted candidate and its private report.
+1. Review the candidate and its private report.
 2. Commit the reviewed changes without attribution trailers.
 3. Push the draft release PR and verify Linux checks on its exact commit.
 4. Confirm npm ownership and the final publication decision.
