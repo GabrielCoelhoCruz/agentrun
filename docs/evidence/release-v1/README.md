@@ -2,7 +2,7 @@
 
 Candidate packages: `@agentrun/core` and `agentrun`, both version 0.1.0. They are not published. npm authentication and ownership of the names remain unverified. Registry queries returned 404 for both names; this does not prove ownership.
 
-The target is branch `chore/release-preparation`, starting HEAD `fbe3f43bcab644f084de381d71454629de20bb86`, plus uncommitted edits. [candidate.json](candidate.json) records the source hashes. It separates the checked source, the paid-run source, and later documentation changes. The parent must bind this candidate to the release commit and verify Linux CI.
+Verified implementation commit: `06ebdf9b9bea8f48f2da53226fce4c42dfaf00d7`, on branch `chore/release-preparation`. [candidate.json](candidate.json) records the source hashes before that commit. It separates the checked source, the paid-run source, and later documentation changes. Linux CI must verify the committed candidate.
 
 ## Checks and installed packages
 
@@ -83,4 +83,4 @@ Current Claude fixtures and older event evidence use synthetic IDs. Local plugin
 
 The prior task stopped due to model capacity. Work resumed from its saved edits and completed checks. Consumer harness failures were retained: the first version assertion expected the wrong display format; later resume used a different or noncanonical fixture home. Corrected isolated E2E passed. An initial strict declaration check exposed Pi dependency errors; both supported project options and bundler resolution passed. A panel renderer initially lost carriage returns; the corrected capture preserves them. The public harness initially used a missing evidence directory; its documented fresh-directory command passed.
 
-No publication, authentication change, commit, push, PR action, or merge occurred. No task-owned runtime remains active. Shared containers and volumes were preserved. See [release-plan.md](release-plan.md) for the parent's remaining steps.
+The preparation task made no publication, authentication change, commit, push, PR action, or merge. No task-owned runtime remains active. Shared containers and volumes were preserved. See [release-plan.md](release-plan.md) for the parent's remaining steps.
