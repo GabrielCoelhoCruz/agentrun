@@ -73,6 +73,10 @@ export class RunLocked extends Schema.TaggedError<RunLocked>()("RunLocked", {
   pid: Schema.Int,
 }) {}
 
+export class RunNotFound extends Schema.TaggedError<RunNotFound>()("RunNotFound", {
+  runId: Schema.String,
+}) {}
+
 export type TaskError =
   | GitError
   | SetupError
