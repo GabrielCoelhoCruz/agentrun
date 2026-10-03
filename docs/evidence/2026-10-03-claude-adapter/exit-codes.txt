@@ -1,0 +1,8 @@
+red pnpm test: exit 1
+success real run: exit 0
+failed real run: exit 0
+pnpm lint: exit 0
+pnpm typecheck: exit 0
+pnpm test: exit 0
+pnpm build: exit 0
+pnpm check: exit 0
