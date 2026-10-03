@@ -280,7 +280,9 @@ describe("Claude Code adapter", () => {
       })
       const error = yield* Effect.flip(Effect.scoped(Stream.runCollect(adapter.run(input))))
       assert.strictEqual(error._tag, "AgentCrashed")
-      if (error._tag === "AgentCrashed") assert.deepStrictEqual(error.lastEvent, Option.some({ _tag: "Started", sessionId: "session-test" }))
+      if (error._tag === "AgentCrashed") {
+        assert.deepStrictEqual(error.lastEvent, Option.some({ _tag: "Started", sessionId: "session-test" }))
+      }
     }))
 
   it.effect("stops after the first terminal event", () =>

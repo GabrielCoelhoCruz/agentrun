@@ -161,8 +161,10 @@ export const make = (deps: { readonly query: typeof query }): AgentAdapter => {
         }),
     )
     const last = yield* Ref.make(Option.none<AgentEvent>())
-    const crashed = Effect.flatMap(Ref.get(last), (lastEvent) =>
-      Effect.fail(new AgentCrashed({ agent: "claude-code", exitCode: -1, lastEvent })))
+    const crashed = Effect.flatMap(
+      Ref.get(last),
+      (lastEvent) => Effect.fail(new AgentCrashed({ agent: "claude-code", exitCode: -1, lastEvent })),
+    )
     const isTerminal = (event: AgentEvent) => event._tag === "Completed" || event._tag === "Failed"
     return Stream.fromAsyncIterable(handle, identity).pipe(
       Stream.catch(() => Stream.fromEffect(crashed)),
@@ -170,9 +172,13 @@ export const make = (deps: { readonly query: typeof query }): AgentAdapter => {
       Stream.flattenIterable,
       Stream.tap((event) => Ref.set(last, Option.some(event))),
       Stream.takeUntil(isTerminal),
-      Stream.concat(Stream.fromEffect(Ref.get(last)).pipe(
-        Stream.flatMap((lastEvent) => Option.exists(lastEvent, isTerminal) ? Stream.empty : Stream.fromEffect(crashed)),
-      )),
+      Stream.concat(
+        Stream.fromEffect(Ref.get(last)).pipe(
+          Stream.flatMap((lastEvent) =>
+            Option.exists(lastEvent, isTerminal) ? Stream.empty : Stream.fromEffect(crashed)
+          ),
+        ),
+      ),
     )
   })
   return {
