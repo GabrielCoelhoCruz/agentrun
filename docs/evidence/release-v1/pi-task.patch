@@ -1,0 +1,8 @@
+diff --git a/pi-result.txt b/pi-result.txt
+new file mode 100644
+index 0000000..37aa164
+--- /dev/null
++++ b/pi-result.txt
+@@ -0,0 +1 @@
++pi-ok
+\ No newline at end of file

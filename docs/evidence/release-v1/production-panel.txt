@@ -1,0 +1,7 @@
+agentrun: finished | 2/2 succeeded
+claude-task [succeeded] Claude file
+  done
+  Saved branch agentrun/claude-task-demo
+pi-task [succeeded] Pi file
+  done
+  Saved branch agentrun/pi-task-demo

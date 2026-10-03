@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "runId": "release-demo",
+  "repoRoot": "<repo>",
+  "base": "main",
+  "baseSha": "0000000000000000000000000000000000000000",
+  "concurrency": 1,
+  "tasks": [
+    {
+      "id": "claude-task",
+      "title": "Claude file",
+      "prompt": "[omitted after privacy review]",
+      "agent": "claude-code",
+      "maxTurns": 3,
+      "maxBudgetUsd": 0.25,
+      "stallTimeout": {
+        "_tag": "Millis",
+        "value": 300000
+      },
+      "maxDuration": {
+        "_tag": "Millis",
+        "value": 3600000
+      }
+    },
+    {
+      "id": "pi-task",
+      "title": "Pi file",
+      "prompt": "[omitted after privacy review]",
+      "agent": "pi",
+      "model": "openai/gpt-6-astra",
+      "stallTimeout": {
+        "_tag": "Millis",
+        "value": 300000
+      },
+      "maxDuration": {
+        "_tag": "Millis",
+        "value": 3600000
+      }
+    }
+  ],
+  "status": {
+    "claude-task": {
+      "_tag": "succeeded",
+      "durationMs": 4577,
+      "costUsd": 0.0879164
+    },
+    "pi-task": {
+      "_tag": "succeeded",
+      "durationMs": 10330,
+      "costUsd": 0.019998000000000002
+    }
+  },
+  "taskReports": {
+    "claude-task": {
+      "phase": "delivered",
+      "durationMs": 4577,
+      "costUsd": 0.0879164,
+      "result": "done",
+      "deliveryCommit": "1111111111111111111111111111111111111111",
+      "patchSha256": "9402ec7eb687c3b71bbd4763a570be8722cc0edcdb09d33f56d0c7407506fafe",
+      "diffStat": {
+        "files": 1,
+        "additions": 1,
+        "deletions": 0
+      }
+    },
+    "pi-task": {
+      "phase": "delivered",
+      "durationMs": 10330,
+      "costUsd": 0.019998000000000002,
+      "result": "done",
+      "deliveryCommit": "2222222222222222222222222222222222222222",
+      "patchSha256": "1876174c2fc7c0a47b5a158f74b066f84ab35820c84ef7751497e189bdac07c2",
+      "diffStat": {
+        "files": 1,
+        "additions": 1,
+        "deletions": 0
+      }
+    }
+  },
+  "worktrees": {
+    "claude-task": {
+      "path": "<worktree>/claude-task",
+      "branch": "agentrun/claude-task-demo"
+    },
+    "pi-task": {
+      "path": "<worktree>/pi-task",
+      "branch": "agentrun/pi-task-demo"
+    }
+  }
+}
