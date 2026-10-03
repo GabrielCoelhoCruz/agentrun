@@ -87,6 +87,15 @@ export type TaskError =
   | AgentStalled
   | AgentTimedOut
 
-export type RunnerError = RunLocked | StateCorrupted | GitError | PlatformError
+export class ReportError extends Schema.TaggedError<ReportError>()("ReportError", {
+  path: Schema.String,
+  issue: Schema.String,
+}) {
+  override get message(): string {
+    return `${this.path}: ${this.issue}`
+  }
+}
+
+export type RunnerError = RunLocked | StateCorrupted | GitError | PlatformError | ReportError
 
 export type AgentError = AgentSpawnError | AgentCrashed | AgentProtocolError | SetupError

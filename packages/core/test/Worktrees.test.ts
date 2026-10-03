@@ -192,7 +192,7 @@ describe("Worktrees", () => {
         const worktree = yield* service.acquire(task(), fixture.baseSha)
         yield* edit(fixture, worktree)
         yield* service.commit(worktree, "Save deliverable")
-        const diff = yield* service.diff(worktree, fixture.baseSha)
+        const diff = Buffer.from(yield* service.diff(worktree, fixture.baseSha)).toString("utf8")
         assert.ok(diff.includes("+new content"))
         assert.ok(diff.includes("+tracked edit"))
         assert.ok(diff.includes("diff --git a/new.txt b/new.txt"))

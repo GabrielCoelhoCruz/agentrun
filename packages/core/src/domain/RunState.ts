@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { Task, TaskId } from "./Task.js"
+import { TaskReport } from "./TaskReport.js"
 import { TaskStatus } from "./TaskStatus.js"
 
 export class RunState extends Schema.Class<RunState>("agentrun/RunState")({
@@ -12,6 +13,7 @@ export class RunState extends Schema.Class<RunState>("agentrun/RunState")({
   setup: Schema.optional(Schema.String),
   tasks: Schema.Array(Task),
   status: Schema.Record(TaskId, TaskStatus),
+  taskReports: Schema.optional(Schema.Record(TaskId, TaskReport)),
   worktrees: Schema.Record(
     TaskId,
     Schema.Struct({

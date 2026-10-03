@@ -1,6 +1,17 @@
 // Opt-in real core integration. Output contains private SDK records and must stay outside git.
 // Run after build: node packages/core/scripts/run-providers.ts <private-output-directory>
-import { Agents, ClaudeCode, Pi, RunLock, Runner, RunState, StateStore, TaskFile, Worktrees } from "@agentrun/core"
+import {
+  Agents,
+  ClaudeCode,
+  Pi,
+  Report,
+  RunLock,
+  Runner,
+  RunState,
+  StateStore,
+  TaskFile,
+  Worktrees,
+} from "@agentrun/core"
 import { createAgentSession } from "@earendil-works/pi-coding-agent"
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Effect, FileSystem, Layer, Option, Path, Stream } from "effect"
@@ -94,6 +105,7 @@ const program = Effect.gen(function*() {
     worktrees: {},
   })
   const dependencies = Layer.mergeAll(
+    Report.layer,
     agents,
     Worktrees.layer({ repoRoot, home, runId }),
     RunLock.layer({ home }),

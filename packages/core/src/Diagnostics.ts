@@ -1,7 +1,7 @@
 import { getAgentDir, ModelRuntime, VERSION } from "@earendil-works/pi-coding-agent"
 import { Effect, Schema } from "effect"
 import { execFile } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { dirname, join } from "node:path"
 import { promisify } from "node:util"
@@ -18,15 +18,34 @@ export const diagnostics = Effect.fn("diagnostics")(function*(cwd: string) {
   const git = yield* Effect.tryPromise(() => exec("git", ["--version"], { cwd, timeout: 5000 })).pipe(Effect.result)
   const repo = yield* Effect.tryPromise(() => exec("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 5000 }))
     .pipe(Effect.result)
-  const auth = yield* Effect.tryPromise(() =>
-    exec(process.execPath, [join(claudePath, "cli.js"), "auth", "status", "--json"], {
-      cwd,
-      timeout: 10000,
-      maxBuffer: 65536,
-    })
-  ).pipe(
-    Effect.flatMap((result) =>
-      Effect.try(() => Schema.decodeUnknownSync(Schema.Struct({ loggedIn: Schema.Boolean }))(JSON.parse(result.stdout)))
+  const auth = yield* Effect.tryPromise(async () => {
+    const legacy = join(claudePath, "cli.js")
+    const js = existsSync(legacy)
+    const systemReport = process.report.getReport()
+    const glibc = "header" in systemReport && typeof systemReport.header === "object" && systemReport.header !== null
+      && "glibcVersionRuntime" in systemReport.header
+    const suffix = process.platform === "linux" && !glibc ? "-musl" : ""
+    const executable = js ? process.execPath : require.resolve(
+      `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}${suffix}/claude`,
+      { paths: [claudePath] },
+    )
+    try {
+      return (await exec(executable, [...(js ? [legacy] : []), "auth", "status", "--json"], {
+        cwd,
+        timeout: 10000,
+        maxBuffer: 65536,
+      })).stdout
+    } catch (error) {
+      // The native CLI returns valid loggedIn:false JSON with exit 1.
+      if (
+        error instanceof Error && "code" in error && error.code === 1 && "stdout" in error
+        && typeof error.stdout === "string"
+      ) return error.stdout
+      throw error
+    }
+  }).pipe(
+    Effect.flatMap((stdout) =>
+      Effect.try(() => Schema.decodeUnknownSync(Schema.Struct({ loggedIn: Schema.Boolean }))(JSON.parse(stdout)))
     ),
     Effect.result,
   )
