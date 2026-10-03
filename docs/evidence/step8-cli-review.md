@@ -1,7 +1,8 @@
 # Step 8 CLI review evidence
 
-The candidate uses Node 24 and macOS kernel locks. The source is uncommitted.
-The parent will record the final commit after review.
+Tested branch: `feat/cli`. Implementation commit: `fade0df2d85c14832522295045553b4752ac71ab`.
+Base commit: `b1091f06e565513a52cdd12799dda9739d002d7f`.
+The local tests used Node 24 and macOS kernel locks.
 
 ## Tested stack
 
