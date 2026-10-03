@@ -1,5 +1,4 @@
 import { Agents, diagnostics, RunLock, Runner, RunState, StateStore, TaskFile, Worktrees } from "@agentrun/core"
-import type { RunEvent } from "@agentrun/core"
 import { Clock, Console, Effect, Exit, Fiber, FileSystem, Layer, Logger, Option, Schema, Stream } from "effect"
 import type { Runtime } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
@@ -8,6 +7,8 @@ import { randomBytes } from "node:crypto"
 import { homedir } from "node:os"
 import { promisify } from "node:util"
 import packageJson from "../package.json" with { type: "json" }
+import { diagnostic, restoreTerminal, safeText } from "./ui/output.js"
+import { panelScoped, progress } from "./ui/Panel.js"
 
 export const version = packageJson.version
 const exec = promisify(execFile)
@@ -27,28 +28,12 @@ const write = (value: unknown, json: boolean) =>
     try: () =>
       new Promise<void>((resolve, reject) =>
         process.stdout.write(
-          `${json ? JSON.stringify(value) : typeof value === "string" ? value : JSON.stringify(value)}\n`,
+          `${json ? JSON.stringify(value) : typeof value === "string" ? safeText(value) : JSON.stringify(value)}\n`,
           (error) => error ? reject(error) : resolve(),
         )
       ),
     catch: failed,
   })
-const progress = (event: RunEvent): string => {
-  switch (event._tag) {
-    case "TaskTransition":
-      return `Task ${event.taskId}: ${event.status._tag}`
-    case "RunFinished":
-      return `Run ${event.runId}: finished`
-    case "TaskDeliverable":
-      return `Task ${event.taskId}: saved branch ${event.branch}`
-    case "TaskWarning":
-      return `Task ${event.taskId}: ${event.message}`
-    case "TaskAgentEvent": {
-      const detail = event.event
-      return `Task ${event.taskId}: ${detail._tag === "Text" ? detail.text : detail._tag}`
-    }
-  }
-}
 const common = {
   concurrency: Flag.Int("concurrency").pipe(Flag.withSchema(Schema.Int.check(Schema.isGreaterThan(0))), Flag.optional),
   keepWorktrees: Flag.Boolean("keep-worktrees").pipe(Flag.withDefault(false)),
@@ -73,10 +58,10 @@ export const execute = Effect.fn("cli.execute")(
     const fs = yield* FileSystem.FileSystem
     const ignore = yield* fs.readFileString(`${state.repoRoot}/.gitignore`).pipe(Effect.catch(() => Effect.succeed("")))
     if (!ignore.split(/\r?\n/).some((line) => line === ".agentrun/" || line === ".agentrun")) {
-      process.stderr.write("Suggestion: add .agentrun/ to .gitignore.\n")
+      diagnostic("Suggestion: add .agentrun/ to .gitignore.\n")
     }
     if (options.loadProjectSettings) {
-      process.stderr.write("Warning: project settings can enable hooks and project configuration.\n")
+      diagnostic("Warning: project settings can enable hooks and project configuration.\n")
     }
     const run = Effect.gen(function*() {
       const lock = yield* RunLock
@@ -96,14 +81,19 @@ export const execute = Effect.fn("cli.execute")(
         }),
       )
       const program = Effect.gen(function*() {
+        const panel = !options.json && process.stdout.isTTY ? yield* panelScoped(candidate) : undefined
         const runner = yield* Runner
         const events = yield* runner.subscribe
         const consumer = yield* Stream.runForEach(
           events.pipe(Stream.takeUntil((event) => event._tag === "RunFinished")),
           (event) =>
-            event._tag === "TaskWarning"
+            panel !== undefined
               ? Effect.sync(() => {
-                process.stderr.write(`${event.message}\n`)
+                panel.event(event)
+              })
+              : event._tag === "TaskWarning"
+              ? Effect.sync(() => {
+                diagnostic(`${event.message}\n`)
               })
               : write(options.json ? event : progress(event), options.json),
         ).pipe(Effect.forkScoped)
@@ -234,9 +224,14 @@ export const command = Command.make("agentrun").pipe(Command.withSubcommands([
 
 const cliConsole = {
   ...console,
+  error: (...args: ReadonlyArray<unknown>) => diagnostic(`${args.map(String).join(" ")}\n`),
+  warn: (...args: ReadonlyArray<unknown>) => diagnostic(`${args.map(String).join(" ")}\n`),
+  info: (...args: ReadonlyArray<unknown>) => diagnostic(`${args.map(String).join(" ")}\n`),
+  debug: (...args: ReadonlyArray<unknown>) => diagnostic(`${args.map(String).join(" ")}\n`),
   log: (...args: ReadonlyArray<unknown>) => {
     const explicitHelp = process.argv.some((arg) => ["--help", "-h", "--version", "-v", "--completions"].includes(arg))
-    ;(explicitHelp ? process.stdout : process.stderr).write(`${args.map(String).join(" ")}\n`)
+    if (explicitHelp) process.stdout.write(`${args.map(String).join(" ")}\n`)
+    else diagnostic(`${args.map(String).join(" ")}\n`)
   },
 }
 export const forceExitOnSecondInterrupt = Effect.acquireRelease(
@@ -245,6 +240,7 @@ export const forceExitOnSecondInterrupt = Effect.acquireRelease(
     const onInterrupt = () => {
       const now = performance.now()
       if (first !== undefined && now - first <= 3000) {
+        restoreTerminal()
         process.stderr.write("Warning: forced exit. Resume this run to finish cleanup.\n", () => process.exit(130))
       } else first = now
     }
@@ -263,11 +259,11 @@ export const main = Command.run(command, { version, renderErrors: true }).pipe(
     Effect.sync(() => {
       const code = error instanceof CliFailure ? error.code : 2
       process.exitCode = code
-      process.stderr.write(`${error instanceof CliFailure ? error.message : String(error)}\n`)
+      diagnostic(`${error instanceof CliFailure ? error.message : String(error)}\n`)
     })
   ),
   Effect.provide(Logger.layer([Logger.make(({ message }) => {
-    process.stderr.write(`${String(message)}\n`)
+    diagnostic(`${String(message)}\n`)
   })])),
 )
 export const teardown: Runtime.Teardown = (exit, onExit) => {
