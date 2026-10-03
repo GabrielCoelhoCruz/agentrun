@@ -45,6 +45,9 @@ const git = (cwd: string, args: string[]) => {
 type Fixture = ReturnType<typeof fixture>
 const child = (f: Fixture, args: string[], shipped = false) => {
   const env = { ...process.env, HOME: f.home, TEST_RECORDS: f.root, PATH: `${join(f.root, "bin")}:${process.env.PATH}` }
+  if (existsSync(join(f.root, "crash.cjs"))) {
+    Object.assign(env, { NODE_OPTIONS: `--require=${join(f.root, "crash.cjs")}` })
+  }
   if (args[0] === "doctor") {
     for (const key of Object.keys(env)) {
       if (/(API_KEY|TOKEN|SECRET|CREDENTIAL|AUTH)/i.test(key)) Reflect.deleteProperty(env, key)
@@ -232,6 +235,7 @@ test("doctor exposes SDK versions and honest auth outcomes without prompt", asyn
   expect(report.lock.ok).toBe(true)
   expect(report.runtime.version).toContain("v24.")
   expect(report.providers).toHaveLength(2)
+  expect(report.providers[0].auth.status).toBe("missing")
   for (const provider of report.providers) {
     expect(provider.version.length).toBeGreaterThan(0)
     expect(["available", "missing", "unknown"]).toContain(provider.auth.status)
@@ -554,4 +558,419 @@ test("doctor injected diagnostics fail for runtime, lock and auth and succeed wh
       JSON.stringify({ command: [entry, scenario], code: result.status, stdout: result.stdout, stderr: result.stderr }),
     )
   }
+}, 30000)
+
+const artifacts = (f: Fixture) => join(f.repo, ".agentrun/runs", state(f).runId)
+const reportJson = (f: Fixture) => JSON.parse(readFileSync(join(artifacts(f), "report.json"), "utf8"))
+test("durable report includes edits, new files, final text, events and reprints through shipped CLI", async () => {
+  const f = fixture(1, "report-edit")
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+  const dir = artifacts(f)
+  const patch = readFileSync(join(dir, "tasks/task0/diff.patch"), "utf8")
+  expect(patch).toContain("+edited")
+  expect(patch).toContain("+task0")
+  const events = readFileSync(join(dir, "tasks/task0/events.jsonl"), "utf8").trim().split("\n").map((line) =>
+    JSON.parse(line)
+  )
+  expect(events.map((e) => e._tag)).toEqual(["Started", "Completed"])
+  const report = reportJson(f)
+  expect(report.taskReports.task0.result).toBe("done | <script> & **bold**\n# title")
+  expect(report.taskReports.task0.diffStat).toEqual({ files: 2, additions: 2, deletions: 1 })
+  expect(report.taskReports.task0.durationMs).toBeGreaterThan(0)
+  expect(JSON.stringify(report)).not.toContain("processToken")
+  const md = readFileSync(join(dir, "report.md"), "utf8")
+  expect(md).toContain("&lt;script&gt;")
+  expect(md).toContain("\\*\\*bold\\*\\*")
+  const printed = child(f, ["report", "--json"], true)
+  expect(await printed.done).toBe(0)
+  expect(JSON.parse(printed.stdout())).toEqual(report)
+  const markdown = child(f, ["report", state(f).runId], true)
+  expect(await markdown.done).toBe(0)
+  expect(markdown.stdout().trim()).toBe(md.trim())
+  const before = readFileSync(join(dir, "tasks/task0/events.jsonl"), "utf8")
+  expect(await child(f, ["resume", "--json"]).done).toBe(0)
+  expect(readFileSync(join(dir, "tasks/task0/events.jsonl"), "utf8")).toBe(before)
+  expect(reportJson(f).taskReports.task0).toEqual(report.taskReports.task0)
+}, 30000)
+
+test("no-change success saves an empty patch and reports unsupported cost as n/a", async () => {
+  const f = fixture(1, "report-nochange")
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+  expect(readFileSync(join(artifacts(f), "tasks/task0/diff.patch"), "utf8")).toBe("")
+  expect(reportJson(f).taskReports.task0.diffStat.files).toBe(0)
+  expect(reportJson(f).taskReports.task0.patchSha256).toBe(createHash("sha256").update("").digest("hex"))
+  expect(await child(f, ["report", "--json"], true).done).toBe(0)
+  expect(readFileSync(join(artifacts(f), "report.md"), "utf8")).toContain("n/a")
+}, 30000)
+
+test("failed reports retain reason and append events on explicit retry", async () => {
+  const f = fixture(1, "fail")
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(1)
+  expect(reportJson(f).status.task0.reason).toContain("injected failure")
+  const events = join(artifacts(f), "tasks/task0/events.jsonl")
+  const before = readFileSync(events, "utf8")
+  expect(await child(f, ["resume", "--retry-failed", "--json"]).done).toBe(1)
+  expect(readFileSync(events, "utf8")).toBe(before + before)
+}, 30000)
+
+test("interrupted report has duration and no success claim", async () => {
+  const f = fixture(1, "hold")
+  const c = child(f, ["run", "TASKS.md", "--json"])
+  await wait(() => existsSync(join(f.root, "child-task0")))
+  c.p.kill("SIGINT")
+  expect(await c.done).toBe(130)
+  expect(reportJson(f).status.task0._tag).toBe("interrupted")
+  expect(reportJson(f).taskReports.task0.durationMs).toBeGreaterThan(0)
+}, 30000)
+
+test("missing and corrupt report return typed errors without provider calls", async () => {
+  const f = fixture(1)
+  expect(await child(f, ["report", "missing", "--json"], true).done).toBe(2)
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+  writeFileSync(join(artifacts(f), "report.json"), "{broken")
+  const c = child(f, ["report", "--json"], true)
+  expect(await c.done).toBe(2)
+  expect(c.stderr()).toContain("ReportError")
+  expect(c.stderr()).toContain("report.json")
+  expect(readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n")).toHaveLength(1)
+}, 30000)
+
+test("artifact write failure exits without success; resume completes checkpoint without provider replay", async () => {
+  const f = fixture(1, "report-block")
+  const c = child(f, ["run", "TASKS.md", "--json"])
+  await wait(() => existsSync(join(f.root, "report-ready")))
+  const dir = artifacts(f)
+  mkdirSync(join(dir, "tasks/task0/diff.patch"), { recursive: true })
+  writeFileSync(join(f.root, "report-go"), "go")
+  expect(await c.done).toBe(1)
+  expect(c.stderr()).toContain("ReportError")
+  expect(state(f).status.task0?._tag).not.toBe("succeeded")
+  // Only remove the test-owned obstruction, retaining task data and branch.
+  const { rmdirSync } = await import("node:fs")
+  rmdirSync(join(dir, "tasks/task0/diff.patch"))
+  expect(await child(f, ["resume", "--json"]).done).toBe(0)
+  expect(reportJson(f).status.task0._tag).toBe("succeeded")
+  expect(readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n")).toHaveLength(1)
+}, 30000)
+
+test("legacy success recovers branch patch without replay and states unavailable text", async () => {
+  const f = fixture(1)
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+  const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
+  delete saved.taskReports
+  writeFileSync(statePath(f), JSON.stringify(saved))
+  expect(await child(f, ["resume", "--json"]).done).toBe(0)
+  expect(readFileSync(join(artifacts(f), "tasks/task0/diff.patch"), "utf8")).toContain("+task0")
+  expect(readFileSync(join(artifacts(f), "report.md"), "utf8")).toContain("unavailable")
+  expect(readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n")).toHaveLength(1)
+}, 30000)
+
+for (const window of ["commit", "artifacts"]) {
+  test(`resume reconciles crash after ${window} without another provider call`, async () => {
+    const f = fixture(1)
+    if (window === "commit") {
+      mkdirSync(join(f.root, "bin"))
+      const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
+      writeFileSync(
+        join(f.root, "bin/git"),
+        `#!${process.execPath}\n`
+          + `const {spawnSync}=require('node:child_process'); const fs=require('node:fs');\n`
+          + `const r=spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:'inherit'});\n`
+          + `if(process.argv.includes('update-ref') && !fs.existsSync(${
+            JSON.stringify(join(f.root, "crashed"))
+          })){fs.writeFileSync(${
+            JSON.stringify(join(f.root, "crashed"))
+          },'committed');process.kill(process.ppid,'SIGKILL')}\nprocess.exit(r.status ?? 1)\n`,
+        { mode: 0o700 },
+      )
+      expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(null)
+      expect(state(f).status.task0?._tag).toBe("running")
+    } else {
+      expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+      // Restore the state checkpoint saved immediately before the terminal transition.
+      const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
+      saved.status.task0 = { _tag: "running", attempt: 1, startedAt: new Date().toISOString() }
+      writeFileSync(statePath(f), JSON.stringify(saved))
+    }
+    const before = readFileSync(join(artifacts(f), "tasks/task0/events.jsonl"), "utf8")
+    expect(await child(f, ["resume", "--json"]).done).toBe(0)
+    expect(readFileSync(join(artifacts(f), "tasks/task0/events.jsonl"), "utf8")).toBe(before)
+    expect(readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n")).toHaveLength(1)
+    expect(reportJson(f).taskReports.task0.result).toBe("done")
+    expect(reportJson(f).status.task0._tag).toBe("succeeded")
+    expect(existsSync(state(f).worktrees.task0!.path)).toBe(false)
+  }, 30000)
+}
+
+test("Completed append failure retains final event for recovery without a provider replay", async () => {
+  const f = fixture(1, "report-block")
+  const c = child(f, ["run", "TASKS.md", "--json"])
+  await wait(() => existsSync(join(f.root, "report-ready")))
+  const target = join(artifacts(f), "tasks/task0/events.jsonl")
+  const { renameSync, rmdirSync } = await import("node:fs")
+  renameSync(target, `${target}.retained`)
+  mkdirSync(target)
+  writeFileSync(join(f.root, "report-go"), "go")
+  expect(await c.done).toBe(1)
+  expect(c.stderr()).toContain("ReportError")
+  rmdirSync(target)
+  renameSync(`${target}.retained`, target)
+  expect(await child(f, ["resume", "--json"]).done).toBe(0)
+  expect(readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n")).toHaveLength(1)
+  expect(readFileSync(target, "utf8").trim().split("\n").map((line) => JSON.parse(line)._tag)).toEqual([
+    "Started",
+    "Completed",
+  ])
+}, 30000)
+
+test("report replacement failure leaves a durable completion and exits without hanging", async () => {
+  const f = fixture(1, "report-block")
+  const c = child(f, ["run", "TASKS.md", "--json"])
+  await wait(() => existsSync(join(f.root, "report-ready")))
+  const target = join(artifacts(f), "report.json")
+  const { renameSync, rmdirSync } = await import("node:fs")
+  renameSync(target, `${target}.retained`)
+  mkdirSync(target)
+  writeFileSync(join(f.root, "report-go"), "go")
+  expect(await c.done).toBe(1)
+  expect(c.stderr()).toContain("ReportError")
+  expect(state(f).status.task0?._tag).toBe("running")
+  expect(git(f.repo, ["show", `${state(f).worktrees.task0!.branch}:deliverable`])).toBe("task0")
+  rmdirSync(target)
+  renameSync(`${target}.retained`, target)
+  const resumed = child(f, ["resume", "--json"])
+  expect(await resumed.done).toBe(0)
+  expect(resumed.stdout()).not.toContain("TaskDeliverable")
+  expect(readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n")).toHaveLength(1)
+  expect(reportJson(f).status.task0._tag).toBe("succeeded")
+}, 30000)
+
+test("diff statistics count content that resembles patch headers", async () => {
+  const f = fixture(1, "report-edit-header")
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+  expect(reportJson(f).taskReports.task0.diffStat).toEqual({ files: 2, additions: 3, deletions: 1 })
+}, 30000)
+
+const starts = (f: Fixture) => readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n").length
+const advanceBranch = (f: Fixture) => {
+  const branch = state(f).worktrees.task0!.branch
+  git(f.repo, ["checkout", branch])
+  writeFileSync(join(f.repo, "later-user-file"), "later user change\n")
+  git(f.repo, ["add", "later-user-file"])
+  git(f.repo, ["-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-qm", "User change"])
+}
+for (const window of ["succeeded", "delivered", "missing"]) {
+  test(`delivered bytes remain original after branch advance (${window})`, async () => {
+    const f = fixture(1, "report-edit")
+    expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+    const target = join(artifacts(f), "tasks/task0/diff.patch")
+    const before = readFileSync(target)
+    const metadata = reportJson(f).taskReports.task0
+    if (window === "delivered") {
+      const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
+      saved.status.task0 = { _tag: "running", attempt: 1, startedAt: new Date().toISOString() }
+      writeFileSync(statePath(f), JSON.stringify(saved))
+    }
+    advanceBranch(f)
+    if (window === "missing") (await import("node:fs")).unlinkSync(target)
+    expect(await child(f, ["resume", "--json"]).done).toBe(0)
+    expect(readFileSync(target)).toEqual(before)
+    expect(reportJson(f).taskReports.task0).toEqual(metadata)
+    expect(starts(f)).toBe(1)
+  }, 30000)
+}
+
+test("Git text and binary patches retain exact bytes and apply exact committed files", async () => {
+  const f = fixture(1, "report-bytes")
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+  const saved = state(f)
+  const branch = saved.worktrees.task0!.branch
+  const patch = readFileSync(join(artifacts(f), "tasks/task0/diff.patch"))
+  const direct = spawnSync("git", ["diff", "--binary", `${saved.baseSha}..${branch}`], { cwd: f.repo })
+  expect(direct.status).toBe(0)
+  expect(patch).toEqual(direct.stdout)
+  expect(patch.includes(Buffer.from([0xe9]))).toBe(true)
+  expect(patch.toString("utf8")).toContain("GIT binary patch")
+  const applyDir = join(f.root, "apply")
+  git(f.repo, ["worktree", "add", "--detach", applyDir, saved.baseSha])
+  const applied = spawnSync("git", ["apply", "--binary", "-"], { cwd: applyDir, input: patch })
+  expect(applied.status).toBe(0)
+  for (const file of ["latin.txt", "binary.dat"]) {
+    const expected = spawnSync("git", ["show", `${branch}:${file}`], { cwd: f.repo })
+    expect(expected.status).toBe(0)
+    expect(readFileSync(join(applyDir, file))).toEqual(expected.stdout)
+  }
+  git(f.repo, ["worktree", "remove", "--force", applyDir])
+}, 30000)
+
+for (const damage of ["directory", "changed", "truncated", "unreadable"]) {
+  test(`report and resume reject ${damage} patch without replacing it`, async () => {
+    const f = fixture(1, "report-edit")
+    expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+    const target = join(artifacts(f), "tasks/task0/diff.patch")
+    if (damage === "directory") {
+      ;(await import("node:fs")).renameSync(target, `${target}.retained`)
+      mkdirSync(target)
+    } else if (damage === "unreadable") (await import("node:fs")).chmodSync(target, 0)
+    else writeFileSync(target, damage === "changed" ? "modified bytes" : "")
+    const printed = child(f, ["report", "--json"], true)
+    expect(await printed.done).toBe(2)
+    expect(printed.stderr()).toContain("ReportError")
+    const resumed = child(f, ["resume", "--json"])
+    expect(await resumed.done).toBe(1)
+    expect(resumed.stderr()).toContain("ReportError")
+    if (damage === "directory") expect(statSync(target).isDirectory()).toBe(true)
+    else if (damage === "unreadable") (await import("node:fs")).chmodSync(target, 0o600)
+    else expect(readFileSync(target, "utf8")).toBe(damage === "changed" ? "modified bytes" : "")
+    expect(starts(f)).toBe(1)
+  }, 30000)
+}
+
+test("missing legacy patch refuses mutable branch reconstruction", async () => {
+  const f = fixture(1)
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+  const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
+  delete saved.taskReports.task0.deliveryCommit
+  delete saved.taskReports.task0.patchSha256
+  writeFileSync(statePath(f), JSON.stringify(saved))
+  advanceBranch(f)
+  const target = join(artifacts(f), "tasks/task0/diff.patch")
+  ;(await import("node:fs")).unlinkSync(target)
+  const resumed = child(f, ["resume", "--json"])
+  expect(await resumed.done).toBe(1)
+  expect(resumed.stderr()).toContain("ReportError")
+  expect(existsSync(target)).toBe(false)
+  expect(starts(f)).toBe(1)
+}, 30000)
+
+// Test-only preload: stop after the real filesystem append, before its callback.
+const crashAfterFailed = (f: Fixture) => {
+  writeFileSync(
+    join(f.root, "crash.cjs"),
+    `
+const fs = require('node:fs');
+const {syncBuiltinESMExports} = require('node:module');
+const original = fs.writeFile;
+fs.writeFile = function(target, data, ...args) {
+  const callback = args.pop();
+  return original.call(this, target, data, ...args, (error) => {
+    if (!error && String(target).endsWith('/events.jsonl') && Buffer.from(data).toString('utf8').includes('"_tag":"Failed"') && !fs.existsSync(${
+      JSON.stringify(join(f.root, "failed-crash"))
+    })) {
+      fs.writeFileSync(${JSON.stringify(join(f.root, "failed-crash"))}, 'durable Failed');
+      process.kill(process.pid, 'SIGKILL');
+    }
+    callback(error);
+  });
+};
+syncBuiltinESMExports();
+`,
+  )
+}
+test("durable Failed crash requires explicit retry and preserves reason", async () => {
+  const f = fixture(1, "fail")
+  crashAfterFailed(f)
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(null)
+  expect(existsSync(join(f.root, "failed-crash"))).toBe(true)
+  expect(state(f).status.task0?._tag).toBe("running")
+  const events = join(artifacts(f), "tasks/task0/events.jsonl")
+  const before = readFileSync(events, "utf8")
+  expect(before).toContain("\"_tag\":\"Failed\"")
+  expect(await child(f, ["resume", "--json"]).done).toBe(1)
+  expect(state(f).status.task0?.reason).toBe("AgentTaskFailed: injected failure")
+  expect(starts(f)).toBe(1)
+  expect(readFileSync(events, "utf8")).toBe(before)
+  expect(await child(f, ["resume", "--retry-failed", "--json"]).done).toBe(1)
+  expect(starts(f)).toBe(2)
+}, 30000)
+
+test("retry killed before new events does not recover an earlier Failed", async () => {
+  const f = fixture(1, "fail")
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(1)
+  mkdirSync(join(f.root, "bin"))
+  const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
+  writeFileSync(
+    join(f.root, "bin/git"),
+    `#!${process.execPath}
+const {spawnSync}=require('node:child_process'); const fs=require('node:fs');
+const args=process.argv.slice(2);
+const r=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});
+if(r.status===0 && args[0]==='worktree' && args[1]==='add' && !fs.existsSync(${
+      JSON.stringify(join(f.root, "retry-crash"))
+    })) {
+ fs.writeFileSync(${
+      JSON.stringify(join(f.root, "retry-crash"))
+    },'acquired before events'); process.kill(process.ppid,'SIGKILL');
+}
+process.exit(r.status ?? 1);
+`,
+    { mode: 0o700 },
+  )
+  expect(await child(f, ["resume", "--retry-failed", "--json"]).done).toBe(null)
+  expect(state(f).status.task0?.attempt).toBe(2)
+  expect(starts(f)).toBe(1)
+  expect(await child(f, ["resume", "--json"]).done).toBe(1)
+  expect(starts(f)).toBe(2)
+  expect(state(f).status.task0?.attempt).toBe(3)
+}, 30000)
+
+test("resume publishes the recorded commit after a crash before branch update", async () => {
+  const f = fixture(1)
+  mkdirSync(join(f.root, "bin"))
+  const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
+  writeFileSync(
+    join(f.root, "bin/git"),
+    `#!${process.execPath}
+const {spawnSync}=require('node:child_process'); const fs=require('node:fs');
+if(process.argv.includes('update-ref') && !fs.existsSync(${JSON.stringify(join(f.root, "prepared-crash"))})) {
+ fs.writeFileSync(${
+      JSON.stringify(join(f.root, "prepared-crash"))
+    },'before publish'); process.kill(process.ppid,'SIGKILL'); process.exit(1);
+}
+const r=spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:'inherit'}); process.exit(r.status ?? 1);
+`,
+    { mode: 0o700 },
+  )
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(null)
+  const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
+  expect(saved.taskReports.task0.deliveryCommit).toMatch(/^[a-f0-9]{40}$/)
+  expect(git(f.repo, ["rev-parse", saved.worktrees.task0.branch])).toBe(saved.baseSha)
+  expect(await child(f, ["resume", "--json"]).done).toBe(0)
+  expect(git(f.repo, ["rev-parse", saved.worktrees.task0.branch])).toBe(saved.taskReports.task0.deliveryCommit)
+  expect(starts(f)).toBe(1)
+}, 30000)
+
+for (const recoveredStatus of ["running", "interrupted"]) {
+  test(`durable Failed recovers ${recoveredStatus} legacy checkpoint without provider replay`, async () => {
+    const f = fixture(1, "fail")
+    crashAfterFailed(f)
+    expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(null)
+    const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
+    saved.taskReports.task0.phase = "unfinished"
+    delete saved.taskReports.task0.pendingEvent
+    delete saved.taskReports.task0.failureReason
+    if (recoveredStatus === "interrupted") saved.status.task0 = { _tag: "interrupted", attempt: 1 }
+    writeFileSync(statePath(f), JSON.stringify(saved))
+    const events = join(artifacts(f), "tasks/task0/events.jsonl")
+    const before = readFileSync(events)
+    expect(await child(f, ["resume", "--json"]).done).toBe(1)
+    expect(state(f).status.task0?.reason).toBe("AgentTaskFailed: injected failure")
+    expect(starts(f)).toBe(1)
+    expect(readFileSync(events)).toEqual(before)
+  }, 30000)
+}
+
+test("legacy retry without an event boundary refuses ambiguous older failure", async () => {
+  const f = fixture(1, "fail")
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(1)
+  const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
+  saved.status.task0 = { _tag: "running", attempt: 2, startedAt: new Date().toISOString() }
+  saved.taskReports.task0 = { phase: "unfinished" }
+  writeFileSync(statePath(f), JSON.stringify(saved))
+  git(f.repo, ["worktree", "add", saved.worktrees.task0.path, saved.worktrees.task0.branch])
+  const resumed = child(f, ["resume", "--json"])
+  expect(await resumed.done).toBe(1)
+  expect(resumed.stderr()).toContain("ReportError")
+  expect(state(f).status.task0?._tag).toBe("running")
+  expect(starts(f)).toBe(1)
 }, 30000)

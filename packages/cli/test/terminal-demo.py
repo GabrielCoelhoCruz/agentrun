@@ -28,6 +28,9 @@ if scenario == 'resume':
     saved = json.loads(saved_path.read_text())
     saved['status']['task1'] = {'_tag': 'failed', 'attempt': 1, 'reason': 'saved failure'}
     saved['status']['task2'] = {'_tag': 'pending'}
+    # Match report checkpoints to this synthetic unfinished state.
+    saved.get('taskReports', {}).pop('task1', None)
+    saved.get('taskReports', {}).pop('task2', None)
     saved_path.write_text(json.dumps(saved))
     args = [node, str(entry), 'resume', '--retry-failed', '--load-project-settings']
 if scenario == 'json': args += ['--json']
@@ -75,7 +78,7 @@ else:
                     if error.errno != errno.EIO: raise
                     break
             elapsed = time.monotonic() - start
-            if not running and b'worker warning task2' in raw:
+            if not running and b'task2 [running]' in raw and b'Tool result: checked file' in raw:
                 (root / 'running.ansi').write_bytes(raw)
                 frames.append({'name': 'running', 'columns': 80, 'rows': 24, 'bytes': len(raw)})
                 running = True

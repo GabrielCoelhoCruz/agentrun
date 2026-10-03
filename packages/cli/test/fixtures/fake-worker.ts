@@ -58,8 +58,25 @@ NodeRuntime.runMain(
           await new Promise((resolve) => setTimeout(resolve, 100))
           if (input.prompt.includes("fail")) yield { _tag: "Failed" as const, reason: "injected failure" }
           else {
-            writeFileSync(join(input.cwd, "deliverable"), id)
-            yield { _tag: "Completed" as const, result: "done" }
+            if (input.prompt.includes("report-block")) {
+              writeFileSync(join(root, "report-ready"), "ready")
+              while (!existsSync(join(root, "report-go"))) await new Promise((resolve) => setTimeout(resolve, 20))
+            }
+            if (!input.prompt.includes("report-nochange")) writeFileSync(join(input.cwd, "deliverable"), `${id}\n`)
+            if (input.prompt.includes("report-bytes")) {
+              writeFileSync(join(input.cwd, "latin.txt"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]))
+              writeFileSync(join(input.cwd, "binary.dat"), Buffer.from([0, 255, 1, 2, 3, 0]))
+            }
+            if (input.prompt.includes("report-edit")) {
+              writeFileSync(
+                join(input.cwd, "seed"),
+                input.prompt.includes("report-edit-header") ? "++ content\n-- content\n" : "edited\n",
+              )
+            }
+            yield {
+              _tag: "Completed" as const,
+              result: input.prompt.includes("report-edit") ? "done | <script> & **bold**\n# title" : "done",
+            }
           }
         })(),
         (cause) => new Error(String(cause)),

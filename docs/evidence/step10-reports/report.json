@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "runId": "example-run",
+  "repoRoot": "<repository>",
+  "base": "main",
+  "baseSha": "1176d262fc7d56736bf80d6be256583a07f23c3c",
+  "concurrency": 1,
+  "tasks": [
+    {
+      "id": "claude-task",
+      "title": "Claude file",
+      "prompt": "<private prompt omitted>",
+      "agent": "claude-code",
+      "maxTurns": 3,
+      "maxBudgetUsd": 0.25,
+      "stallTimeout": {
+        "_tag": "Millis",
+        "value": 300000
+      },
+      "maxDuration": {
+        "_tag": "Millis",
+        "value": 3600000
+      }
+    },
+    {
+      "id": "pi-task",
+      "title": "Pi file",
+      "prompt": "<private prompt omitted>",
+      "agent": "pi",
+      "model": "openai/gpt-6-astra",
+      "stallTimeout": {
+        "_tag": "Millis",
+        "value": 300000
+      },
+      "maxDuration": {
+        "_tag": "Millis",
+        "value": 3600000
+      }
+    }
+  ],
+  "status": {
+    "claude-task": {
+      "_tag": "succeeded",
+      "durationMs": 4178,
+      "costUsd": 0.0880716
+    },
+    "pi-task": {
+      "_tag": "succeeded",
+      "durationMs": 9500,
+      "costUsd": 0.022406000000000002
+    }
+  },
+  "taskReports": {
+    "claude-task": {
+      "phase": "delivered",
+      "durationMs": 4178,
+      "costUsd": 0.0880716,
+      "result": "done",
+      "diffStat": {
+        "files": 1,
+        "additions": 1,
+        "deletions": 0
+      },
+      "deliveryCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "patchSha256": "9402ec7eb687c3b71bbd4763a570be8722cc0edcdb09d33f56d0c7407506fafe"
+    },
+    "pi-task": {
+      "phase": "delivered",
+      "durationMs": 9500,
+      "costUsd": 0.022406000000000002,
+      "result": "done",
+      "diffStat": {
+        "files": 1,
+        "additions": 1,
+        "deletions": 0
+      },
+      "deliveryCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "patchSha256": "1876174c2fc7c0a47b5a158f74b066f84ab35820c84ef7751497e189bdac07c2"
+    }
+  },
+  "worktrees": {
+    "claude-task": {
+      "path": "<worktrees>/claude-task",
+      "branch": "agentrun/claude-task-example"
+    },
+    "pi-task": {
+      "path": "<worktrees>/pi-task",
+      "branch": "agentrun/pi-task-example"
+    }
+  }
+}
