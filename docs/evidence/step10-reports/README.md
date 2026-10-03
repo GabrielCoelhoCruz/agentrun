@@ -9,7 +9,8 @@ Unknown cost appears as `n/a`.
 
 - Branch: `feat/reports`.
 - Starting commit: `a062343f7b7b8eabc7afe3a6f9bc07159392a0f9`.
-- Source changes remain uncommitted. `candidate.json` records their exact hashes.
+- Verified implementation commit: `17e037bc2291ec37f15a144900e818f73e317783`.
+- `candidate.json` records the source hashes checked before that commit.
 - Node 24.21.0, Git 2.55.0, Effect 4.0.0 and macOS kernel locks.
 - Claude SDK 0.3.288 and Pi SDK 1.0.0, through the shipped CLI workers.
 - Lint, typecheck, 192 tests, both builds and whitespace checks passed.
