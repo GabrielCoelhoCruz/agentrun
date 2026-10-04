@@ -104,9 +104,7 @@ try {
   const cli = records.filter(r => /\/fixtures\/dist\/(?:entry|lock-entry)\.mjs$/.test(r.argv[1] ?? ""))
   const live = observed.filter(r =>
     !r.state.startsWith("Z")
-    && (cli.some(c => r.pid === c.pid) || identities.some(w => r.group === w.pgid) || leases.some(l =>
-      r.pid === l.pid
-    ))
+    && (cli.some(c => r.pid === c.pid) || identities.some(w => r.group === w.pgid) || leases.some(l => r.pid === l.pid))
   )
   writeFileSync(
     join(output, "result.json"),
