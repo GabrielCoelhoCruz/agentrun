@@ -1,4 +1,7 @@
+import { stopProcessGroup } from "@agentrun/core"
+import { Effect } from "effect"
 import { spawn, spawnSync } from "node:child_process"
+import type { ChildProcessWithoutNullStreams } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
   existsSync,
@@ -13,7 +16,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { expect, test } from "vitest"
+import { expect, onTestFinished, test } from "vitest"
 import { alive } from "./process-state.js"
 
 const bin = fileURLToPath(new URL("../dist/bin.mjs", import.meta.url))
@@ -35,7 +38,10 @@ const fixture = (tasks = 2, prompt = "success") => {
     join(repo, "TASKS.md"),
     Array.from({ length: tasks }, (_, n) => `## task${n}: Task ${n}\n${prompt}\n`).join("\n"),
   )
-  return { root, repo, home }
+  const ownership = { closed: false, children: new Set<ChildProcessWithoutNullStreams>(), repos: new Set<string>() }
+  const f = { root, repo, home, ownership }
+  onTestFinished(() => closeFixture(f), 60000)
+  return f
 }
 const git = (cwd: string, args: string[]) => {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" })
@@ -43,6 +49,13 @@ const git = (cwd: string, args: string[]) => {
   return result.stdout.trim()
 }
 type Fixture = ReturnType<typeof fixture>
+const spawnChild = (f: Fixture, args: string[], env: NodeJS.ProcessEnv) => {
+  if (f.ownership.closed) throw new Error("Fixture is closed")
+  f.ownership.repos.add(realpathSync(git(f.repo, ["rev-parse", "--show-toplevel"])))
+  const p = spawn(process.execPath, args, { cwd: f.repo, env, detached: true })
+  f.ownership.children.add(p)
+  return p
+}
 const child = (f: Fixture, args: string[], shipped = false) => {
   const env = { ...process.env, HOME: f.home, TEST_RECORDS: f.root, PATH: `${join(f.root, "bin")}:${process.env.PATH}` }
   if (existsSync(join(f.root, "crash.cjs"))) {
@@ -54,10 +67,7 @@ const child = (f: Fixture, args: string[], shipped = false) => {
     }
     Object.assign(env, { CLAUDE_CONFIG_DIR: join(f.home, "claude"), PI_CODING_AGENT_DIR: join(f.home, "pi") })
   }
-  const p = spawn(process.execPath, [shipped ? bin : fakeBin, ...args], {
-    cwd: f.repo,
-    env,
-  })
+  const p = spawnChild(f, [shipped ? bin : fakeBin, ...args], env)
   let stdout = ""
   let stderr = ""
   p.stdout.on("data", (chunk) => {
@@ -109,6 +119,54 @@ const statePath = (f: Fixture) => {
   return existsSync(runs) ? join(runs, readdirSync(runs).sort().at(-1) ?? "", "state.json") : ""
 }
 const state = (f: Fixture): Saved => JSON.parse(readFileSync(statePath(f), "utf8"))
+const closeFixture = async (f: Fixture) => {
+  f.ownership.closed = true
+  const errors: unknown[] = []
+  for (const p of f.ownership.children) {
+    if (p.pid === undefined || p.exitCode !== null || p.signalCode !== null) continue
+    try {
+      const current = spawnSync("ps", ["-p", String(p.pid), "-o", "pgid=,command="], {
+        encoding: "utf8",
+        timeout: 5000,
+      })
+      if (current.status === 1 && current.stdout.trim() === "" && current.stderr.trim() === "") continue
+      const match = current.stdout.trim().match(/^(\d+)\s+(.+)$/)
+      if (current.status !== 0 || Number(match?.[1]) !== p.pid || match?.[2] !== p.spawnargs.join(" ")) {
+        throw new Error(`Fixture child ${p.pid} ownership changed; cleanup refused`)
+      }
+      try {
+        process.kill(-p.pid, "SIGKILL")
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error
+      }
+      await wait(() => p.exitCode !== null || p.signalCode !== null)
+    } catch (error) {
+      errors.push(error)
+    }
+  }
+  for (const repo of f.ownership.repos) {
+    const runs = join(repo, ".agentrun/runs")
+    if (!existsSync(runs)) continue
+    for (const run of readdirSync(runs)) {
+      const file = join(runs, run, "state.json")
+      if (!existsSync(file)) continue
+      try {
+        const saved: Saved = JSON.parse(readFileSync(file, "utf8"))
+        for (const worker of Object.values(saved.worktrees)) {
+          if (worker.pgid === undefined) continue
+          try {
+            await Effect.runPromise(stopProcessGroup(worker.pgid, worker.processToken))
+          } catch (error) {
+            errors.push(error)
+          }
+        }
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+  }
+  if (errors.length > 0) throw new AggregateError(errors, "Fixture process cleanup failed")
+}
 const lockPath = (f: Fixture) => {
   const common = realpathSync(join(f.repo, git(f.repo, ["rev-parse", "--git-common-dir"])))
   return join(f.home, ".agentrun/locks", `${createHash("sha256").update(common).digest("hex").slice(0, 12)}.lock`)
@@ -423,9 +481,11 @@ test("kernel lease survives replacement contention and releases on parent SIGKIL
   mkdirSync(join(f.home, ".agentrun/locks"), { recursive: true })
   writeFileSync(lockPath(f), "2147483647")
   const leaseBin = fileURLToPath(new URL("./fixtures/dist/lock-entry.mjs", import.meta.url))
-  const p = spawn(process.execPath, [leaseBin], {
-    cwd: f.repo,
-    env: { ...process.env, HOME: f.home, TEST_RECORDS: f.root, TEST_STOP_REPLACEMENT: "yes" },
+  const p = spawnChild(f, [leaseBin], {
+    ...process.env,
+    HOME: f.home,
+    TEST_RECORDS: f.root,
+    TEST_STOP_REPLACEMENT: "yes",
   })
   let stdout = ""
   let stderr = ""
@@ -540,7 +600,7 @@ test("simultaneous stale contenders keep the fresh winner and stable guard", asy
 test("worker EOF before input exits without setup or provider effects", async () => {
   const f = fixture(1)
   const worker = fileURLToPath(new URL("./fixtures/dist/fake-worker.mjs", import.meta.url))
-  const p = spawn(process.execPath, [worker], { cwd: f.repo, env: { ...process.env, TEST_RECORDS: f.root } })
+  const p = spawnChild(f, [worker], { ...process.env, TEST_RECORDS: f.root })
   let stdout = ""
   let stderr = ""
   p.stdout.on("data", (chunk) => {
@@ -658,7 +718,6 @@ test("artifact write failure exits without success; resume completes checkpoint 
   expect(await c.done).toBe(1)
   expect(c.stderr()).toContain("ReportError")
   expect(state(f).status.task0?._tag).not.toBe("succeeded")
-  // Only remove the test-owned obstruction, retaining task data and branch.
   const { rmdirSync } = await import("node:fs")
   rmdirSync(join(dir, "tasks/task0/diff.patch"))
   expect(await child(f, ["resume", "--json"]).done).toBe(0)
@@ -700,7 +759,6 @@ for (const window of ["commit", "artifacts"]) {
       expect(state(f).status.task0?._tag).toBe("running")
     } else {
       expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
-      // Restore the state checkpoint saved immediately before the terminal transition.
       const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
       saved.status.task0 = { _tag: "running", attempt: 1, startedAt: new Date().toISOString() }
       writeFileSync(statePath(f), JSON.stringify(saved))
@@ -856,7 +914,6 @@ test("missing legacy patch refuses mutable branch reconstruction", async () => {
   expect(starts(f)).toBe(1)
 }, 30000)
 
-// Test-only preload: stop after the real filesystem append, before its callback.
 const crashAfterFailed = (f: Fixture) => {
   writeFileSync(
     join(f.root, "crash.cjs"),
@@ -987,6 +1044,60 @@ test("legacy retry without an event boundary refuses ambiguous older failure", a
   expect(state(f).status.task0?._tag).toBe("running")
   expect(starts(f)).toBe(1)
 }, 30000)
+
+if (process.env.AGENTRUN_CLEANUP_CASE) {
+  const scenario = process.env.AGENTRUN_CLEANUP_CASE
+  let late: Promise<void> | undefined
+  test("fixture cleanup probe", async () => {
+    const f = fixture(1, "hold")
+    let active = f
+    if (scenario === "linked") {
+      const linked = join(f.root, "linked")
+      git(f.repo, ["worktree", "add", "--detach", linked])
+      writeFileSync(join(linked, "TASKS.md"), "## task0: Linked\nhold\n")
+      active = { ...f, repo: linked }
+    }
+    if (scenario === "nested") {
+      const nested = join(f.repo, "nested")
+      mkdirSync(nested)
+      writeFileSync(join(nested, "TASKS.md"), "## task0: Nested\nhold\n")
+      active = { ...f, repo: nested }
+    }
+    child(active, ["run", "TASKS.md", "--json"])
+    await wait(() => existsSync(join(f.root, "child-task0")))
+    writeFileSync(join(f.root, "probe-ready.json"), JSON.stringify(state(scenario === "nested" ? f : active)))
+    if (["assertion", "linked", "nested"].includes(scenario)) expect("injected assertion failure").toBe("success")
+    if (scenario === "timeout") {
+      late = (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 11000))
+        let result = "spawned"
+        try {
+          await child({ ...f }, ["run", "TASKS.md", "--json"]).done
+        } catch (error) {
+          result = String(error)
+        }
+        writeFileSync(join(f.root, "late-result"), result)
+      })()
+      await late
+    }
+    if (scenario === "unknown" || scenario === "reused") {
+      const saved = state(f)
+      saved.worktrees.foreign = {
+        path: "unrelated",
+        branch: "unrelated",
+        pgid: Number(process.env.AGENTRUN_FOREIGN_PID),
+        ...(scenario === "reused" ? { processToken: "0".repeat(32) } : {}),
+      }
+      writeFileSync(statePath(f), JSON.stringify(saved))
+    }
+  }, 10000)
+  if (scenario === "timeout") {
+    test("fixture cleanup probe waits for late continuation", async () => {
+      await late
+      expect(readFileSync(join(evidence, "case-1/late-result"), "utf8")).toContain("closed")
+    }, 15000)
+  }
+}
 
 const startsCount = (f: Fixture) => readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n").length
 const timedFixture = (prompt: string, stall = "2 seconds", max = "10 seconds", setup?: string) => {

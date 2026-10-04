@@ -36,7 +36,6 @@ export const diagnostics = Effect.fn("diagnostics")(function*(cwd: string) {
         maxBuffer: 65536,
       })).stdout
     } catch (error) {
-      // The native CLI returns valid loggedIn:false JSON with exit 1.
       if (
         error instanceof Error && "code" in error && error.code === 1 && "stdout" in error
         && typeof error.stdout === "string"

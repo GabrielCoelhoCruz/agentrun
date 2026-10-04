@@ -3,7 +3,6 @@ import { RunState } from "./RunState.js"
 import { TaskId } from "./Task.js"
 import { TaskReportFields } from "./TaskReport.js"
 
-// Process ownership belongs only to private state, not the report contract.
 export class RunReport extends Schema.Class<RunReport>("agentrun/RunReport")({
   ...RunState.fields,
   taskReports: Schema.optional(Schema.Record(TaskId, Schema.Struct(TaskReportFields))),

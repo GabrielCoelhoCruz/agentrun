@@ -27,7 +27,6 @@ const processTable = Effect.fn("ProcessGroup.table")(function*() {
 })
 const running = (state: string) => !state.startsWith("Z")
 
-// Only groups with a recorded, unguessable worker argument can be recovered.
 export const stopProcessGroup = Effect.fn("stopProcessGroup")(
   function*(pgid: number, token?: string, kind: "worker" | "git" = "worker") {
     const error = (cause: unknown) => systemError({ _tag: "Unknown", module: "ProcessGroup", method: "stop", cause })

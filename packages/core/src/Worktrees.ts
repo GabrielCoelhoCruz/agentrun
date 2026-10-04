@@ -230,8 +230,6 @@ process.stdin.once('data',()=>{
     },
   )
 
-  // Create the immutable object before moving the branch. The runner records its
-  // identity before publish, so a crash cannot turn later user commits into delivery.
   const snapshot = Effect.fn("Worktrees.snapshot")(function*(worktree: Worktree, message: string) {
     const cwd = { cwd: worktree.path }
     yield* git(["add", "-A"], cwd)

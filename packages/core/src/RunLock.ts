@@ -57,7 +57,6 @@ export class RunLock extends Context.Service<RunLock, {
             yield* fs.writeFileString(file, content)
             yield* fs.link(file, destination)
           }, Effect.scoped)
-          // Permanent protocol marker: legacy wx claimants refuse, and every new caller locks this inode.
           yield* publish(guard, marker).pipe(Effect.catchIf(
             (error) => error.reason._tag === "AlreadyExists",
             () => Effect.void,

@@ -1,19 +1,35 @@
 import { spawnSync } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { expect, test } from "vitest"
+import { expect, onTestFinished, test } from "vitest"
 
 for (const scenario of ["success", "failed", "interrupted", "resize", "resume", "json", "pipe"]) {
   test(`real PTY: ${scenario} preserves output and exit semantics`, () => {
     const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
+    const nonce = randomUUID().replaceAll("-", "")
+    onTestFinished(() => {
+      const cleanup = spawnSync("python3", [
+        fileURLToPath(new URL("./terminal_fixture.py", import.meta.url)),
+        "close",
+        root,
+        nonce,
+      ], { encoding: "utf8", timeout: 55000 })
+      expect(cleanup.status, cleanup.stderr).toBe(0)
+    }, 60000)
     const result = spawnSync("python3", [
       fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
       scenario,
       root,
       process.execPath,
-    ], { encoding: "utf8", timeout: 30000 })
+    ], {
+      encoding: "utf8",
+      timeout: 30000,
+      killSignal: "SIGKILL",
+      env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce },
+    })
     expect(result.status, result.stderr).toBe(0)
     const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
     const output = readFileSync(join(root, "capture.ansi"), "utf8")

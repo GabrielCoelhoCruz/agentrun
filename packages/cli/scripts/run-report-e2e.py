@@ -1,4 +1,3 @@
-"""One bounded production CLI run. Private output. Never retry paid calls."""
 import errno, fcntl, hashlib, json, os, pathlib, pty, select, signal, struct, subprocess, sys, termios, time
 if os.environ.get('AGENTRUN_E2E_REAL') != '1':
  raise SystemExit('Set AGENTRUN_E2E_REAL=1 to authorize one paid run')

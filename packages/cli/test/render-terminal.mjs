@@ -1,4 +1,3 @@
-// Generate a local terminal replay from real PTY captures. This is not a dashboard.
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 const root = resolve(process.argv[2])

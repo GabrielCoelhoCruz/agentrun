@@ -20,7 +20,6 @@ const clip = (text: string, width: number): string => {
   return result
 }
 const append = (buffer: string[], text: string) => {
-  // Limit individual lines as well as line count. Events themselves belong to the core.
   const lines = safeText(text.slice(-4096 * 1000)).split("\n").filter((line) => line.length > 0)
     .slice(-1000).map((line) => line.slice(0, 4096))
   buffer.push(...lines)

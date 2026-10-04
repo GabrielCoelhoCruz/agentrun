@@ -1,5 +1,3 @@
-// Opt-in real core integration. Output contains private SDK records and must stay outside git.
-// Run after build: node packages/core/scripts/run-providers.ts <private-output-directory>
 import {
   Agents,
   ClaudeCode,

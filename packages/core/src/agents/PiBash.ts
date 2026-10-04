@@ -2,7 +2,6 @@ import type { BashOperations } from "@earendil-works/pi-coding-agent"
 import { spawn } from "node:child_process"
 import { constants } from "node:os"
 
-// The CLI owns this group. Background jobs stay in it even after their shell exits.
 export const workerBashOperationsFor = (shell = "bash"): BashOperations => ({
   exec: (command, cwd, options) =>
     new Promise((resolve, reject) => {

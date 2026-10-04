@@ -118,7 +118,6 @@ export class Report extends Context.Service<Report, {
           return Effect.gen(function*() {
             const encoded = yield* Schema.encodeEffect(events)(event)
             yield* fs.makeDirectory(path.dirname(target), { recursive: true, mode: 0o700 })
-            // Await each append: event volume cannot build an unbounded persistence queue.
             yield* fs.writeFileString(target, `${JSON.stringify(encoded)}\n`, { flag: "a", mode: 0o600 })
           }).pipe(Effect.mapError((cause) => error(target, cause)), Effect.uninterruptible)
         },

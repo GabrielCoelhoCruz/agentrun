@@ -144,7 +144,6 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
         let diff: Uint8Array
         if (data?.phase === "delivered") {
           if (Option.isSome(savedPatch)) {
-            // Legacy artifacts remain authoritative. Never infer their identity from a mutable branch.
             diff = savedPatch.value
           } else {
             if (deliveryCommit === undefined || data.patchSha256 === undefined) {
@@ -167,7 +166,6 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
             deliveryCommit = prepared.commit
             committed = prepared.committed
             yield* checkpoint(task.id, { ...data, phase: "completed", deliveryCommit })
-            // The identity is durable before the branch changes or the patch is written.
             previous = yield* SynchronizedRef.get(current)
             data = previous.taskReports?.[task.id]
           }
