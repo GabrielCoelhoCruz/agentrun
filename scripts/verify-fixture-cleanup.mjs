@@ -9,9 +9,10 @@ const repo = fileURLToPath(new URL("../", import.meta.url))
 const output = resolve(process.argv[2])
 const scenario = process.argv[3] ?? "wait"
 assert.ok(
-  ["wait", "assertion", "timeout", "success", "unknown", "reused", "linked", "nested", "lease-timeout", "slow-cleanup"].includes(
-    scenario,
-  ),
+  ["wait", "assertion", "timeout", "success", "unknown", "reused", "linked", "nested", "lease-timeout", "slow-cleanup"]
+    .includes(
+      scenario,
+    ),
 )
 mkdirSync(output)
 const fixtures = join(output, "fixtures")

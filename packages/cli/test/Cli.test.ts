@@ -40,7 +40,7 @@ const fixture = (tasks = 2, prompt = "success") => {
   )
   const ownership = { closed: false, children: new Set<ChildProcessWithoutNullStreams>(), repos: new Set<string>() }
   const f = { root, repo, home, ownership }
-  onTestFinished(() => closeFixture(f))
+  onTestFinished(() => closeFixture(f), 60000)
   return f
 }
 const git = (cwd: string, args: string[]) => {
