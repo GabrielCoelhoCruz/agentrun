@@ -587,7 +587,7 @@ for (const code of ["ESRCH", "EPERM", "live", "invalid"]) {
             assert.strictEqual(calls, 1)
           } else {
             assert.ok(result._tag === "Failure")
-            assert.strictEqual(result.failure._tag, "GitError")
+            assert.strictEqual(result.failure._tag, "PlatformError")
             assert.strictEqual(calls, 0)
             assert.deepStrictEqual(yield* store.load(initial.runId), initial)
           }
@@ -653,7 +653,7 @@ for (const status of ["running", "interrupted", "pending", "failed", "succeeded"
           const result = yield* Effect.result((yield* Runner).run(yield* store.load(initial.runId)))
           assert.strictEqual(launches, 0, "replacement must not start while the saved group is live")
           assert.ok(result._tag === "Failure", "live saved group must block reconciliation")
-          assert.strictEqual(result.failure._tag, "GitError")
+          assert.strictEqual(result.failure._tag, "PlatformError")
           assert.deepStrictEqual(yield* store.load(initial.runId), initial)
           assert.ok(yield* fixture.fs.exists(located.path), "live group's worktree must remain")
           assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", located.branch]), fixture.baseSha)

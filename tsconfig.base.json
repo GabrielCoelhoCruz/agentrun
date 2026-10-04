@@ -7,6 +7,7 @@
     "isolatedModules": true,
     "module": "nodenext",
     "moduleResolution": "nodenext",
+    "paths": { "@agentrun/core": ["./packages/core/src/index.ts"] },
     "target": "es2024",
     "declaration": true,
     "declarationMap": true,

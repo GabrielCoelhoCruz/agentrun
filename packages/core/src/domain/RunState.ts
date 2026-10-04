@@ -18,6 +18,7 @@ export class RunState extends Schema.Class<RunState>("agentrun/RunState")({
       path: Schema.String,
       branch: Schema.String,
       pgid: Schema.optional(Schema.Int),
+      processToken: Schema.optional(Schema.String),
     }),
   ),
 }) {}

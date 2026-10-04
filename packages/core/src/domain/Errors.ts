@@ -89,4 +89,4 @@ export type TaskError =
 
 export type RunnerError = RunLocked | StateCorrupted | GitError | PlatformError
 
-export type AgentError = AgentSpawnError | AgentCrashed | AgentProtocolError
+export type AgentError = AgentSpawnError | AgentCrashed | AgentProtocolError | SetupError

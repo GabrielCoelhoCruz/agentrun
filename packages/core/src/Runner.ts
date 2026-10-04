@@ -18,23 +18,27 @@ import type { PlatformError } from "effect/PlatformError"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { Agents } from "./Agents.js"
 import type { AgentEvent } from "./domain/AgentEvent.js"
-import { AgentTaskFailed, GitError, SetupError } from "./domain/Errors.js"
+import { AgentSpawnError, AgentTaskFailed, GitError, SetupError } from "./domain/Errors.js"
 import type { RunnerError, TaskError } from "./domain/Errors.js"
 import type { RunEvent } from "./domain/RunEvent.js"
 import { RunState } from "./domain/RunState.js"
 import type { Task, TaskId } from "./domain/Task.js"
 import type { TaskStatus } from "./domain/TaskStatus.js"
-import { isAlive, RunLock } from "./RunLock.js"
+import { stopProcessGroup } from "./ProcessGroup.js"
+import { RunLock } from "./RunLock.js"
 import { StateStore } from "./StateStore.js"
 import { Worktrees } from "./Worktrees.js"
 
 interface Options {
+  readonly loadProjectSettings?: boolean
+  readonly setupInAgent?: boolean
   readonly concurrency: number
   readonly retryFailed?: boolean
 }
 
 export class Runner extends Context.Service<Runner, {
   readonly run: (state: RunState) => Effect.Effect<RunState, RunnerError>
+  readonly subscribe: Effect.Effect<Stream.Stream<RunEvent>, never, Scope.Scope>
   readonly events: Stream.Stream<RunEvent>
 }>()("agentrun/Runner") {
   static readonly layer = (options: Options) => Layer.effect(Runner, make(options))
@@ -47,8 +51,9 @@ const isTaskError = (error: TaskError | PlatformError): error is TaskError =>
 
 const detail = (error: TaskError): string => {
   switch (error._tag) {
-    case "GitError":
     case "SetupError":
+      return `Task ${error.taskId}: ${error.command} exited ${error.exitCode}: ${error.stderr}`
+    case "GitError":
       return `${error.command} exited ${error.exitCode}: ${error.stderr}`
     case "AgentSpawnError":
       return String(error.cause)
@@ -117,6 +122,8 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                   ...previous.worktrees,
                   [taskId]: previous.worktrees[taskId] ?? { path: located.path, branch: located.branch },
                 }
+                : (to === "succeeded" || to === "failed") && previous.worktrees[taskId] !== undefined
+                ? { ...previous.worktrees, [taskId]: { path: located.path, branch: located.branch } }
                 : previous.worktrees,
             })
             yield* store.save(next)
@@ -135,15 +142,9 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
             stderr: `Recorded worktree identity differs for ${task.id}`,
           })
         }
-        const pgid = recorded?.pgid
-        if (pgid !== undefined && (!Number.isInteger(pgid) || pgid <= 0 || (yield* isAlive(-pgid)))) {
-          return yield* new GitError({
-            command: "resume process group",
-            exitCode: -1,
-            stderr:
-              `Cannot resume ${task.id}: saved process group ${pgid} is invalid or may still be running; ownership is unverified`,
-          })
-        }
+      }
+      for (const recorded of Object.values(state.worktrees)) {
+        if (recorded.pgid !== undefined) yield* stopProcessGroup(recorded.pgid, recorded.processToken)
       }
       const reconciled = yield* worktrees.reconcile(state)
       for (const action of reconciled) {
@@ -169,12 +170,27 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
           yield* transition(task.id, { _tag: "running", attempt, startedAt })
           const costUsd = yield* Effect.scoped(Effect.gen(function*() {
             const worktree = yield* worktrees.acquire(task, state.baseSha)
-            if (state.setup !== undefined) yield* setup(task.id, state.setup, worktree.path)
+            if (state.setup !== undefined && !options.setupInAgent) yield* setup(task.id, state.setup, worktree.path)
             const adapter = agents.get(task.agent)
             if (Option.isNone(adapter)) {
               return yield* Effect.die(`Missing agent adapter: ${task.agent} for task ${task.id}`)
             }
             const summary = yield* adapter.value.run({
+              taskId: task.id,
+              loadProjectSettings: options.loadProjectSettings === true,
+              ...(options.setupInAgent && state.setup !== undefined ? { setup: state.setup } : {}),
+              registerProcess: (pgid, processToken) =>
+                SynchronizedRef.updateEffect(current, (previous) => {
+                  const located = worktrees.locate(task.id)
+                  const next = new RunState({
+                    ...previous,
+                    worktrees: {
+                      ...previous.worktrees,
+                      [task.id]: { ...located, pgid, processToken },
+                    },
+                  })
+                  return store.save(next).pipe(Effect.as(next))
+                }).pipe(Effect.mapError((cause) => new AgentSpawnError({ agent: task.agent, cause }))),
               prompt: task.prompt,
               cwd: worktree.path,
               model: Option.fromUndefinedOr(task.model),
@@ -219,8 +235,7 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                 yield* PubSub.publish(pubsub, {
                   _tag: "TaskWarning",
                   taskId: task.id,
-                  message:
-                    `Worktree kept at ${located.path}: directory remains after release; it may be dirty or removal failed`,
+                  message: `Worktree kept at ${located.path}`,
                 })
               }
             })
@@ -270,11 +285,20 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
           || (options.retryFailed === true && status === "failed")
       })
       yield* Effect.forEach(pendingTasks, runTask, { concurrency: "unbounded" })
-      yield* PubSub.publish(pubsub, { _tag: "RunFinished", runId: state.runId })
       return yield* SynchronizedRef.get(current)
     },
-    Effect.scoped,
+    (effect, state) =>
+      effect.pipe(
+        Effect.onExit(() => PubSub.publish(pubsub, { _tag: "RunFinished", runId: state.runId })),
+        Effect.scoped,
+      ),
   )
 
-  return Runner.of({ run, events: Stream.fromPubSub(pubsub) })
+  return Runner.of({
+    run,
+    subscribe: PubSub.subscribe(pubsub).pipe(
+      Effect.map((subscription) => Stream.fromEffectRepeat(PubSub.take(subscription))),
+    ),
+    events: Stream.fromPubSub(pubsub),
+  })
 })
