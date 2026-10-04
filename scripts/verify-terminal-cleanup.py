@@ -1,0 +1,213 @@
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+import uuid
+
+wt = Path(__file__).resolve().parents[1]
+node = __import__('shutil').which('node')
+assert node, 'Node is required'
+mode = sys.argv[2] if len(sys.argv) > 2 else 'pipe'
+scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json'}.get(mode, mode)
+out = Path(sys.argv[1]).resolve()
+out.mkdir(exist_ok=False)
+root = out / 'fixture'
+root.mkdir()
+identities = {}
+receipts = []
+refused = []
+p = foreign = None
+workers = []
+cli = None
+result = {}
+
+def save(name, value):
+    (out / name).write_text(json.dumps(value, indent=2) + '\n')
+
+def table():
+    r = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,stat=,command='], capture_output=True, text=True, timeout=8)
+    if r.returncode != 0:
+        raise RuntimeError('Process inspection failed: ' + r.stderr)
+    rows = []
+    for line in r.stdout.splitlines():
+        v = line.strip().split(None, 10)
+        if len(v) != 11:
+            raise RuntimeError('Invalid process row: ' + line)
+        rows.append(dict(pid=int(v[0]), parent=int(v[1]), group=int(v[2]), uid=int(v[3]), start=' '.join(v[4:9]), state=v[9], command=v[10]))
+    return rows
+
+def same(a, b):
+    return all(a[k] == b[k] for k in ['pid', 'uid', 'group', 'start', 'command'])
+
+def live(row):
+    return not row['state'].startswith('Z')
+
+def remember(rows, parent):
+    owned = {parent}
+    while True:
+        additions = {r['pid'] for r in rows if r['parent'] in owned}
+        if additions <= owned:
+            break
+        owned |= additions
+    for row in rows:
+        if row['pid'] in owned:
+            old = identities.get(row['pid'])
+            if old and (old['uid'] != row['uid'] or old['start'] != row['start']):
+                raise RuntimeError('Observed PID reuse')
+            identities[row['pid']] = row
+
+def current(record):
+    row = next((r for r in table() if r['pid'] == record['pid'] and live(r)), None)
+    if row is None:
+        return None
+    if not same(row, record):
+        refused.append({'expected': record, 'observed': row})
+        raise RuntimeError('Cleanup refused changed identity')
+    return row
+
+def send(record, sig, group=False, token=None):
+    row = current(record)
+    if row is None:
+        return
+    if group and (row['group'] != row['pid'] or not token or token not in row['command'].split()):
+        refused.append({'record': row, 'reason': 'Unverified group ownership'})
+        raise RuntimeError('Cleanup refused unknown group')
+    try:
+        os.kill(row['pid'], sig)
+        receipts.append({'identity': row, 'signal': signal.Signals(sig).name, 'group': group, 'token': token})
+    except ProcessLookupError:
+        receipts.append({'identity': row, 'alreadyExited': True})
+
+try:
+    env = {k:v for k,v in os.environ.items() if not any(s in k.upper() for s in ['TOKEN','SECRET','API_KEY','CREDENTIAL','AUTH'])}
+    marker = 'pr9-f1-foreign-' + uuid.uuid4().hex
+    foreign = subprocess.Popen([node, '-e', 'setInterval(() => {}, 1000)', marker], env=env, start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    foreign_identity = next(r for r in table() if r['pid'] == foreign.pid)
+    save('foreign-owned-by-observer.json', foreign_identity)
+    args = [sys.executable, str(wt / 'packages/cli/test/terminal-demo.py'), scenario, str(root), node]
+    save('command.json', {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':22 if mode == 'pty' else 30 if mode == 'outer' else 20, 'fault':'SIGSTOP only the observed CLI after all three workers start', 'sourceSha256':__import__('hashlib').sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest()})
+    if mode == 'outer':
+        env['NODE_OPTIONS'] = '--require=' + str(wt / 'scripts/terminal-cleanup-deadline.cjs')
+        env['AGENTRUN_TEST_EVIDENCE'] = str(root)
+        args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: json']
+    start = time.monotonic()
+    with (out/'driver.stdout').open('wb') as stdout, (out/'driver.stderr').open('wb') as stderr:
+        p = subprocess.Popen(args,cwd=wt,env=env,stdout=stdout,stderr=stderr,start_new_session=True)
+        readiness = time.monotonic() + (90 if mode == 'outer' else 18)
+        while time.monotonic()<readiness:
+            rows=table()
+            remember(rows,p.pid)
+            candidates=[r for r in rows if r['pid'] in identities and '/fixtures/dist/entry.mjs run TASKS.md --load-project-settings' in r['command']]
+            if mode == 'outer':
+                roots = list(root.glob('terminal-json-*'))
+                fixture = roots[0] if roots else root
+            else:
+                fixture = root
+            states=list((fixture/'repo/.agentrun/runs').glob('*/state.json'))
+            if candidates and states and all((fixture/f'starts-task{n}').exists() for n in range(3)):
+                saved=json.loads(states[0].read_text())
+                workers=[{'pgid':x['pgid'],'token':'agentrun-worker-'+x['processToken']} for x in saved['worktrees'].values() if 'pgid' in x and 'processToken' in x]
+                if len(workers)!=3:
+                    time.sleep(.05)
+                    continue
+                cli=candidates[0]
+                for w in workers:
+                    leader=next((r for r in rows if r['pid']==w['pgid'] and r['group']==w['pgid'] and w['token'] in r['command'].split() and live(r)),None)
+                    if leader is None:
+                        raise RuntimeError('Worker ownership is not proven before fault')
+                    identities[leader['pid']]=leader
+                save('state-before-fault.json',saved)
+                save('processes-before-fault.json',list(identities.values()))
+                if mode != 'normal':
+                    send(cli,signal.SIGSTOP)
+                    save('fault-receipt.json',receipts[-1])
+                if mode == 'outer':
+                    driver = next(r for r in rows if r['pid'] == cli['parent'])
+                    send(driver, signal.SIGSTOP)
+                    save('stopped-python.json', driver)
+                if mode == 'exception':
+                    send(identities[p.pid], signal.SIGTERM)
+                if mode == 'ownership':
+                    saved['worktrees']['foreign'] = {'pgid': foreign.pid, 'processToken': '0' * 32}
+                    states[0].write_text(json.dumps(saved))
+                    original = next(root.glob('terminal-child-*.json'))
+                    record = json.loads(original.read_text())
+                    record['pid'] = foreign.pid
+                    record['start'] = 'not the current start time'
+                    (root / 'terminal-child-forged.json').write_text(json.dumps(record))
+                break
+            if p.poll() is not None:
+                raise RuntimeError('Driver completed before fault readiness')
+            time.sleep(.05)
+        else:
+            raise TimeoutError('Fault readiness not reached; original driver remains unmodified')
+        try:
+            code=p.wait(timeout=85)
+        except subprocess.TimeoutExpired:
+            raise TimeoutError('Observer deadline reached; not a successful driver-deadline reproduction')
+    rows=table()
+    remaining=[r for r in rows if live(r) and (r['pid'] in identities or any(r['group']==w['pgid'] for w in workers))]
+    err=(out/'driver.stderr').read_text()
+    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure':'subprocess.TimeoutExpired after 20 seconds','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
+    save('result.json',result)
+    if mode in ['pipe', 'resume', 'json']:
+        assert code == 1 and result['deadlineObserved'], 'Original deadline did not produce the expected failure'
+    elif mode == 'pty':
+        assert code == 1 and 'PTY demo exceeded 22 seconds' in err, err
+    elif mode == 'outer':
+        deadline = json.loads((root / 'outer-deadline.json').read_text())
+        assert code != 0 and deadline['timeout'] == 30000 and deadline['error'] == 'ETIMEDOUT' and deadline['signal'] == 'SIGKILL', deadline
+    elif mode == 'normal':
+        assert code == 0, err
+    elif mode == 'ownership':
+        assert code != 0 and 'refused' in err.lower(), err
+    else:
+        assert code != 0, 'Injected failure did not fail the driver'
+    assert not remaining, f'Owned resources survived driver cleanup: {remaining}'
+    assert not remaining, 'Detached worker leak observed'
+    assert result['foreignStillAlive'], 'Foreign sentinel unexpectedly stopped'
+    print(f'PASS {mode}: zero owned resources before rescue; foreign preserved', flush=True)
+finally:
+    errors=[]
+    if p is not None:
+        try:
+            rows=table()
+            remember(rows,p.pid)
+            if cli:
+                send(cli,signal.SIGKILL)
+            for w in workers:
+                leader=identities.get(w['pgid'])
+                if leader:
+                    send(leader,signal.SIGKILL,group=True,token=w['token'])
+            for record in list(identities.values()):
+                if record['pid']==p.pid:
+                    continue
+                send(record,signal.SIGKILL)
+            if p.poll() is None:
+                record=identities.get(p.pid)
+                if record:
+                    send(record,signal.SIGKILL)
+            p.wait(timeout=5)
+        except Exception as error:
+            errors.append(repr(error))
+    if foreign is not None:
+        try:
+            alive_before=current(foreign_identity) is not None
+            save('foreign-preserved-through-rescue.json',{'alive':alive_before,'identity':foreign_identity})
+            if not alive_before:
+                raise RuntimeError('Foreign sentinel was not preserved through rescue')
+            send(foreign_identity,signal.SIGKILL)
+            foreign.wait(timeout=5)
+        except Exception as error:
+            errors.append(repr(error))
+    time.sleep(.5)
+    rows=table()
+    remaining=[r for r in rows if live(r) and (r['pid'] in identities or any(r['group']==w['pgid'] for w in workers) or (foreign is not None and r['pid']==foreign.pid))]
+    save('cleanup.json',{'signals':receipts,'refused':refused,'errors':errors,'remaining':remaining,'identities':list(identities.values()),'foreignPid':foreign.pid if foreign else None})
+    save('processes-after.json',rows)
+    if errors or remaining:
+        raise RuntimeError('Cleanup incomplete; inspect cleanup.json')
