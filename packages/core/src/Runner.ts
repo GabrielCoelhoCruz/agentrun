@@ -8,14 +8,12 @@ import {
   FileSystem,
   Layer,
   Option,
-  Predicate,
   PubSub,
   Semaphore,
   Stream,
   SynchronizedRef,
 } from "effect"
 import type { Scope } from "effect"
-import { systemError } from "effect/PlatformError"
 import type { PlatformError } from "effect/PlatformError"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { Agents } from "./Agents.js"
@@ -137,23 +135,20 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
             stderr: `Recorded worktree identity differs for ${task.id}`,
           })
         }
+        const pgid = recorded?.pgid
+        if (pgid !== undefined && (!Number.isInteger(pgid) || pgid <= 0 || (yield* isAlive(-pgid)))) {
+          return yield* new GitError({
+            command: "resume process group",
+            exitCode: -1,
+            stderr:
+              `Cannot resume ${task.id}: saved process group ${pgid} is invalid or may still be running; ownership is unverified`,
+          })
+        }
       }
       const reconciled = yield* worktrees.reconcile(state)
       for (const action of reconciled) {
         const status = (yield* SynchronizedRef.get(current)).status[action.taskId]
         if (action._tag === "Interrupted" && status?._tag === "running") {
-          const pgid = state.worktrees[action.taskId]?.pgid
-          if (pgid !== undefined && Number.isInteger(pgid) && pgid > 0 && (yield* isAlive(-pgid))) {
-            yield* Effect.try({
-              try: () => process.kill(-pgid, "SIGTERM"),
-              catch: (cause) => systemError({ _tag: "Unknown", module: "Runner", method: "terminateGroup", cause }),
-            }).pipe(Effect.catchIf(
-              (error) =>
-                Predicate.isObject(error.reason.cause) && "code" in error.reason.cause
-                && error.reason.cause.code === "ESRCH",
-              () => Effect.void,
-            ))
-          }
           yield* transition(action.taskId, { _tag: "interrupted", attempt: status.attempt })
         } else if (action._tag === "WorktreeMissing" && status?._tag === "running") {
           yield* transition(
