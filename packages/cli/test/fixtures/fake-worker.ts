@@ -41,6 +41,15 @@ NodeRuntime.runMain(
             )
             if (!prior) await new Promise(() => {})
           }
+          if (input.prompt.includes("panel-demo")) {
+            process.stderr.write(`worker warning ${id}\n`)
+            yield { _tag: "Text" as const, text: `working ${id} 界 👩‍💻` }
+            yield { _tag: "Text" as const, text: "\x1b[2J\x1b]52;c;bad\x07safe log\r\b" }
+            for (let n = 0; n < 6; n++) {
+              await new Promise((resolve) => setTimeout(resolve, 200))
+              yield { _tag: "ToolResult" as const, id: String(n), isError: false, summary: `checked file ${n}` }
+            }
+          }
           if (input.prompt.includes("hold") || (input.prompt.includes("crash-once") && !prior)) {
             const sleep = spawn("sleep", ["300"], { stdio: "ignore", detached: input.prompt.includes("detached") })
             writeFileSync(join(root, `child-${id}`), String(sleep.pid))
