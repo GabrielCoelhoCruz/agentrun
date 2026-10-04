@@ -177,7 +177,6 @@ export const make = (deps: {
           }),
           (unsubscribe) => Effect.sync(unsubscribe),
         )
-        // Attach both handlers immediately, including when the SDK rejects before the next pull.
         yield* Effect.try({
           try: () => {
             promptFinished = session.prompt(input.prompt).then(
