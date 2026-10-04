@@ -724,7 +724,6 @@ it.effect("retries twice within exponential jitter bounds and records runner ret
     assert.strictEqual(calls, 1)
     yield* TestClock.adjust(401)
     assert.strictEqual(calls, 2)
-    // Earliest third attempt: 800ms for the first delay plus 1600ms for the second.
     yield* TestClock.adjust(1199)
     assert.strictEqual(calls, 2)
     yield* TestClock.adjust(1201)

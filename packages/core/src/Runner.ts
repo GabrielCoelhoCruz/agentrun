@@ -400,7 +400,6 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                 yield* transition(task.id, { _tag: "running", attempt, startedAt })
                 return yield* worktrees.acquire(task, state.baseSha, () => toolsStarted, () =>
                   Effect.gen(function*() {
-                    // Invalidate before Git can create a partial directory and be interrupted.
                     setupDone = false
                     yield* checkpoint(task.id, {
                       ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
@@ -592,7 +591,6 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                   Effect.andThen(terminal(new AgentTimedOut({ agent: task.agent, after: task.maxDuration }))),
                 ),
               ),
-              // Record terminal failure before worktree cleanup can be interrupted by a process crash.
               Effect.tapError((error) => isTaskError(error) ? recordFailure(task.id, error) : Effect.void),
             ),
           ).pipe(Effect.onExit((exit) =>

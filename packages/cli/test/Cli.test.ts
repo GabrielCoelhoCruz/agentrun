@@ -1281,7 +1281,6 @@ test("resume runs setup again when an interrupted worktree must be recreated", a
   expect(startsCount(f)).toBe(3)
 }, 30000)
 
-// Review fixes use built commands, real Git and owned worker groups.
 test("review storage cause is refused across worker transport", async () => {
   const f = timedFixture("spawn-storage")
   writeFileSync(
@@ -1414,7 +1413,6 @@ for (const crash of [false, true]) {
   test(
     `review hanging delivery Git preserves immutable recovery without provider replay (${crash ? "crash" : "timeout"})`,
     async () => {
-      // The deadline must reach publication after real Git and worker startup.
       const f = timedFixture("success", "20 seconds", "10 seconds")
       hangingGit(f, "delivery")
       const c = child(f, ["run", "TASKS.md", "--json", "--keep-worktrees"])

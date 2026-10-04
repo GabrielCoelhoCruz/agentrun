@@ -30,7 +30,6 @@ export class AgentSpawnError extends Schema.TaggedError<AgentSpawnError>()("Agen
   retryable: Schema.optional(Schema.Boolean),
 }) {}
 
-// Classify before a transport replaces the cause with text.
 export const retryableSpawnError = (error: AgentSpawnError): boolean =>
   error.retryable !== false && !(typeof error.cause === "object" && error.cause !== null && "_tag" in error.cause)
 

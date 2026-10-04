@@ -74,7 +74,6 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
         try: () => JSON.parse(entry.slice(0, -5)) as unknown,
         catch: processError,
       })
-      // The journal filename is written before the command is sent to the leader.
       if (typeof lease !== "number" || !Number.isSafeInteger(lease) || !entry.endsWith(".json")) {
         return yield* processError("Invalid Git process journal")
       }
@@ -89,7 +88,6 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
       const command = `git ${args.join(" ")}`
       const error = (cause: unknown) => new GitError({ command, exitCode: -1, stderr: String(cause) })
       const token = randomBytes(16).toString("hex")
-      // A waiting group leader permits durable ownership registration before Git starts.
       const child = yield* Effect.acquireRelease(
         Effect.try({
           try: () =>
@@ -154,7 +152,6 @@ process.stdin.once('data',()=>{
         NodeStream.fromReadable({ evaluate: () => errors, onError: error }).pipe(Stream.decodeText(), Stream.mkString),
         exit,
       ], { concurrency: "unbounded" }).pipe(
-        // Cleanup and recovery Git waits also have a bound, even inside finalizers.
         Effect.timeoutOrElse({ duration: "60 seconds", orElse: () => Effect.fail(error("Git exceeded 60000ms")) }),
       )
       if (exitCode !== 0) return yield* new GitError({ command, exitCode, stderr })
@@ -223,8 +220,6 @@ process.stdin.once('data',()=>{
             : remove(worktree).pipe(
               Effect.catchTag("GitError", (error) => Effect.logWarning("Worktree removal failed", error)),
             ),
-        // Git owns a scope and journal even if acquisition creates only part of a directory.
-        // On interruption keep that intent; reconciliation validates Git before removal.
         { interruptible: true },
       )
     },

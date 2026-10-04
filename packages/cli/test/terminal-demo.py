@@ -16,7 +16,6 @@ git('init', '-q')
 git('add', '.')
 git('-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-qm', 'base')
 prompt = 'retry-success' if scenario == 'retry' else 'deadline-active' if scenario == 'timeout' else 'panel-demo hold' if scenario == 'interrupted' else 'panel-demo'
-# Real worker startup needs room; the timeout case must reach its absolute ceiling.
 (repo / 'TASKS.md').write_text(('---\nconcurrency: 3\nstallTimeout: 20 seconds\nmaxDuration: 30 seconds\n---\n' if scenario == 'retry' else '---\nconcurrency: 3\nstallTimeout: 30 seconds\nmaxDuration: 10 seconds\n---\n' if scenario == 'timeout' else '---\nconcurrency: 3\n---\n') + '\n'.join(
     f'## task{n}: Task {n} 界 👩‍💻 long title for narrow terminals\n{prompt}' + (' fail' if scenario == 'failed' and n == 1 else '') + '\n'
     for n in range(3)))
