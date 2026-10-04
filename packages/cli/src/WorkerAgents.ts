@@ -84,7 +84,6 @@ export const workerAgents = (worker: URL) =>
                   child.pid === undefined ? Effect.void : stopProcessGroup(child.pid, token).pipe(Effect.orDie),
               )
               if (child.pid === undefined) return yield* error("Worker did not start")
-              // Capture errors before persistence; never start the provider before its ownership is saved.
               child.on("error", () => {})
               child.stderr.setEncoding("utf8")
               child.stderr.on("data", (chunk: string) => diagnostic(chunk, input.taskId))
@@ -133,7 +132,6 @@ export const workerAgents = (worker: URL) =>
       ),
   })
 
-// The worker waits on stdin. Its group is recorded before setup or tools start.
 export const serveWorker = (
   run: (input: AgentInput, agent: "claude-code" | "pi") => ReturnType<AgentAdapter["run"]>,
 ) => {
