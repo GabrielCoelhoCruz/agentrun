@@ -1,11 +1,11 @@
 import { Context, Effect, Exit, FileSystem, Layer, Path, Schema, Semaphore, Stream } from "effect"
 import type { Scope } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
-import { createHash } from "node:crypto"
 import { GitError } from "./domain/Errors.js"
 import type { RunState } from "./domain/RunState.js"
 import { TaskId } from "./domain/Task.js"
 import type { Task } from "./domain/Task.js"
+import { repoHash } from "./RepoHash.js"
 
 export interface Worktree {
   readonly taskId: TaskId
@@ -65,12 +65,10 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
   }, Effect.scoped)
 
   const repo = { cwd: options.repoRoot }
-  const commonDir = yield* git(["rev-parse", "--git-common-dir"], repo)
-  const realPath = yield* fs.realPath(path.resolve(options.repoRoot, commonDir)).pipe(Effect.orDie)
-  const repoHash = createHash("sha256").update(realPath).digest("hex").slice(0, 12)
+  const hash = yield* repoHash(options.repoRoot)
   const locate = (taskId: TaskId): Worktree => ({
     taskId,
-    path: path.join(options.home, ".agentrun", "worktrees", repoHash, options.runId, taskId),
+    path: path.join(options.home, ".agentrun", "worktrees", hash, options.runId, taskId),
     branch: `agentrun/${taskId}-${options.runId.slice(-4)}`,
   })
 
@@ -90,6 +88,17 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
       Effect.gen(function*() {
         const worktree = locate(task.id)
         yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.orDie)
+        if (yield* fs.exists(worktree.path).pipe(Effect.orDie)) {
+          const branch = yield* git(["symbolic-ref", "--short", "HEAD"], { cwd: worktree.path })
+          if (branch !== worktree.branch) {
+            return yield* new GitError({
+              command: "reuse worktree",
+              exitCode: -1,
+              stderr: "Recorded worktree has a different branch",
+            })
+          }
+          return worktree
+        }
         const exists = yield* branchExists(worktree.branch)
         yield* git(
           exists

@@ -1,10 +1,27 @@
 import { NodeServices } from "@effect/platform-node"
 import { describe, it } from "@effect/vitest"
-import { Deferred, Duration, Effect, Exit, Fiber, FileSystem, Layer, Option, Path, Ref, Schema, Stream } from "effect"
+import {
+  DateTime,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  Ref,
+  Schema,
+  Stream,
+} from "effect"
 import type { Scope } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { TestClock } from "effect/testing"
 import assert from "node:assert/strict"
+import { spawn } from "node:child_process"
+import { once } from "node:events"
+import { vi } from "vitest"
 import { Agents } from "../src/Agents.js"
 import type { AgentInput } from "../src/domain/Agent.js"
 import type { AgentEvent } from "../src/domain/AgentEvent.js"
@@ -12,6 +29,8 @@ import type { AgentError } from "../src/domain/Errors.js"
 import type { RunEvent } from "../src/domain/RunEvent.js"
 import { RunState } from "../src/domain/RunState.js"
 import { Task, TaskId } from "../src/domain/Task.js"
+import type { TaskStatus } from "../src/domain/TaskStatus.js"
+import { RunLock } from "../src/RunLock.js"
 import { Runner } from "../src/Runner.js"
 import { StateStore } from "../src/StateStore.js"
 import { Worktrees } from "../src/Worktrees.js"
@@ -115,7 +134,7 @@ const withRepo = Effect.fn("test.withRepo")(
     const baseSha = yield* git(repoRoot, ["rev-parse", "main"])
     const runId = "20261003T1200-a1b2"
     yield* test({ fs, path, repoRoot, home, baseSha, runId }).pipe(
-      Effect.provide(Worktrees.layer({ repoRoot, home, runId })),
+      Effect.provide(Layer.merge(Worktrees.layer({ repoRoot, home, runId }), RunLock.layer({ home }))),
     )
   },
   Effect.scoped,
@@ -347,7 +366,11 @@ describe("Runner", () => {
           Stream.succeed<AgentEvent>({ _tag: "Started" }).pipe(Stream.concat(
             Stream.fromEffect(TestClock.adjust("90 seconds").pipe(Effect.as(completed))),
           ))
-        )).pipe(Layer.provide(Layer.merge(clockWorktrees, NodeServices.layer))),
+        )).pipe(Layer.provide(Layer.mergeAll(
+          clockWorktrees,
+          Layer.succeed(RunLock, { acquire: () => Effect.void }),
+          NodeServices.layer,
+        ))),
       ),
     ))
 
@@ -414,3 +437,236 @@ describe("Runner", () => {
       assert.deepStrictEqual(yield* store.latest, Option.some(first.runId))
     }).pipe(Effect.provide(StateStore.layerMemory)))
 })
+
+it.live("resumes two interrupted tasks in the same directories and branches", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const started = yield* Deferred.make<void>()
+      const count = yield* Ref.make(0)
+      const storeLayer = StateStore.layerMemory
+      const blocked = fakeAgents(() =>
+        Stream.fromEffect(Effect.gen(function*(): Effect.fn.Return<AgentEvent> {
+          if ((yield* Ref.updateAndGet(count, (n) => n + 1)) === 2) yield* Deferred.succeed(started, undefined)
+          return yield* Effect.never
+        }))
+      )
+      yield* Effect.gen(function*() {
+        const store = yield* StateStore
+        const initial = runState([task(), task("second-task")], fixture)
+        yield* Effect.gen(function*() {
+          const fiber = yield* Effect.forkChild((yield* Runner).run(initial))
+          yield* Deferred.await(started)
+          yield* Fiber.interrupt(fiber)
+        }).pipe(Effect.provide(Runner.layer({ concurrency: 2 }).pipe(Layer.provide(blocked))))
+        const saved = yield* store.load(initial.runId)
+        yield* Effect.gen(function*() {
+          const runner = yield* Runner
+          const collector = yield* collect(runner)
+          const result = yield* runner.run(saved)
+          const events = yield* Fiber.join(collector)
+          assert.deepStrictEqual(result.worktrees, saved.worktrees)
+          for (const task of result.tasks) {
+            assert.strictEqual(result.status[task.id]?._tag, "succeeded")
+            assert.ok(events.some((event) =>
+              event._tag === "TaskTransition" && event.taskId === task.id && event.status._tag === "running"
+              && event.status.attempt === 2
+            ))
+          }
+        }).pipe(Effect.provide(
+          Runner.layer({ concurrency: 2 }).pipe(Layer.provide(fakeAgents(() =>
+            success
+          ))),
+        ))
+      }).pipe(Effect.provide(storeLayer))
+    })
+  ))
+for (const mode of ["recreated", "crashed", "missing", "failed", "retry"]) {
+  it.live(`resumes ${mode} state`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const worktrees = yield* Worktrees
+        const located = worktrees.locate(task().id)
+        if (mode === "recreated" || mode === "crashed" || mode === "missing") {
+          yield* fixture.fs.makeDirectory(fixture.path.dirname(located.path), { recursive: true })
+          yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+          if (mode !== "crashed") yield* fixture.fs.remove(located.path, { recursive: true })
+        }
+        const status: TaskStatus = mode === "recreated"
+          ? { _tag: "interrupted", attempt: 1 }
+          : mode === "crashed" || mode === "missing"
+          ? { _tag: "running", attempt: 1, startedAt: yield* DateTime.now }
+          : { _tag: "failed", attempt: 1, reason: "old failure" }
+        const initial = runState([task()], {
+          ...fixture,
+          status: { [task().id]: status },
+          worktrees: { [task().id]: located },
+        })
+        let calls = 0
+        yield* Effect.gen(function*() {
+          const runner = yield* Runner
+          const collector = yield* collect(runner)
+          const result = yield* runner.run(initial)
+          const events = yield* Fiber.join(collector)
+          if (mode === "missing" || mode === "failed") {
+            assert.strictEqual(calls, 0)
+            assert.deepStrictEqual(result.status[task().id], {
+              _tag: "failed",
+              attempt: 1,
+              reason: mode === "missing" ? "worktree missing" : "old failure",
+            })
+          } else {
+            assert.strictEqual(calls, 1)
+            assert.strictEqual(result.status[task().id]?._tag, "succeeded")
+            assert.ok(
+              events.some((event) =>
+                event._tag === "TaskTransition" && event.status._tag === "running" && event.status.attempt === 2
+              ),
+            )
+            if (mode === "crashed") {
+              assert.ok(events.some((event) => event._tag === "TaskTransition" && event.status._tag === "interrupted"))
+            }
+          }
+        }).pipe(
+          Effect.provide(
+            Runner.layer({ concurrency: 1, retryFailed: mode === "retry" }).pipe(
+              Layer.provide(Layer.merge(
+                fakeAgents(() => {
+                  calls++
+                  return success
+                }),
+                StateStore.layerMemory,
+              )),
+            ),
+          ),
+        )
+      })
+    ))
+}
+it.live("rejects a held repository lock before transitions", () =>
+  withRepo((fixture) =>
+    Effect.scoped(Effect.gen(function*() {
+      yield* (yield* RunLock).acquire(fixture.repoRoot)
+      yield* Effect.gen(function*() {
+        const runner = yield* Runner
+        const store = yield* StateStore
+        const error = yield* Effect.flip(runner.run(runState([task()], fixture)))
+        assert.strictEqual(error._tag, "RunLocked")
+        assert.deepStrictEqual(yield* store.latest, Option.none())
+      }).pipe(Effect.provide(testLayer(fakeAgents(() => success))))
+    }))
+  ))
+
+for (const code of ["ESRCH", "EPERM", "live", "invalid"]) {
+  it.live(`checks saved process-group ${code} without termination signals`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const located = (yield* Worktrees).locate(task().id)
+        yield* fixture.fs.makeDirectory(fixture.path.dirname(located.path), { recursive: true })
+        yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+        const initial = runState([task()], {
+          ...fixture,
+          status: { [task().id]: { _tag: "running", attempt: 1, startedAt: yield* DateTime.now } },
+          worktrees: { [task().id]: { ...located, pgid: code === "invalid" ? 0 : 999999 } },
+        })
+        let calls = 0
+        const signals: Array<[number, string | number | undefined]> = []
+        const kill = process.kill.bind(process)
+        const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+          if (pid !== -999999) return kill(pid, signal)
+          signals.push([pid, signal])
+          if (code === "live") return true
+          throw Object.assign(new Error(code), { code })
+        })
+        yield* Effect.gen(function*() {
+          const runner = yield* Runner
+          const store = yield* StateStore
+          yield* store.save(initial)
+          const result = yield* Effect.result(runner.run(initial))
+          if (code === "ESRCH") {
+            assert.ok(result._tag === "Success")
+            assert.strictEqual(calls, 1)
+          } else {
+            assert.ok(result._tag === "Failure")
+            assert.strictEqual(result.failure._tag, "GitError")
+            assert.strictEqual(calls, 0)
+            assert.deepStrictEqual(yield* store.load(initial.runId), initial)
+          }
+          assert.deepStrictEqual(signals, code === "invalid" ? [] : [[-999999, 0]])
+        }).pipe(
+          Effect.provide(testLayer(fakeAgents(() => {
+            calls++
+            return success
+          }))),
+          Effect.ensuring(Effect.sync(() => spy.mockRestore())),
+        )
+      })
+    ))
+}
+
+for (const status of ["running", "interrupted", "pending", "failed", "succeeded"] as const) {
+  it.live(`preserves a live saved group and worktree for ${status} state`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const child = yield* Effect.acquireRelease(
+          Effect.promise(async () => {
+            const child = spawn(process.execPath, [
+              "-e",
+              "process.on(\"SIGTERM\", () => {}); setInterval(() => {}, 1000); process.stdout.write(\"ready\")",
+            ], {
+              detached: true,
+              stdio: ["ignore", "pipe", "inherit"],
+            })
+            await once(child.stdout, "data")
+            return child
+          }),
+          (child) =>
+            Effect.promise(async () => {
+              const closed = once(child, "close")
+              child.kill("SIGKILL")
+              await closed
+            }),
+        )
+        assert.ok(child.pid !== undefined)
+        const pgid = child.pid
+        const located = (yield* Worktrees).locate(task().id)
+        yield* fixture.fs.makeDirectory(fixture.path.dirname(located.path), { recursive: true })
+        yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+        const initial = runState([task()], {
+          ...fixture,
+          status: {
+            [task().id]: status === "running"
+              ? { _tag: status, attempt: 1, startedAt: yield* DateTime.now }
+              : status === "interrupted"
+              ? { _tag: status, attempt: 1 }
+              : status === "failed"
+              ? { _tag: status, attempt: 1, reason: "previous failure" }
+              : status === "succeeded"
+              ? { _tag: status, durationMs: 1 }
+              : { _tag: status },
+          },
+          worktrees: { [task().id]: { ...located, pgid } },
+        })
+        let launches = 0
+        yield* Effect.gen(function*() {
+          const store = yield* StateStore
+          yield* store.save(initial)
+          const result = yield* Effect.result((yield* Runner).run(yield* store.load(initial.runId)))
+          assert.strictEqual(launches, 0, "replacement must not start while the saved group is live")
+          assert.ok(result._tag === "Failure", "live saved group must block reconciliation")
+          assert.strictEqual(result.failure._tag, "GitError")
+          assert.deepStrictEqual(yield* store.load(initial.runId), initial)
+          assert.ok(yield* fixture.fs.exists(located.path), "live group's worktree must remain")
+          assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", located.branch]), fixture.baseSha)
+          assert.ok(process.kill(-pgid, 0), "unverified saved group must remain alive")
+        }).pipe(Effect.provide(
+          Runner.layer({ concurrency: 1, retryFailed: true }).pipe(Layer.provideMerge(Layer.merge(
+            fakeAgents(() => {
+              launches++
+              return success
+            }),
+            StateStore.layerFile({ repoRoot: fixture.repoRoot }),
+          ))),
+        ))
+      })
+    ))
+}
