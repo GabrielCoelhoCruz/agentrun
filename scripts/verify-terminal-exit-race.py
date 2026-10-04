@@ -16,6 +16,7 @@ fields = ['pid', 'parent', 'group', 'uid', 'start', 'state', 'command']
 identity_fields = ['pid', 'uid', 'group', 'start', 'command']
 real_run = subprocess.run
 real_kill = os.kill
+real_glob = Path.glob
 
 
 def save(name, value):
@@ -63,7 +64,15 @@ def stop_owned(record, sig):
 
 if len(sys.argv) > 3 and sys.argv[3] == 'driver':
     guard = out / 'guard'
-    state = {'armed': False, 'injected': False, 'target': None}
+    state = {'armed': False, 'injected': False, 'target': None, 'deferState': False}
+    registration = mode in ['worker-command', 'worker-group', 'initial-partial', 'launcher']
+
+    def observed_glob(path, pattern, **kwargs):
+        if state['deferState'] and pattern == '*/state.json' and str(guard) in str(path):
+            state['deferState'] = False
+            return iter([])
+        return real_glob(path, pattern, **kwargs)
+
 
     def observed_run(args, *a, **kw):
         response = real_run(args, *a, **kw)
@@ -79,7 +88,49 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
         record = context.f_locals.get('record') if context.f_code.co_name == 'current' else None
         frozen = (guard / 'complete-fault-inventory.json').exists()
         freeze_call = any(frame.function == 'freeze_tree' for frame in inspect.stack())
-        if mode == 'freeze-exit' and not state['injected'] and freeze_call and record and 'fake-worker.mjs agentrun-worker-' in record['command']:
+        if registration and not state['armed'] and context.f_code.co_name == '<module>':
+            candidates = [r for r in rows if 'fake-worker.mjs agentrun-worker-' in r['command'] and live(r)]
+            cli_rows = [r for r in rows if '/fixtures/dist/entry.mjs run TASKS.md' in r['command'] and live(r)]
+            leases = [r for r in rows if '/usr/bin/lockf ' in r['command'] and str(guard) in r['command']]
+            if candidates and cli_rows and leases:
+                cli_row = cli_rows[0]
+                worker = next(r for r in candidates if r['parent'] == cli_row['pid'])
+                owned = {owner['p'].pid}
+                while True:
+                    expanded = owned | {r['pid'] for r in rows if r['parent'] in owned}
+                    if expanded == owned:
+                        break
+                    owned = expanded
+                captured = [dict(r) for r in rows if r['pid'] in owned]
+                target = cli_row if mode == 'launcher' else worker
+                for r in captured:
+                    if r['pid'] == cli_row['pid'] or r['pid'] == worker['pid'] or r['pid'] == leases[0]['pid'] or r['parent'] == leases[0]['pid']:
+                        stop_owned(r, signal.SIGSTOP)
+                state.update(armed=True, target=dict(target), deferState=True)
+                save('precondition.json', {'identities': captured, 'target': dict(target),
+                                          'foreign': owner['foreign_identity'], 'phase': 'registration'})
+                if mode == 'launcher':
+                    receipt = next(guard.rglob('terminal-child-' + str(target['pid']) + '.json'))
+                    launcher = json.loads(receipt.read_text())['commands'][0]
+                    target['command'] = launcher
+                    state['injected'] = True
+                    save('injection.json', {'mode': mode, 'observed': dict(target), 'receipt': str(receipt)})
+                elif mode == 'initial-partial':
+                    target['command'] = '(node)'
+                    state['injected'] = True
+                    save('injection.json', {'mode': mode, 'observed': dict(target)})
+        elif registration and state['armed']:
+            if mode in ['worker-command', 'worker-group']:
+                state['injected'] = True
+                for row in rows:
+                    if row['pid'] == state['target']['pid'] and live(row):
+                        raw = dict(row)
+                        if mode == 'worker-command':
+                            row['command'] += ' changed-identity'
+                        else:
+                            row['group'] += 1
+                        save('injection.json', {'mode': mode, 'raw': raw, 'observed': dict(row)})
+        elif mode == 'freeze-exit' and not state['injected'] and freeze_call and record and 'fake-worker.mjs agentrun-worker-' in record['command']:
             row = next((r for r in rows if same(r, record) and live(r)), None)
             if row:
                 state.update(armed=True, injected=True, target=record)
@@ -151,13 +202,14 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
                                'afterInjection': state['injected']}) + '\n')
         return real_kill(pid, sig)
 
+    Path.glob = observed_glob
     subprocess.run = observed_run
     os.kill = observed_kill
     sys.argv = [str(wt / 'scripts/verify-terminal-cleanup.py'), str(guard), 'timeout-outer']
     runpy.run_path(sys.argv[0], run_name='__main__')
     raise SystemExit(0)
 
-assert mode in ['exit', 'command', 'remember-command', 'uid', 'group', 'start', 'inspect', 'lookup', 'freeze-exit']
+assert mode in ['exit', 'command', 'remember-command', 'uid', 'group', 'start', 'inspect', 'lookup', 'freeze-exit', 'worker-command', 'worker-group', 'initial-partial', 'launcher']
 out.mkdir(exist_ok=False)
 save('target.json', {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=wt, text=True).strip(),
                      'mode': mode, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True),
@@ -179,16 +231,17 @@ try:
     save('actual-after.json', rows)
     remaining = [r for r in rows if live(r) and any(same(r, old) for old in records)]
     cleanup = json.loads((out / 'guard/cleanup.json').read_text())
-    persistent = mode in ['command', 'remember-command', 'uid', 'group', 'start']
+    persistent = mode in ['command', 'remember-command', 'uid', 'group', 'start', 'worker-command', 'worker-group']
     signals = [json.loads(line) for line in (out / 'observer-signals.jsonl').read_text().splitlines()]
     target_signals = [r for r in signals if r['afterInjection'] and r['pid'] == pre['target']['pid']]
     save('result.json', {'guardExit': code, 'remainingBeforeProbeRescue': remaining,
                          'targetSignalsAfterInjection': target_signals,
                          'probeRescueBeforeObservation': False, 'persistentAmbiguity': persistent})
+    assert all(not r['identity']['command'].startswith('(') for r in cleanup['signals'] if 'identity' in r), 'Partial observation became signal authority'
     assert all(r['pid'] > 0 for r in signals), 'Broad signal sent'
-    if mode != 'inspect':
+    if mode not in ['inspect', 'launcher', 'initial-partial']:
         assert not target_signals, 'Observer signaled an ambiguous or exited target'
-    if mode not in ['inspect', 'lookup']:
+    if mode not in ['inspect', 'lookup', 'launcher', 'initial-partial']:
         assert cleanup['refused'], 'Injected refusal was not recorded'
     if persistent:
         assert code != 0 and any(r['pid'] == pre['target']['pid'] for r in cleanup['remaining'])
@@ -197,7 +250,7 @@ try:
         assert not remaining, 'Verified resources survived a refused or disappearing identity'
         assert not cleanup['remaining'], 'Observer did not prove absence'
     assert json.loads((out / 'guard/foreign-preserved-through-rescue.json').read_text())['alive']
-    if mode == 'freeze-exit':
+    if mode in ['freeze-exit', 'launcher', 'initial-partial']:
         assert code == 0, 'An exited child prevented a complete fault inventory'
     print('PASS', mode, flush=True)
 finally:
