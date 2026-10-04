@@ -13,7 +13,7 @@ wt = Path(__file__).resolve().parents[1]
 node = shutil.which('node')
 assert node, 'Node is required'
 mode = sys.argv[2] if len(sys.argv) > 2 else 'pipe'
-scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe'}.get(mode, mode)
+scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe'}.get(mode, mode)
 out = Path(sys.argv[1]).resolve()
 out.mkdir(exist_ok=False)
 root = out / 'fixture'
@@ -90,11 +90,15 @@ try:
     foreign_identity = next(r for r in table() if r['pid'] == foreign.pid)
     save('foreign-owned-by-observer.json', foreign_identity)
     args = [sys.executable, str(wt / 'packages/cli/test/terminal-demo.py'), scenario, str(root), node]
-    save('command.json', {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':22 if mode == 'pty' else 30 if mode == 'outer' else 20, 'fault':'SIGSTOP only the observed CLI after all three workers start', 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest()})
+    save('command.json', {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':22 if mode == 'pty' else 30 if mode == 'outer' else 20, 'fault':'SIGSTOP only the observed CLI after all three workers start', 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest(), 'sourceHashes': {f: hashlib.sha256((wt / f).read_bytes()).hexdigest() for f in ['packages/cli/test/terminal-demo.py', 'packages/cli/test/terminal_fixture.py', 'packages/cli/test/Terminal.test.ts', 'scripts/verify-terminal-cleanup.py', 'scripts/terminal-cleanup-deadline.cjs'] if (wt / f).exists()}, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True)})
     if mode == 'outer':
         env['NODE_OPTIONS'] = '--require=' + str(wt / 'scripts/terminal-cleanup-deadline.cjs')
         env['AGENTRUN_TEST_EVIDENCE'] = str(root)
         args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: json']
+    if mode == 'freeze-stall':
+        driver = out / 'freeze-driver.py'
+        driver.write_text("import sys, runpy\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.dont_write_bytecode = True\nimport terminal_fixture\noriginal = terminal_fixture.table\ndef stalled(timeout=5):\n    rows = original(timeout)\n    for row in rows.values():\n        if 'fake-worker.mjs agentrun-worker-' in row['command'] and row['state'].startswith('T'):\n            row['state'] = 'S'\n    return rows\nterminal_fixture.table = stalled\nsys.argv = sys.argv[1:]\nrunpy.run_path(str(p), run_name='__main__')\n")
+        args.insert(1, str(driver))
     if mode == 'hold':
         driver = out / 'hold-driver.py'
         driver.write_text("import sys\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.argv = sys.argv[1:]\nsource = p.read_text().replace(\"else 'panel-demo'\", \"else 'panel-demo hold'\")\nexec(compile(source, str(p), 'exec'), {'__file__': str(p), '__name__': '__main__'})\n")
@@ -142,6 +146,9 @@ try:
                     save('stopped-python.json', driver)
                 if mode == 'exception':
                     send(identities[p.pid], signal.SIGTERM)
+                if mode == 'bad-worker':
+                    saved['worktrees'] = {'malformed': None, **saved['worktrees']}
+                    states[0].write_text(json.dumps(saved))
                 if mode == 'bad-receipt':
                     nonce = json.loads((root / 'terminal-owner.json').read_text())
                     (root / 'terminal-owned.json').write_text(json.dumps([{'nonce': nonce}]))
@@ -170,7 +177,7 @@ try:
     err=(out/'driver.stderr').read_text()
     result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if mode == 'outer' else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
     save('result.json',result)
-    if mode in ['pipe', 'resume', 'json', 'hold', 'missing-state', 'bad-receipt']:
+    if mode in ['pipe', 'resume', 'json', 'hold', 'missing-state', 'bad-receipt', 'bad-worker', 'freeze-stall']:
         assert code == 1 and result['deadlineObserved'], 'Original deadline did not produce the expected failure'
     elif mode in ['pty', 'resume-second']:
         assert code == 1 and 'PTY demo exceeded 22 seconds' in err, err
