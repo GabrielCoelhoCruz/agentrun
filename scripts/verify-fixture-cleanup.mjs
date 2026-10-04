@@ -9,7 +9,9 @@ const repo = fileURLToPath(new URL("../", import.meta.url))
 const output = resolve(process.argv[2])
 const scenario = process.argv[3] ?? "wait"
 assert.ok(
-  ["wait", "assertion", "timeout", "success", "unknown", "reused", "linked", "lease-timeout"].includes(scenario),
+  ["wait", "assertion", "timeout", "success", "unknown", "reused", "linked", "nested", "lease-timeout"].includes(
+    scenario,
+  ),
 )
 mkdirSync(output)
 const fixtures = join(output, "fixtures")
@@ -130,7 +132,7 @@ try {
     assert.ok(readFileSync(join(f, "child-task1"), "utf8").trim(), "second real hold child started")
   }
   if (scenario === "lease-timeout") assert.match(stdout + stderr, /Test timed out/)
-  if (scenario === "assertion" || scenario === "linked") assert.match(stdout + stderr, /injected assertion failure/)
+  if (["assertion", "linked", "nested"].includes(scenario)) assert.match(stdout + stderr, /injected assertion failure/)
   if (scenario === "timeout") {
     assert.match(stdout + stderr, /Test timed out/)
     assert.match(readFileSync(join(f, "late-result"), "utf8"), /closed/)

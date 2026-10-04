@@ -628,10 +628,16 @@ if (process.env.AGENTRUN_CLEANUP_CASE) {
       writeFileSync(join(linked, "TASKS.md"), "## task0: Linked\nhold\n")
       active = { ...f, repo: linked }
     }
+    if (scenario === "nested") {
+      const nested = join(f.repo, "nested")
+      mkdirSync(nested)
+      writeFileSync(join(nested, "TASKS.md"), "## task0: Nested\nhold\n")
+      active = { ...f, repo: nested }
+    }
     child(active, ["run", "TASKS.md", "--json"])
     await wait(() => existsSync(join(f.root, "child-task0")))
-    writeFileSync(join(f.root, "probe-ready.json"), JSON.stringify(state(active)))
-    if (scenario === "assertion" || scenario === "linked") expect("injected assertion failure").toBe("success")
+    writeFileSync(join(f.root, "probe-ready.json"), JSON.stringify(state(scenario === "nested" ? f : active)))
+    if (["assertion", "linked", "nested"].includes(scenario)) expect("injected assertion failure").toBe("success")
     if (scenario === "timeout") {
       late = (async () => {
         await new Promise((resolve) => setTimeout(resolve, 11000))
