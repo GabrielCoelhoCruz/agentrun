@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url"
 const repo = fileURLToPath(new URL("../", import.meta.url))
 const output = resolve(process.argv[2])
 const scenario = process.argv[3] ?? "wait"
-assert.ok(["wait", "assertion", "timeout", "success", "unknown", "reused"].includes(scenario))
+assert.ok(["wait", "assertion", "timeout", "success", "unknown", "reused", "linked"].includes(scenario))
 mkdirSync(output)
 const fixtures = join(output, "fixtures")
 mkdirSync(fixtures)
@@ -91,14 +91,17 @@ try {
     const token = r.argv.find(arg => /^agentrun-worker-[a-f0-9]{32}$/.test(arg))
     return token ? [{ pgid: r.pid, processToken: token.slice("agentrun-worker-".length) }] : []
   })
-  const runRoot = join(f, "repo/.agentrun/runs")
+  const runRoot = join(f, scenario === "linked" ? "linked/.agentrun/runs" : "repo/.agentrun/runs")
   const saved = JSON.parse(readFileSync(join(runRoot, readdirSync(runRoot)[0], "state.json"), "utf8"))
   const observed = table()
   const cli = records.filter(r => r.argv[1]?.endsWith("/fixtures/dist/entry.mjs"))
   const live = observed.filter(r =>
     !r.state.startsWith("Z") && (cli.some(c => r.pid === c.pid) || identities.some(w => r.group === w.pgid))
   )
-  writeFileSync(join(output, "result.json"), JSON.stringify({ code, cli, identities, saved, live, observed }, null, 2))
+  writeFileSync(
+    join(output, "result.json"),
+    JSON.stringify({ code, cli, identities, saved, live, observed, foreignPid: foreign?.pid }, null, 2),
+  )
   assert.equal(code, scenario === "success" ? 0 : 1, "inner Vitest exit must match injected outcome")
   assert.ok(
     readFileSync(join(f, scenario === "wait" ? "child-task0.hidden" : "child-task0"), "utf8").trim(),
@@ -108,7 +111,7 @@ try {
     assert.match(stdout + stderr, /Condition did not complete within 15 seconds/)
     assert.ok(readFileSync(join(f, "child-task1"), "utf8").trim(), "second real hold child started")
   }
-  if (scenario === "assertion") assert.match(stdout + stderr, /injected assertion failure/)
+  if (scenario === "assertion" || scenario === "linked") assert.match(stdout + stderr, /injected assertion failure/)
   if (scenario === "timeout") {
     assert.match(stdout + stderr, /Test timed out/)
     assert.match(readFileSync(join(f, "late-result"), "utf8"), /closed/)
@@ -123,6 +126,7 @@ try {
 } finally {
   clearTimeout(deadline)
   const receipts = []
+  let foreignCleanup
   if (existsSync(join(f, "probe-processes.jsonl"))) {
     records = readFileSync(join(f, "probe-processes.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line))
   }
@@ -142,13 +146,20 @@ try {
     const current = table().find(r =>
       r.pid === foreign.pid && r.command.split(/\s+/).includes(`agentrun-worker-${"f".repeat(32)}`)
     )
-    if (current) foreign.kill("SIGKILL")
+    assert.ok(current, "foreign probe process identity must still match before cleanup")
+    foreign.kill("SIGKILL")
+    foreignCleanup = { ...current, signal: "SIGKILL" }
     await foreignDone
   }
   await delay(300)
   const remaining = table().filter(r =>
     !r.state.startsWith("Z") && records.some(record => r.pid === record.pid || r.group === record.pid)
   )
-  writeFileSync(join(output, "cleanup.json"), JSON.stringify({ receipts, remaining }, null, 2))
+  const foreignRemaining = foreign ? table().filter(r => r.pid === foreign.pid && !r.state.startsWith("Z")) : []
+  writeFileSync(
+    join(output, "cleanup.json"),
+    JSON.stringify({ receipts, remaining, foreignCleanup, foreignRemaining }, null, 2),
+  )
+  assert.deepEqual(foreignRemaining, [], "foreign probe process must also be stopped by its owner")
   assert.deepEqual(remaining, [], "probe cleanup must leave zero owned resources")
 }

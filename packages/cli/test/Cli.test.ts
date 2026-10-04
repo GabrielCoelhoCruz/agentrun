@@ -619,10 +619,17 @@ if (process.env.AGENTRUN_CLEANUP_CASE) {
   let late: Promise<void> | undefined
   test("fixture cleanup probe", async () => {
     const f = fixture(1, "hold")
-    child(f, ["run", "TASKS.md", "--json"])
+    let active = f
+    if (scenario === "linked") {
+      const linked = join(f.root, "linked")
+      git(f.repo, ["worktree", "add", "--detach", linked])
+      writeFileSync(join(linked, "TASKS.md"), "## task0: Linked\nhold\n")
+      active = { ...f, repo: linked }
+    }
+    child(active, ["run", "TASKS.md", "--json"])
     await wait(() => existsSync(join(f.root, "child-task0")))
-    writeFileSync(join(f.root, "probe-ready.json"), JSON.stringify(state(f)))
-    if (scenario === "assertion") expect("injected assertion failure").toBe("success")
+    writeFileSync(join(f.root, "probe-ready.json"), JSON.stringify(state(active)))
+    if (scenario === "assertion" || scenario === "linked") expect("injected assertion failure").toBe("success")
     if (scenario === "timeout") {
       late = (async () => {
         await new Promise((resolve) => setTimeout(resolve, 11000))
