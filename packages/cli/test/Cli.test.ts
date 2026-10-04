@@ -555,3 +555,44 @@ test("doctor injected diagnostics fail for runtime, lock and auth and succeed wh
     )
   }
 }, 30000)
+
+if (process.env.AGENTRUN_CLEANUP_CASE) {
+  const scenario = process.env.AGENTRUN_CLEANUP_CASE
+  let late: Promise<void> | undefined
+  test("fixture cleanup probe", async () => {
+    const f = fixture(1, "hold")
+    child(f, ["run", "TASKS.md", "--json"])
+    await wait(() => existsSync(join(f.root, "child-task0")))
+    writeFileSync(join(f.root, "probe-ready.json"), JSON.stringify(state(f)))
+    if (scenario === "assertion") expect("injected assertion failure").toBe("success")
+    if (scenario === "timeout") {
+      late = (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 11000))
+        let result = "spawned"
+        try {
+          await child({ ...f }, ["run", "TASKS.md", "--json"]).done
+        } catch (error) {
+          result = String(error)
+        }
+        writeFileSync(join(f.root, "late-result"), result)
+      })()
+      await late
+    }
+    if (scenario === "unknown" || scenario === "reused") {
+      const saved = state(f)
+      saved.worktrees.foreign = {
+        path: "unrelated",
+        branch: "unrelated",
+        pgid: Number(process.env.AGENTRUN_FOREIGN_PID),
+        ...(scenario === "reused" ? { processToken: "0".repeat(32) } : {}),
+      }
+      writeFileSync(statePath(f), JSON.stringify(saved))
+    }
+  }, 10000)
+  if (scenario === "timeout") {
+    test("fixture cleanup probe waits for late continuation", async () => {
+      await late
+      expect(readFileSync(join(evidence, "case-1/late-result"), "utf8")).toContain("closed")
+    }, 15000)
+  }
+}
