@@ -13,7 +13,9 @@ wt = Path(__file__).resolve().parents[1]
 node = shutil.which('node')
 assert node, 'Node is required'
 mode = sys.argv[2] if len(sys.argv) > 2 else 'pipe'
-scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe', 'freeze-hold': 'pipe'}.get(mode, mode)
+added_outer = mode in ['retry-outer', 'timeout-outer']
+outer = mode == 'outer' or added_outer
+scenario = {'retry-outer': 'retry', 'timeout-outer': 'timeout', 'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe', 'freeze-hold': 'pipe'}.get(mode, mode)
 out = Path(sys.argv[1]).resolve()
 out.mkdir(exist_ok=False)
 root = out / 'fixture'
@@ -92,11 +94,11 @@ try:
     foreign_identity = next(r for r in table() if r['pid'] == foreign.pid)
     save('foreign-owned-by-observer.json', foreign_identity)
     args = [sys.executable, str(wt / 'packages/cli/test/terminal-demo.py'), scenario, str(root), node]
-    command = {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':30 if mode == 'outer' else 22 if mode in ['pty', 'resume-second', 'normal', 'exception'] else 20, 'fault':mode, 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest(), 'sourceHashes': {f: hashlib.sha256((wt / f).read_bytes()).hexdigest() for f in ['packages/cli/test/terminal-demo.py', 'packages/cli/test/terminal_fixture.py', 'packages/cli/test/Terminal.test.ts', 'scripts/verify-terminal-cleanup.py', 'scripts/terminal-cleanup-deadline.cjs', 'scripts/verify-terminal-observer.py'] if (wt / f).exists()}, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True)}
-    if mode == 'outer':
+    command = {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':30 if outer else 22 if mode in ['pty', 'resume-second', 'normal', 'exception'] else 20, 'fault':mode, 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest(), 'sourceHashes': {f: hashlib.sha256((wt / f).read_bytes()).hexdigest() for f in ['packages/cli/test/terminal-demo.py', 'packages/cli/test/terminal_fixture.py', 'packages/cli/test/Terminal.test.ts', 'scripts/verify-terminal-cleanup.py', 'scripts/terminal-cleanup-deadline.cjs', 'scripts/verify-terminal-observer.py'] if (wt / f).exists()}, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True)}
+    if outer:
         env['NODE_OPTIONS'] = '--require=' + str(wt / 'scripts/terminal-cleanup-deadline.cjs')
         env['AGENTRUN_TEST_EVIDENCE'] = str(root)
-        args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: json']
+        args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: ' + scenario]
     if mode in ['freeze-stall', 'freeze-hold']:
         driver = out / 'freeze-driver.py'
         driver.write_text("import sys\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.dont_write_bytecode = True\nimport terminal_fixture\noriginal = terminal_fixture.table\ndef stalled(timeout=5):\n    rows = original(timeout)\n    for row in rows.values():\n        if 'fake-worker.mjs agentrun-worker-' in row['command'] and row['state'].startswith('T'):\n            row['state'] = 'S'\n    return rows\nterminal_fixture.table = stalled\nsys.argv = sys.argv[1:]\nsource = p.read_text()\nif 'freeze-hold' == 'MODE_PLACEHOLDER': source = source.replace(\"else 'panel-demo'\", \"else 'panel-demo hold'\")\nexec(compile(source, str(p), 'exec'), {'__file__': str(p), '__name__': '__main__'})\n".replace('MODE_PLACEHOLDER', mode))
@@ -110,24 +112,26 @@ try:
     with (out/'driver.stdout').open('wb') as stdout, (out/'driver.stderr').open('wb') as stderr:
         p = subprocess.Popen(args,cwd=wt,env=env,stdout=stdout,stderr=stderr,start_new_session=True)
         save('driver-handle.json', {'pid': p.pid, 'args': p.args})
-        readiness = time.monotonic() + (90 if mode == 'outer' else 18)
+        readiness = time.monotonic() + (90 if outer else 18)
         while time.monotonic()<readiness:
             rows=table()
             remember(rows,p.pid)
             needle = '/fixtures/dist/entry.mjs resume --retry-failed' if mode == 'resume-second' else '/fixtures/dist/entry.mjs run TASKS.md --load-project-settings'
             candidates=[r for r in rows if r['pid'] in identities and needle in r['command']]
-            if mode == 'outer':
-                roots = list(root.glob('terminal-json-*'))
+            if outer:
+                roots = list(root.glob('terminal-' + scenario + '-*'))
                 fixture = roots[0] if roots else root
             else:
                 fixture = root
             states=list((fixture/'repo/.agentrun/runs').glob('*/state.json'))
-            if candidates and states and all((fixture/f'starts-task{n}').exists() for n in range(3)):
+            if candidates and states and (added_outer or all((fixture/f'starts-task{n}').exists() for n in range(3))):
                 saved=json.loads(states[0].read_text())
                 workers=[{'pgid':x['pgid'],'token':'agentrun-worker-'+x['processToken']} for x in saved['worktrees'].values() if 'pgid' in x and 'processToken' in x]
                 if mode == 'resume-second':
                     workers = [w for w in workers if any(r['pid'] == w['pgid'] and live(r) for r in rows)]
-                if len(workers) != (2 if mode == 'resume-second' else 3):
+                if added_outer:
+                    workers = [w for w in workers if any(r['pid'] == w['pgid'] and live(r) and w['token'] in r['command'].split() for r in rows)]
+                if (added_outer and not workers) or (not added_outer and len(workers) != (2 if mode == 'resume-second' else 3)):
                     time.sleep(.05)
                     continue
                 if mode in ['hold', 'freeze-hold'] and not all((fixture / f'child-task{n}').exists() for n in range(3)):
@@ -139,15 +143,24 @@ try:
                     if leader is None:
                         raise RuntimeError('Worker ownership is not proven before fault')
                     identities[leader['pid']]=leader
+                    if added_outer:
+                        send(leader, signal.SIGSTOP, leader=True, token=w['token'])
+                if added_outer:
+                    assert any(current(identities[w['pgid']]) is not None and current(identities[w['pgid']])['state'].startswith('T') for w in workers), 'Worker fault was not reached'
                 save('state-before-fault.json',saved)
                 save('processes-before-fault.json',list(identities.values()))
                 if mode != 'normal':
                     send(cli,signal.SIGSTOP)
                     save('fault-receipt.json',receipts[-1])
-                if mode == 'outer':
+                if outer:
                     driver = next(r for r in rows if r['pid'] == cli['parent'])
                     send(driver, signal.SIGSTOP)
                     save('stopped-python.json', driver)
+                    if added_outer:
+                        assert scenario in (fixture / 'repo/TASKS.md').read_text() or scenario == 'timeout' and 'deadline-active' in (fixture / 'repo/TASKS.md').read_text()
+                        assert current(driver)['state'].startswith('T'), 'Python fault was not reached'
+                        save('fault-precondition.json', {'scenario': scenario, 'workers': workers, 'cli': cli, 'python': driver, 'saved': saved})
+                        fault_at = time.monotonic()
                 if mode == 'exception':
                     send(identities[p.pid], signal.SIGTERM)
                 if mode == 'bad-worker':
@@ -173,7 +186,19 @@ try:
         else:
             raise TimeoutError('Fault readiness not reached; original driver remains unmodified')
         try:
-            code=p.wait(timeout=85)
+            if added_outer:
+                end = time.monotonic() + 85
+                released = False
+                while p.poll() is None and time.monotonic() < end:
+                    if not released and time.monotonic() - fault_at > 32:
+                        if current(driver) is not None:
+                            send(driver, signal.SIGKILL)
+                            save('forced-python-death.json', receipts[-1])
+                        released = True
+                    time.sleep(.1)
+                code = p.wait(timeout=1)
+            else:
+                code=p.wait(timeout=85)
         except subprocess.TimeoutExpired:
             raise TimeoutError('Observer deadline reached; not a successful driver-deadline reproduction')
     rows=table()
@@ -185,9 +210,9 @@ try:
         assert code == 1 and result['deadlineObserved'], 'Original deadline did not produce the expected failure'
     elif mode in ['pty', 'resume-second']:
         assert code == 1 and 'PTY demo exceeded 22 seconds' in err, err
-    elif mode == 'outer':
+    elif outer:
         deadline = json.loads((root / 'outer-deadline.json').read_text())
-        assert code != 0 and deadline['timeout'] == 30000 and deadline['error'] == 'ETIMEDOUT' and deadline['signal'] == 'SIGKILL', deadline
+        assert code != 0 and deadline['timeout'] == 30000 and deadline['error'] == 'ETIMEDOUT' and deadline['signal'] in (['SIGKILL', 'SIGTERM'] if added_outer else ['SIGKILL']), deadline
     elif mode == 'normal':
         assert code == 0, err
         assert not json.loads((root / 'terminal-cleanup.json').read_text())['signals'], 'Normal exit required fixture rescue'
