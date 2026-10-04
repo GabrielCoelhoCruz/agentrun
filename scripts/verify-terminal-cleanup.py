@@ -204,7 +204,11 @@ try:
     rows=table()
     remaining=[r for r in rows if live(r) and (r['pid'] in identities or any(r['group']==w['pgid'] for w in workers))]
     err=(out/'driver.stderr').read_text()
-    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if mode == 'outer' else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
+    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if outer else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
+    if outer:
+        deadline = json.loads((root / 'outer-deadline.json').read_text())
+        result['outerDeadline'] = deadline
+        result['deadlineObserved'] = deadline['timeout'] == 30000 and deadline['error'] == 'ETIMEDOUT'
     save('result.json',result)
     if mode in ['pipe', 'resume', 'json', 'hold', 'missing-state', 'bad-receipt', 'bad-worker', 'freeze-stall', 'freeze-hold']:
         assert code == 1 and result['deadlineObserved'], 'Original deadline did not produce the expected failure'
