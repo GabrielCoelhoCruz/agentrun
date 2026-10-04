@@ -1,0 +1,7 @@
+{"type":"agent_start"}
+{"type":"message_end","message":{"role":"assistant","content":[],"usage":{"input":1746,"output":24,"cost":{"total":0.01866}},"stopReason":"toolUse"}}
+{"type":"tool_execution_start","toolCallId":"tool-test","toolName":"write","args":{"path":"result.txt","content":"pi-ok"}}
+{"type":"tool_execution_end","toolCallId":"tool-test","isError":false,"result":{"content":[{"type":"text","text":"Successfully wrote 5 bytes to result.txt"}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input":1786,"output":5,"cost":{"total":0.01811}},"stopReason":"stop"}}
+{"type":"agent_end"}
+{"type":"agent_settled"}

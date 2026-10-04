@@ -322,10 +322,10 @@ describe("Claude Code adapter", () => {
       if (error._tag === "AgentCrashed") assert.deepStrictEqual(error.lastEvent, Option.none())
     }))
 
-  it.effect("registers Claude capabilities and leaves Pi unavailable", () =>
+  it.effect("registers Claude capabilities alongside Pi", () =>
     Effect.gen(function*() {
       const agents = yield* Agents
-      assert.ok(Option.isNone(agents.get("pi")))
+      assert.ok(Option.isSome(agents.get("pi")))
       const adapter = Option.getOrThrow(agents.get("claude-code"))
       assert.strictEqual(adapter.id, "claude-code")
       assert.deepStrictEqual(adapter.capabilities, {

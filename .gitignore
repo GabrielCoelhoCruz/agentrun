@@ -8,3 +8,6 @@ coverage/
 .env
 .env.*
 spikes/**/result.json
+*.raw.jsonl
+*.private.json
+*.private.jsonl
