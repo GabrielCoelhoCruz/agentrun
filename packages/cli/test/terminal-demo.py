@@ -81,7 +81,7 @@ with Fixture(root) as fixture:
                         if error.errno != errno.EIO: raise
                         break
                 elapsed = time.monotonic() - start
-                if not running and b'worker warning task2' in raw:
+                if not running and b'task2 [running]' in raw and b'Tool result: checked file' in raw:
                     (root / 'running.ansi').write_bytes(raw)
                     frames.append({'name': 'running', 'columns': 80, 'rows': 24, 'bytes': len(raw)})
                     running = True
