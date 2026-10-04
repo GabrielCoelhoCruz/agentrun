@@ -57,10 +57,85 @@ def exact(record):
 def stop_owned(record, sig):
     row = exact(record)
     if row is not None:
-        assert row['uid'] == os.getuid()
+        assert row['uid'] == os.getuid() and not row['command'].startswith(('(', '<'))
         real_kill(row['pid'], sig)
         with (out / 'probe-signals.jsonl').open('a') as f:
             f.write(json.dumps({'identity': row, 'signal': signal.Signals(sig).name}) + '\n')
+
+
+def freeze_owned_tree(root_record):
+    records = {root_record['pid']: dict(root_record)}
+    stop_owned(root_record, signal.SIGSTOP)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        rows = table()
+        parent = next((r for r in rows if same(r, root_record)), None)
+        assert parent is not None, 'Probe root identity changed before injection'
+        if 'T' not in parent['state']:
+            time.sleep(.01)
+            continue
+        scope = {root_record['pid']}
+        while True:
+            expanded = scope | {r['pid'] for r in rows if r['parent'] in scope}
+            if expanded == scope:
+                break
+            scope = expanded
+        for row in rows:
+            if row['pid'] in scope and live(row) and row['uid'] == os.getuid() and not row['command'].startswith(('(', '<')) and (row['pid'] == root_record['pid']
+                    or (row['parent'] in records and any(same(r, records[row['parent']]) and 'T' in r['state'] for r in rows))):
+                records.setdefault(row['pid'], dict(row))
+        for record in list(records.values()):
+            try:
+                stop_owned(record, signal.SIGSTOP)
+            except RuntimeError:
+                pass
+        fresh = table()
+        if all(not live(r) or (r['pid'] in records and same(records[r['pid']], r) and 'T' in r['state'])
+               for r in fresh if r['pid'] in scope or r['parent'] in scope):
+            save('probe-frozen-tree.json', {'root': root_record, 'identities': list(records.values()),
+                                           'actual': [r for r in fresh if r['pid'] in scope or r['parent'] in scope]})
+            return fresh
+        time.sleep(.02)
+    raise RuntimeError('Probe could not freeze its complete tree before injection')
+
+
+def state_workers(rows):
+    owned = []
+    evidence = []
+    for path in (out / 'guard/fixture').rglob('state.json'):
+        data = json.loads(path.read_text())
+        for worker in data.get('worktrees', {}).values():
+            if not isinstance(worker, dict):
+                continue
+            token = worker.get('processToken')
+            pid = worker.get('pgid')
+            if not isinstance(token, str) or len(token) != 32 or any(c not in '0123456789abcdef' for c in token):
+                continue
+            row = next((r for r in rows if r['pid'] == pid and r['group'] == pid and r['uid'] == os.getuid()
+                        and 'agentrun-worker-' + token in r['command'].split()
+                        and str(wt / 'packages/cli/test/fixtures/dist/fake-worker.mjs') in r['command'] and live(r)), None)
+            if row:
+                owned.append(row)
+                evidence.append({'identity': row, 'statePath': str(path),
+                                 'stateSha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'workerToken': token})
+    if evidence:
+        with (out / 'state-worker-authority.jsonl').open('a') as f:
+            for item in evidence:
+                f.write(json.dumps(item) + '\n')
+    return owned
+
+
+def scoped(rows, records):
+    ancestors = {os.getpid()}
+    while True:
+        parents = {r['parent'] for r in rows if r['pid'] in ancestors}
+        if parents <= ancestors:
+            break
+        ancestors |= parents
+    entries = [str(wt / 'packages/cli/test/fixtures/dist' / name) for name in ['entry.mjs', 'fake-worker.mjs']]
+    return [r for r in rows if live(r) and r['pid'] not in ancestors and
+            (r['pid'] in {old['pid'] for old in records} or str(out) in r['command']
+             or any(entry in r['command'] for entry in entries))]
 
 
 if len(sys.argv) > 3 and sys.argv[3] == 'driver':
@@ -68,7 +143,8 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
     state = {'armed': False, 'injected': False, 'target': None, 'deferState': False}
     launch_case = mode.startswith('launcher')
     partial_case = mode.startswith('initial-partial')
-    registration = launch_case or partial_case or mode in ['worker-command', 'worker-group', 'worker-prior-group', 'cli-command', 'cli-group']
+    inventory_case = mode in ['inventory-change', 'inventory-reparent']
+    registration = launch_case or partial_case or mode in ['worker-command', 'worker-group', 'worker-prior-group', 'cli-command', 'cli-group', 'driver-command', 'driver-group']
 
     def observed_read(path, *args, **kwargs):
         text = real_read(path, *args, **kwargs)
@@ -108,7 +184,38 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
         record = context.f_locals.get('record') if context.f_code.co_name == 'current' else None
         frozen = (guard / 'complete-fault-inventory.json').exists()
         freeze_call = any(frame.function == 'freeze_tree' for frame in inspect.stack())
-        if registration and not state['armed'] and context.f_code.co_name == '<module>':
+        if inventory_case:
+            target = None
+            if not state['injected'] and mode == 'inventory-change' and context.f_code.co_name == 'freeze_tree' and 'unresolved' in context.f_locals:
+                target = next((r for r in rows if r['pid'] in owner['identities'] and 'fake-worker.mjs agentrun-worker-' in r['command'] and 'T' in r['state']), None)
+            if not state['injected'] and mode == 'inventory-reparent' and freeze_call and record:
+                parent = next((r for r in rows if r['pid'] == record['parent'] and '/usr/bin/lockf ' in r['command'] and str(guard) in r['command']), None)
+                if parent and 'process.stdin.resume()' in record['command']:
+                    target = next(r for r in rows if same(r, record))
+                    stop_owned(target, signal.SIGSTOP)
+                    stop_owned(parent, signal.SIGKILL)
+                    end = time.monotonic() + 2
+                    while time.monotonic() < end:
+                        actual = exact(target)
+                        if actual and actual['parent'] == 1 and 'T' in actual['state']:
+                            save('reparented.json', {'original': target, 'actual': actual, 'removedParent': parent})
+                            break
+                        time.sleep(.01)
+                    else:
+                        raise RuntimeError('Actual stopped-child reparenting was not reached')
+            if target:
+                state.update(armed=True, injected=True, target=dict(target))
+                save('precondition.json', {'identities': list(owner['identities'].values()), 'target': dict(target),
+                                          'foreign': owner['foreign_identity'], 'phase': 'final-inventory'})
+                save('injection.json', {'mode': mode, 'raw': dict(target), 'commandSuffix': ' changed-identity'})
+            if state['injected']:
+                for row in rows:
+                    if row['pid'] == state['target']['pid'] and live(row):
+                        row['command'] += ' changed-identity'
+                if frozen and not state.get('abortAfterReceipt'):
+                    state['abortAfterReceipt'] = True
+                    return subprocess.CompletedProcess(args, 17, '', 'planned failure after invalid inventory receipt\n')
+        elif registration and not state['armed'] and context.f_code.co_name == '<module>':
             owned = {owner['p'].pid} if owner['p'] else set()
             while True:
                 expanded = owned | {r['pid'] for r in rows if r['parent'] in owned}
@@ -130,11 +237,19 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
             if candidates and cli_rows and leases:
                 cli_row = cli_rows[0]
                 worker = fresh_workers[0] if partial_case or mode == 'worker-prior-group' else next(r for r in candidates if r['parent'] == cli_row['pid'])
+                target_pid = cli_row['parent'] if mode in ['driver-command', 'driver-group'] else cli_row['pid'] if launch_case or mode in ['cli-command', 'cli-group'] else worker['pid']
+                rows = freeze_owned_tree(dict(cli_row))
+                cli_row = next(r for r in rows if r['pid'] == cli_row['pid'])
+                target = next(r for r in rows if r['pid'] == target_pid)
+                if mode in ['driver-command', 'driver-group']:
+                    stop_owned(target, signal.SIGSTOP)
+                owned = {owner['p'].pid}
+                while True:
+                    expanded = owned | {r['pid'] for r in rows if r['parent'] in owned}
+                    if expanded == owned:
+                        break
+                    owned = expanded
                 captured = [dict(r) for r in rows if r['pid'] in owned]
-                target = cli_row if launch_case or mode in ['cli-command', 'cli-group'] else worker
-                for r in captured:
-                    if r['pid'] == cli_row['pid'] or r['pid'] == worker['pid'] or r['pid'] == leases[0]['pid'] or r['parent'] == leases[0]['pid']:
-                        stop_owned(r, signal.SIGSTOP)
                 state.update(armed=True, target=dict(target), deferState=True)
                 save('precondition.json', {'identities': captured, 'target': dict(target),
                                           'foreign': owner['foreign_identity'], 'phase': 'registration',
@@ -166,12 +281,12 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
                 for row in rows:
                     if row['pid'] == state['target']['pid'] and live(row):
                         row['command'] += ' unsupported'
-            if mode in ['worker-command', 'worker-group', 'cli-command', 'cli-group']:
+            if mode in ['worker-command', 'worker-group', 'cli-command', 'cli-group', 'driver-command', 'driver-group']:
                 state['injected'] = True
                 for row in rows:
                     if row['pid'] == state['target']['pid'] and live(row):
                         raw = dict(row)
-                        if mode in ['worker-command', 'cli-command']:
+                        if mode in ['worker-command', 'cli-command', 'driver-command']:
                             row['command'] += ' changed-identity'
                         else:
                             row['group'] += 1
@@ -233,10 +348,15 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
                         raise AssertionError(mode)
                     with (out / 'observations.jsonl').open('a') as f:
                         f.write(json.dumps({'raw': original, 'observed': row}) + '\n')
+        if mode in ['driver-command', 'driver-group'] and state.get('driverSignal') and not state.get('abortDriver'):
+            state['abortDriver'] = True
+            return subprocess.CompletedProcess(args, 17, '', 'planned failure after raw driver signal\n')
         response.stdout = '\n'.join(' '.join(str(r[k]) for k in fields) for r in rows) + '\n'
         return response
 
     def observed_kill(pid, sig):
+        if mode in ['driver-command', 'driver-group'] and state['injected'] and state['target'] and pid == state['target']['pid']:
+            state['driverSignal'] = True
         if state['armed'] and state['injected'] and state['target'] and pid == state['target']['pid'] and mode == 'lookup':
             stop_owned(state['target'], signal.SIGKILL)
             end = time.monotonic() + 3
@@ -256,8 +376,11 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
     runpy.run_path(sys.argv[0], run_name='__main__')
     raise SystemExit(0)
 
-assert mode in ['exit', 'command', 'remember-command', 'uid', 'group', 'start', 'inspect', 'lookup', 'freeze-exit', 'worker-command', 'worker-group', 'cli-command', 'cli-group', 'initial-partial', 'initial-partial-exit', 'initial-partial-persistent', 'worker-prior-group', 'launcher', 'launcher-missing', 'launcher-nonce', 'launcher-pid', 'launcher-uid', 'launcher-start', 'launcher-command', 'launcher-path', 'launcher-unsupported']
+assert mode in ['exit', 'command', 'remember-command', 'uid', 'group', 'start', 'inspect', 'lookup', 'freeze-exit', 'worker-command', 'worker-group', 'cli-command', 'cli-group', 'initial-partial', 'initial-partial-exit', 'initial-partial-persistent', 'worker-prior-group', 'launcher', 'launcher-missing', 'launcher-nonce', 'launcher-pid', 'launcher-uid', 'launcher-start', 'launcher-command', 'launcher-path', 'launcher-unsupported', 'driver-command', 'driver-group', 'inventory-change', 'inventory-reparent']
 out.mkdir(exist_ok=False)
+before = scoped(table(), [])
+save('before-scope.json', before)
+assert not before, 'Previous same-worktree processes remain; do not start another case'
 save('target.json', {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=wt, text=True).strip(),
                      'mode': mode, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True),
                      'sources': {p: hashlib.sha256((wt / p).read_bytes()).hexdigest() for p in [
@@ -276,14 +399,19 @@ try:
     assert (out / 'injection.json').exists(), 'Fault was not reached'
     rows = table()
     save('actual-after.json', rows)
-    remaining = [r for r in rows if live(r) and any(same(r, old) for old in records)]
+    records += state_workers(rows)
+    remaining = scoped(rows, records)
     cleanup = json.loads((out / 'guard/cleanup.json').read_text())
-    persistent = mode in ['command', 'remember-command', 'uid', 'group', 'start', 'worker-command', 'worker-group', 'worker-prior-group', 'cli-command', 'cli-group', 'initial-partial-persistent'] or mode.startswith('launcher-')
+    persistent = mode in ['command', 'remember-command', 'uid', 'group', 'start', 'worker-command', 'worker-group', 'worker-prior-group', 'cli-command', 'cli-group', 'driver-command', 'driver-group', 'inventory-change', 'inventory-reparent', 'initial-partial-persistent'] or mode.startswith('launcher-')
     signals = [json.loads(line) for line in (out / 'observer-signals.jsonl').read_text().splitlines()]
     target_signals = [r for r in signals if r['afterInjection'] and r['pid'] == pre['target']['pid']]
     save('result.json', {'guardExit': code, 'remainingBeforeProbeRescue': remaining,
                          'targetSignalsAfterInjection': target_signals,
-                         'probeRescueBeforeObservation': False, 'persistentAmbiguity': persistent})
+                         'probeRescueBeforeObservation': False, 'ambiguityInjected': persistent,
+                         'targetStillAlive': any(r['pid'] == pre['target']['pid'] for r in remaining),
+                         'persistenceRequired': mode in ['command', 'remember-command', 'uid', 'group', 'start', 'initial-partial-persistent', 'driver-command', 'driver-group', 'inventory-change', 'inventory-reparent']})
+    if mode in ['inventory-change', 'inventory-reparent']:
+        assert not (out / 'guard/complete-fault-inventory.json').exists(), 'Unresolved live identity accepted in complete inventory'
     assert all(not r['identity']['command'].startswith('(') for r in cleanup['signals'] if 'identity' in r), 'Partial observation became signal authority'
     assert all(r['pid'] > 0 for r in signals), 'Broad signal sent'
     if mode not in ['inspect', 'launcher', 'initial-partial']:
@@ -295,7 +423,7 @@ try:
         assert {r['pid'] for r in remaining} <= {pre['target']['pid']}, 'Other verified resources survived'
         if remaining:
             assert any(r['pid'] == pre['target']['pid'] for r in cleanup['remaining']), 'Live ambiguity omitted from cleanup'
-        if mode in ['command', 'remember-command', 'uid', 'group', 'start']:
+        if mode in ['command', 'remember-command', 'uid', 'group', 'start', 'initial-partial-persistent', 'driver-command', 'driver-group', 'inventory-change', 'inventory-reparent']:
             assert remaining, 'Persistent held-process precondition was lost'
     else:
         assert not remaining, 'Verified resources survived a refused or disappearing identity'
@@ -312,6 +440,7 @@ finally:
         records += json.loads((out / 'observer-owned.json').read_text())
     if (out / 'guard/cleanup.json').exists():
         records += json.loads((out / 'guard/cleanup.json').read_text())['identities']
+    records += state_workers(table())
     errors = []
     seen = set()
     for record in records:
@@ -329,13 +458,6 @@ finally:
         p.wait(timeout=5)
     time.sleep(.3)
     rows = table()
-    ancestors = {os.getpid()}
-    while True:
-        parents = {r['parent'] for r in rows if r['pid'] in ancestors}
-        if parents <= ancestors:
-            break
-        ancestors |= parents
-    remaining = [r for r in rows if live(r) and (r['pid'] in {old['pid'] for old in records}
-                 or str(out) in r['command']) and r['pid'] not in ancestors]
+    remaining = scoped(rows, records)
     save('safety-rescue.json', {'errors': errors, 'remaining': remaining, 'identities': records})
     assert not remaining, 'Probe safety cleanup incomplete'
