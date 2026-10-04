@@ -184,7 +184,48 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
         record = context.f_locals.get('record') if context.f_code.co_name == 'current' else None
         frozen = (guard / 'complete-fault-inventory.json').exists()
         freeze_call = any(frame.function == 'freeze_tree' for frame in inspect.stack())
-        if inventory_case:
+        if mode == 'initial-partial-persistent':
+            if state['target'] is None:
+                leases = [r for r in rows if '/usr/bin/lockf ' in r['command'] and str(guard) in r['command']]
+                target = next((r for r in rows if any(r['parent'] == lease['pid'] for lease in leases)
+                               and 'process.stdin.resume()' in r['command'] and live(r)), None)
+                if target:
+                    assert target['pid'] not in owner['identities'], 'Partial target already had full authority'
+                    state.update(target=dict(target), injected=True)
+                    save('first-partial-observation.json', {'raw': dict(target), 'priorAuthority': None})
+            if state['target'] and not state['armed'] and context.f_code.co_name == '<module>':
+                parent = next((r for r in rows if r['pid'] == state['target']['parent']), None)
+                cli_row = next((r for r in rows if parent and r['pid'] == parent['parent']), None)
+                workers = [r for r in rows if cli_row and r['parent'] == cli_row['pid']
+                           and 'fake-worker.mjs agentrun-worker-' in r['command'] and live(r)]
+                if len(workers) >= 2:
+                    assert state['target']['pid'] not in owner['identities'], 'Partial target gained full authority'
+                    rows = freeze_owned_tree(dict(cli_row))
+                    captured = [dict(r) for r in rows if r['pid'] in owner['descendants'](rows, owner['p'].pid)]
+                    target = state['target']
+                    stop_owned(target, signal.SIGSTOP)
+                    stop_owned(parent, signal.SIGKILL)
+                    end = time.monotonic() + 2
+                    while time.monotonic() < end:
+                        actual = exact(target)
+                        if actual and actual['parent'] == 1 and 'T' in actual['state']:
+                            save('reparented.json', {'original': target, 'actual': actual, 'removedParent': parent})
+                            break
+                        time.sleep(.01)
+                    else:
+                        raise RuntimeError('Actual stopped-child reparenting was not reached')
+                    state.update(armed=True, deferState=True)
+                    save('precondition.json', {'identities': captured, 'target': target,
+                                              'foreign': owner['foreign_identity'], 'phase': 'registration',
+                                              'priorAuthority': owner['identities'].get(target['pid'])})
+                    save('injection.json', {'mode': mode, 'observed': {**actual, 'command': '(node)'}})
+                    rows = table()
+            for row in rows:
+                if state['target'] and row['pid'] == state['target']['pid'] and live(row):
+                    row['command'] = '(node)'
+            if frozen:
+                raise AssertionError('Initially partial live child accepted in complete inventory')
+        elif inventory_case:
             target = None
             if not state['injected'] and mode == 'inventory-change' and context.f_code.co_name == 'freeze_tree' and 'unresolved' in context.f_locals:
                 target = next((r for r in rows if r['pid'] in owner['identities'] and 'fake-worker.mjs agentrun-worker-' in r['command'] and 'T' in r['state']), None)
@@ -410,7 +451,7 @@ try:
                          'probeRescueBeforeObservation': False, 'ambiguityInjected': persistent,
                          'targetStillAlive': any(r['pid'] == pre['target']['pid'] for r in remaining),
                          'persistenceRequired': mode in ['command', 'remember-command', 'uid', 'group', 'start', 'initial-partial-persistent', 'driver-command', 'driver-group', 'inventory-reparent']})
-    if mode in ['inventory-change', 'inventory-reparent']:
+    if mode in ['inventory-change', 'inventory-reparent', 'initial-partial-persistent']:
         assert not (out / 'guard/complete-fault-inventory.json').exists(), 'Unresolved live identity accepted in complete inventory'
     assert all(not r['identity']['command'].startswith('(') for r in cleanup['signals'] if 'identity' in r), 'Partial observation became signal authority'
     assert all(r['pid'] > 0 for r in signals), 'Broad signal sent'
