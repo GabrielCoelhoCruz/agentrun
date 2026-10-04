@@ -705,7 +705,6 @@ test("artifact write failure exits without success; resume completes checkpoint 
   expect(await c.done).toBe(1)
   expect(c.stderr()).toContain("ReportError")
   expect(state(f).status.task0?._tag).not.toBe("succeeded")
-  // Only remove the test-owned obstruction, retaining task data and branch.
   const { rmdirSync } = await import("node:fs")
   rmdirSync(join(dir, "tasks/task0/diff.patch"))
   expect(await child(f, ["resume", "--json"]).done).toBe(0)
@@ -747,7 +746,6 @@ for (const window of ["commit", "artifacts"]) {
       expect(state(f).status.task0?._tag).toBe("running")
     } else {
       expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
-      // Restore the state checkpoint saved immediately before the terminal transition.
       const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
       saved.status.task0 = { _tag: "running", attempt: 1, startedAt: new Date().toISOString() }
       writeFileSync(statePath(f), JSON.stringify(saved))
@@ -903,7 +901,6 @@ test("missing legacy patch refuses mutable branch reconstruction", async () => {
   expect(starts(f)).toBe(1)
 }, 30000)
 
-// Test-only preload: stop after the real filesystem append, before its callback.
 const crashAfterFailed = (f: Fixture) => {
   writeFileSync(
     join(f.root, "crash.cjs"),
