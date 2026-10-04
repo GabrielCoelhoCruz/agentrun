@@ -13,10 +13,33 @@ if (root && process.env.AGENTRUN_CLEANUP_PROBE) {
   }
   const write = fs.writeFileSync
   fs.writeFileSync = function(file, ...args) {
-    if (process.env.AGENTRUN_CLEANUP_PROBE === "wait" && String(file) === path.join(root, "child-task0")) {
+    if (
+      ["wait", "slow-cleanup"].includes(process.env.AGENTRUN_CLEANUP_PROBE)
+      && String(file) === path.join(root, "child-task0")
+    ) {
       return write.call(this, `${file}.hidden`, ...args)
     }
     return write.call(this, file, ...args)
+  }
+  syncBuiltinESMExports()
+}
+
+if (process.env.AGENTRUN_CLEANUP_PROBE === "slow-cleanup" && !root) {
+  const childProcess = require("node:child_process")
+  const spawnSync = childProcess.spawnSync
+  let delayed = false
+  childProcess.spawnSync = function(command, args, options) {
+    const result = spawnSync.call(this, command, args, options)
+    if (
+      !delayed && command === "ps" && args?.includes("pgid=,command=")
+      && String(result.stdout).includes("/test/fixtures/dist/entry.mjs")
+    ) {
+      delayed = true
+      fs.writeFileSync(path.join(process.env.AGENTRUN_TEST_EVIDENCE, "cleanup-delayed"), String(process.pid))
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 11000)
+      return spawnSync.call(this, command, args, options)
+    }
+    return result
   }
   syncBuiltinESMExports()
 }

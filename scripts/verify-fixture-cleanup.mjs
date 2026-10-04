@@ -9,7 +9,7 @@ const repo = fileURLToPath(new URL("../", import.meta.url))
 const output = resolve(process.argv[2])
 const scenario = process.argv[3] ?? "wait"
 assert.ok(
-  ["wait", "assertion", "timeout", "success", "unknown", "reused", "linked", "nested", "lease-timeout"].includes(
+  ["wait", "assertion", "timeout", "success", "unknown", "reused", "linked", "nested", "lease-timeout", "slow-cleanup"].includes(
     scenario,
   ),
 )
@@ -31,7 +31,7 @@ const foreign = ["unknown", "reused"].includes(scenario)
   })
   : undefined
 const foreignDone = foreign && new Promise(resolve => foreign.on("exit", resolve))
-const name = scenario === "wait"
+const name = ["wait", "slow-cleanup"].includes(scenario)
   ? "^Ctrl-C persists two interrupted tasks and stops their marked children$"
   : scenario === "lease-timeout"
   ? "^kernel lease survives replacement contention and releases on parent SIGKILL$"
@@ -68,7 +68,7 @@ const p = spawn(process.execPath, args, {
     ...process.env,
     AGENTRUN_TEST_EVIDENCE: fixtures,
     AGENTRUN_CLEANUP_PROBE: scenario,
-    ...(["wait", "lease-timeout"].includes(scenario) ? {} : { AGENTRUN_CLEANUP_CASE: scenario }),
+    ...(["wait", "lease-timeout", "slow-cleanup"].includes(scenario) ? {} : { AGENTRUN_CLEANUP_CASE: scenario }),
     ...(foreign ? { AGENTRUN_FOREIGN_PID: String(foreign.pid) } : {}),
     NODE_OPTIONS: `--require=${join(repo, "scripts/fixture-cleanup-preload.cjs")}`,
   },
@@ -119,7 +119,7 @@ try {
         f,
         scenario === "lease-timeout"
           ? "probe-contender-stopped"
-          : scenario === "wait"
+          : ["wait", "slow-cleanup"].includes(scenario)
           ? "child-task0.hidden"
           : "child-task0",
       ),
@@ -127,9 +127,16 @@ try {
     ).trim(),
     "real hold child started",
   )
-  if (scenario === "wait") {
+  if (["wait", "slow-cleanup"].includes(scenario)) {
     assert.match(stdout + stderr, /Condition did not complete within 15 seconds/)
     assert.ok(readFileSync(join(f, "child-task1"), "utf8").trim(), "second real hold child started")
+  }
+  if (scenario === "slow-cleanup") {
+    assert.ok(
+      existsSync(join(fixtures, "cleanup-delayed")),
+      "cleanup inspection was delayed beyond the old hook deadline",
+    )
+    assert.doesNotMatch(stdout + stderr, /Hook timed out/)
   }
   if (scenario === "lease-timeout") assert.match(stdout + stderr, /Test timed out/)
   if (["assertion", "linked", "nested"].includes(scenario)) assert.match(stdout + stderr, /injected assertion failure/)
