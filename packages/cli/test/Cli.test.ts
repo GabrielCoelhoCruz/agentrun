@@ -51,7 +51,7 @@ const git = (cwd: string, args: string[]) => {
 type Fixture = ReturnType<typeof fixture>
 const spawnChild = (f: Fixture, args: string[], env: NodeJS.ProcessEnv) => {
   if (f.ownership.closed) throw new Error("Fixture is closed")
-  f.ownership.repos.add(realpathSync(f.repo))
+  f.ownership.repos.add(realpathSync(git(f.repo, ["rev-parse", "--show-toplevel"])))
   const p = spawn(process.execPath, args, { cwd: f.repo, env, detached: true })
   f.ownership.children.add(p)
   return p
