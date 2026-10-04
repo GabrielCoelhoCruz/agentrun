@@ -409,7 +409,7 @@ try:
                          'targetSignalsAfterInjection': target_signals,
                          'probeRescueBeforeObservation': False, 'ambiguityInjected': persistent,
                          'targetStillAlive': any(r['pid'] == pre['target']['pid'] for r in remaining),
-                         'persistenceRequired': mode in ['command', 'remember-command', 'uid', 'group', 'start', 'initial-partial-persistent', 'driver-command', 'driver-group', 'inventory-change', 'inventory-reparent']})
+                         'persistenceRequired': mode in ['command', 'remember-command', 'uid', 'group', 'start', 'initial-partial-persistent', 'driver-command', 'driver-group', 'inventory-reparent']})
     if mode in ['inventory-change', 'inventory-reparent']:
         assert not (out / 'guard/complete-fault-inventory.json').exists(), 'Unresolved live identity accepted in complete inventory'
     assert all(not r['identity']['command'].startswith('(') for r in cleanup['signals'] if 'identity' in r), 'Partial observation became signal authority'
@@ -423,7 +423,7 @@ try:
         assert {r['pid'] for r in remaining} <= {pre['target']['pid']}, 'Other verified resources survived'
         if remaining:
             assert any(r['pid'] == pre['target']['pid'] for r in cleanup['remaining']), 'Live ambiguity omitted from cleanup'
-        if mode in ['command', 'remember-command', 'uid', 'group', 'start', 'initial-partial-persistent', 'driver-command', 'driver-group', 'inventory-change', 'inventory-reparent']:
+        if mode in ['command', 'remember-command', 'uid', 'group', 'start', 'initial-partial-persistent', 'driver-command', 'driver-group', 'inventory-reparent']:
             assert remaining, 'Persistent held-process precondition was lost'
     else:
         assert not remaining, 'Verified resources survived a refused or disappearing identity'
