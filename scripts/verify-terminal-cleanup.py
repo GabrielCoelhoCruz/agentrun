@@ -233,7 +233,7 @@ try:
     with (out/'driver.stdout').open('wb') as stdout, (out/'driver.stderr').open('wb') as stderr:
         p = subprocess.Popen(args,cwd=wt,env=env,stdout=stdout,stderr=stderr,start_new_session=True)
         save('driver-handle.json', {'pid': p.pid, 'args': p.args})
-        readiness = time.monotonic() + (90 if outer else 18)
+        readiness = time.monotonic() + (90 if outer else 20 + 22 if mode == 'resume-second' else 18)
         while time.monotonic()<readiness:
             rows=table()
             remember(rows,p.pid)
@@ -249,6 +249,7 @@ try:
                 saved=json.loads(states[0].read_text())
                 workers=[{'pgid':x['pgid'],'token':'agentrun-worker-'+x['processToken']} for x in saved['worktrees'].values() if 'pgid' in x and 'processToken' in x]
                 if mode == 'resume-second':
+                    assert saved['status']['task0']['_tag'] == 'succeeded', 'Task 0 did not remain succeeded before resume fault'
                     workers = [w for w in workers if any(r['pid'] == w['pgid'] and live(r) for r in rows)]
                 if added_outer:
                     workers = [w for w in workers if any(r['pid'] == w['pgid'] and live(r) and w['token'] in r['command'].split() for r in rows)]
