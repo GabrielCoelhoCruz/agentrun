@@ -88,25 +88,29 @@ def register(row):
     if not complete(row):
         if unverified.get(pid) != row:
             refused.append({'observed': row, 'reason': 'Incomplete process identity'})
-        unverified[pid] = row
+        unverified.setdefault(pid, row)
         raise IdentityChanged('Registration refused incomplete identity')
     old = identities.get(pid)
     if old and not same(old, row) and not launch_transition(old, row):
         refused.append({'expected': old, 'observed': row})
-        unverified[pid] = row
+        unverified.setdefault(pid, row)
         raise IdentityChanged('Registration refused changed identity')
     if old is None or not same(old, row):
         identities[pid] = dict(row)
     unverified.pop(pid, None)
     return identities[pid]
 
-def remember(rows, parent):
+def descendants(rows, parent):
     scope = {parent}
     while True:
         additions = {r['pid'] for r in rows if r['parent'] in scope}
         if additions <= scope:
             break
         scope |= additions
+    return scope
+
+def remember(rows, parent):
+    scope = descendants(rows, parent)
     pending = [parent]
     verified = set()
     by_pid = {r['pid']: r for r in rows}
@@ -124,10 +128,15 @@ def remember(rows, parent):
             pending.extend(r['pid'] for r in rows if r['parent'] == pid)
     for row in rows:
         if row['pid'] in scope and row['pid'] not in verified:
-            unverified[row['pid']] = row
+            unverified.setdefault(row['pid'], row)
     return scope
 
 def current(record):
+    saved = identities.get(record['pid'])
+    if saved is None or not same(saved, record):
+        refused.append({'expected': saved, 'observed': record, 'reason': 'Unregistered signal identity'})
+        raise IdentityChanged('Cleanup refused unregistered identity')
+    record = saved
     if not complete(record):
         refused.append({'record': record, 'reason': 'Incomplete signal identity'})
         raise IdentityChanged('Cleanup refused incomplete identity')
@@ -137,8 +146,10 @@ def current(record):
         if row is None:
             return None
         if same(row, record):
+            unverified.pop(record['pid'], None)
             return row
         refused.append({'expected': record, 'observed': row})
+        unverified.setdefault(record['pid'], row)
         if time.monotonic() >= deadline:
             raise IdentityChanged('Cleanup refused changed identity')
         time.sleep(.02)
@@ -157,6 +168,7 @@ def send(record, sig, leader=False, token=None):
         receipts.append({'identity': row, 'alreadyExited': True})
 
 def freeze_tree(record, receipt):
+    captured = descendants(list(identities.values()) + list(unverified.values()), record['pid'])
     send(record, signal.SIGSTOP)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -167,9 +179,9 @@ def freeze_tree(record, receipt):
             time.sleep(.01)
             continue
         rows = table()
-        owned = remember(rows, record['pid'])
+        captured |= remember(rows, record['pid'])
         unresolved = set()
-        for pid in owned:
+        for pid in captured:
             if pid not in identities:
                 unresolved.add(pid)
                 continue
@@ -179,9 +191,13 @@ def freeze_tree(record, receipt):
                 unresolved.add(pid)
         rows = table()
         expanded = remember(rows, record['pid'])
-        if expanded <= owned and all(not live(r) or ('T' in r['state'] and r['pid'] not in unresolved) for r in rows if r['pid'] in expanded):
-            save(receipt, {'cliStopped': True, 'identities': [identities[pid] for pid in expanded if pid in identities], 'unverified': [unverified[pid] for pid in expanded if pid in unverified], 'stoppedRows': [r for r in rows if r['pid'] in expanded]})
+        if expanded <= captured and all(not live(r) or (
+                r['pid'] in identities and same(identities[r['pid']], r) and 'T' in r['state']
+                and r['pid'] not in unresolved and r['pid'] not in unverified)
+                for r in rows if r['pid'] in captured):
+            save(receipt, {'cliStopped': True, 'identities': [identities[pid] for pid in captured if pid in identities], 'unverified': [unverified[pid] for pid in captured if pid in unverified], 'stoppedRows': [r for r in rows if r['pid'] in captured]})
             return
+        captured |= expanded
     raise TimeoutError('Complete fault inventory did not freeze within 5 seconds')
 
 def remaining_owned(rows):
@@ -271,7 +287,7 @@ try:
                     save('fault-receipt.json',receipts[-1])
                     freeze_tree(cli, 'complete-fault-inventory.json')
                 if outer:
-                    driver = next(r for r in rows if r['pid'] == cli['parent'])
+                    driver = identities[cli['parent']]
                     send(driver, signal.SIGSTOP)
                     save('stopped-python.json', driver)
                     if added_outer:
@@ -397,8 +413,6 @@ finally:
             save('foreign-preserved-through-rescue.json',{'alive':alive_before,'identity':foreign_identity})
             if not alive_before:
                 raise RuntimeError('Foreign sentinel was not preserved through rescue')
-            if foreign_identity is not None and complete(foreign_identity):
-                send(foreign_identity,signal.SIGKILL)
         except Exception as error:
             errors.append(repr(error))
         finally:
