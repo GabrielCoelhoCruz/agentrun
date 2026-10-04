@@ -185,6 +185,8 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
         frozen = (guard / 'complete-fault-inventory.json').exists()
         freeze_call = any(frame.function == 'freeze_tree' for frame in inspect.stack())
         if mode == 'initial-partial-persistent':
+            if not state['armed']:
+                state['deferState'] = True
             if state['target'] is None:
                 leases = [r for r in rows if '/usr/bin/lockf ' in r['command'] and str(guard) in r['command']]
                 target = next((r for r in rows if any(r['parent'] == lease['pid'] for lease in leases)
