@@ -38,7 +38,7 @@ const fixture = (tasks = 2, prompt = "success") => {
     join(repo, "TASKS.md"),
     Array.from({ length: tasks }, (_, n) => `## task${n}: Task ${n}\n${prompt}\n`).join("\n"),
   )
-  const ownership = { closed: false, children: new Set<ChildProcessWithoutNullStreams>() }
+  const ownership = { closed: false, children: new Set<ChildProcessWithoutNullStreams>(), repos: new Set<string>() }
   const f = { root, repo, home, ownership }
   onTestFinished(() => closeFixture(f))
   return f
@@ -51,6 +51,7 @@ const git = (cwd: string, args: string[]) => {
 type Fixture = ReturnType<typeof fixture>
 const spawnChild = (f: Fixture, args: string[], env: NodeJS.ProcessEnv) => {
   if (f.ownership.closed) throw new Error("Fixture is closed")
+  f.ownership.repos.add(realpathSync(f.repo))
   const p = spawn(process.execPath, args, { cwd: f.repo, env, detached: true })
   f.ownership.children.add(p)
   return p
@@ -127,8 +128,9 @@ const closeFixture = async (f: Fixture) => {
       errors.push(error)
     }
   }
-  const runs = join(f.repo, ".agentrun/runs")
-  if (existsSync(runs)) {
+  for (const repo of f.ownership.repos) {
+    const runs = join(repo, ".agentrun/runs")
+    if (!existsSync(runs)) continue
     for (const run of readdirSync(runs)) {
       const file = join(runs, run, "state.json")
       if (!existsSync(file)) continue
