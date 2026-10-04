@@ -30,6 +30,7 @@ import type { RunEvent } from "../src/domain/RunEvent.js"
 import { RunState } from "../src/domain/RunState.js"
 import { Task, TaskId } from "../src/domain/Task.js"
 import type { TaskStatus } from "../src/domain/TaskStatus.js"
+import { Report } from "../src/Report.js"
 import { RunLock } from "../src/RunLock.js"
 import { Runner } from "../src/Runner.js"
 import { StateStore } from "../src/StateStore.js"
@@ -82,7 +83,9 @@ const clockWorktrees = Layer.succeed(Worktrees, {
   locate: (taskId) => ({ taskId, path: "/unused", branch: "test-branch" }),
   acquire: (task) => Effect.succeed({ taskId: task.id, path: "/unused", branch: "test-branch" }),
   commit: () => Effect.succeed(false),
-  diff: () => Effect.succeed(""),
+  snapshot: () => Effect.succeed({ commit: "a".repeat(40), committed: false }),
+  publish: () => Effect.void,
+  diff: () => Effect.succeed(new Uint8Array()),
   reconcile: () => Effect.succeed([]),
 })
 
@@ -134,7 +137,7 @@ const withRepo = Effect.fn("test.withRepo")(
     const baseSha = yield* git(repoRoot, ["rev-parse", "main"])
     const runId = "20261003T1200-a1b2"
     yield* test({ fs, path, repoRoot, home, baseSha, runId }).pipe(
-      Effect.provide(Layer.merge(Worktrees.layer({ repoRoot, home, runId }), RunLock.layer({ home }))),
+      Effect.provide(Layer.mergeAll(Report.layer, Worktrees.layer({ repoRoot, home, runId }), RunLock.layer({ home }))),
     )
   },
   Effect.scoped,
@@ -364,10 +367,19 @@ describe("Runner", () => {
       Effect.provide(
         testLayer(fakeAgents(() =>
           Stream.succeed<AgentEvent>({ _tag: "Started" }).pipe(Stream.concat(
-            Stream.fromEffect(TestClock.adjust("90 seconds").pipe(Effect.as(completed))),
+            Stream.fromEffect(TestClock.adjust("90 seconds").pipe(Effect.as({ ...completed, costUsd: 0 }))),
           ))
         )).pipe(Layer.provide(Layer.mergeAll(
           clockWorktrees,
+          Layer.succeed(Report, {
+            lastEvent: () => Effect.succeed(Option.none()),
+            append: () => Effect.void,
+            eventSize: () => Effect.succeed(0),
+            readPatch: () => Effect.succeed(Option.none()),
+            patch: () => Effect.void,
+            save: () => Effect.void,
+            load: () => Effect.die("not used"),
+          }),
           Layer.succeed(RunLock, { acquire: () => Effect.void }),
           NodeServices.layer,
         ))),

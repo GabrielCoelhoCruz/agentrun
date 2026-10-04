@@ -31,6 +31,8 @@ with Fixture(root) as fixture:
         saved = json.loads(saved_path.read_text())
         saved['status']['task1'] = {'_tag': 'failed', 'attempt': 1, 'reason': 'saved failure'}
         saved['status']['task2'] = {'_tag': 'pending'}
+        saved.get('taskReports', {}).pop('task1', None)
+        saved.get('taskReports', {}).pop('task2', None)
         saved_path.write_text(json.dumps(saved))
         args = [node, str(entry), 'resume', '--retry-failed', '--load-project-settings']
     if scenario == 'json': args += ['--json']

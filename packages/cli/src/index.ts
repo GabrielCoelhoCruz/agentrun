@@ -1,4 +1,16 @@
-import { Agents, diagnostics, RunLock, Runner, RunState, StateStore, TaskFile, Worktrees } from "@agentrun/core"
+import {
+  Agents,
+  diagnostics,
+  markdown,
+  Report,
+  RunLock,
+  Runner,
+  RunReport,
+  RunState,
+  StateStore,
+  TaskFile,
+  Worktrees,
+} from "@agentrun/core"
 import { Clock, Console, Effect, Exit, Fiber, FileSystem, Layer, Logger, Option, Schema, Stream } from "effect"
 import type { Runtime } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
@@ -70,6 +82,7 @@ export const execute = Effect.fn("cli.execute")(
       const candidate = resumeExisting ? yield* store.load(state.runId) : state
       if (!resumeExisting) yield* store.save(candidate)
       const services = Layer.mergeAll(
+        Report.layer,
         Layer.succeed(Agents, agents),
         Layer.succeed(StateStore, store),
         Layer.succeed(RunLock, { acquire: () => Effect.void }),
@@ -194,6 +207,21 @@ export const resume = Effect.fn("cli.resume")(
   },
 )
 
+export const report = Effect.fn("cli.report")(
+  function*(options: { readonly runId: Option.Option<string>; readonly json: boolean }) {
+    const fs = yield* FileSystem.FileSystem
+    const repoRoot = yield* fs.realPath(yield* git(["rev-parse", "--show-toplevel"])).pipe(Effect.mapError(bad))
+    yield* Effect.gen(function*() {
+      const store = yield* StateStore
+      const id = Option.isSome(options.runId) ? options.runId : yield* store.latest
+      if (Option.isNone(id)) return yield* bad("No saved run found")
+      const saved = yield* (yield* Report).load(repoRoot, id.value).pipe(Effect.mapError(bad))
+      const encoded = yield* Schema.encodeEffect(Schema.toCodecJson(RunReport))(saved).pipe(Effect.mapError(bad))
+      yield* write(options.json ? encoded : markdown(saved), options.json)
+    }).pipe(Effect.provide(Layer.merge(StateStore.layerFile({ repoRoot }), Report.layer)))
+  },
+)
+
 export const doctor = Effect.fn("cli.doctor")(
   function*({ json }: { readonly json: boolean }, check: ReturnType<typeof diagnostics> = diagnostics(process.cwd())) {
     const report = yield* check
@@ -215,6 +243,10 @@ export const command = Command.make("agentrun").pipe(Command.withSubcommands([
     runId: Argument.String("run-id").pipe(Argument.withSchema(RunId), Argument.optional),
     retryFailed: Flag.Boolean("retry-failed").pipe(Flag.withDefault(false)),
   }, resume),
+  Command.make("report", {
+    runId: Argument.String("run-id").pipe(Argument.withSchema(RunId), Argument.optional),
+    json: Flag.Boolean("json").pipe(Flag.withDefault(false)),
+  }, report),
   Command.make(
     "doctor",
     { json: Flag.Boolean("json").pipe(Flag.withDefault(false)) },

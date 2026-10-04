@@ -37,7 +37,12 @@ export class Worktrees extends Context.Service<Worktrees, {
   readonly locate: (taskId: TaskId) => Worktree
   readonly acquire: (task: Task, baseSha: string) => Effect.Effect<Worktree, GitError, Scope.Scope>
   readonly commit: (worktree: Worktree, message: string) => Effect.Effect<boolean, GitError>
-  readonly diff: (worktree: Worktree, baseSha: string) => Effect.Effect<string, GitError>
+  readonly snapshot: (
+    worktree: Worktree,
+    message: string,
+  ) => Effect.Effect<{ readonly commit: string; readonly committed: boolean }, GitError>
+  readonly publish: (worktree: Worktree, commit: string) => Effect.Effect<void, GitError>
+  readonly diff: (worktree: Worktree, baseSha: string, commit?: string) => Effect.Effect<Uint8Array, GitError>
   readonly reconcile: (state: RunState) => Effect.Effect<ReadonlyArray<Reconciled>, GitError>
 }>()("agentrun/Worktrees") {
   static readonly layer = (options: Options) => Layer.effect(Worktrees, make(options))
@@ -49,21 +54,27 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
   const path = yield* Path.Path
   const semaphore = yield* Semaphore.make(options.permits ?? 1)
 
-  const git = Effect.fn("Worktrees.git")(function*(args: ReadonlyArray<string>, { cwd }: { readonly cwd: string }) {
-    const command = `git ${args.join(" ")}`
-    const handle = yield* spawner.spawn(ChildProcess.make("git", args, { cwd })).pipe(
-      Effect.mapError((error) => new GitError({ command, exitCode: -1, stderr: error.message })),
-    )
-    const [stdout, stderr, exitCode] = yield* Effect.all([
-      handle.stdout.pipe(Stream.decodeText(), Stream.mkString),
-      handle.stderr.pipe(Stream.decodeText(), Stream.mkString),
-      handle.exitCode,
-    ], { concurrency: "unbounded" }).pipe(
-      Effect.mapError((error) => new GitError({ command, exitCode: -1, stderr: error.message })),
-    )
-    if (exitCode !== 0) return yield* new GitError({ command, exitCode, stderr })
-    return stdout.trim()
-  }, Effect.scoped)
+  const gitBytes = Effect.fn("Worktrees.gitBytes")(
+    function*(args: ReadonlyArray<string>, { cwd }: { readonly cwd: string }) {
+      const command = `git ${args.join(" ")}`
+      const handle = yield* spawner.spawn(ChildProcess.make("git", args, { cwd })).pipe(
+        Effect.mapError((error) => new GitError({ command, exitCode: -1, stderr: error.message })),
+      )
+      const [stdout, stderr, exitCode] = yield* Effect.all([
+        handle.stdout.pipe(Stream.runCollect, Effect.map((chunks) => Buffer.concat(chunks))),
+        handle.stderr.pipe(Stream.decodeText(), Stream.mkString),
+        handle.exitCode,
+      ], { concurrency: "unbounded" }).pipe(
+        Effect.mapError((error) => new GitError({ command, exitCode: -1, stderr: error.message })),
+      )
+      if (exitCode !== 0) return yield* new GitError({ command, exitCode, stderr })
+      return stdout
+    },
+    Effect.scoped,
+  )
+
+  const git = (args: ReadonlyArray<string>, cwd: { readonly cwd: string }) =>
+    gitBytes(args, cwd).pipe(Effect.map((bytes) => bytes.toString("utf8").trim()))
 
   const repo = { cwd: options.repoRoot }
   const hash = yield* repoHash(options.repoRoot)
@@ -116,17 +127,46 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
     )
   })
 
-  const commit = Effect.fn("Worktrees.commit")(function*(worktree: Worktree, message: string) {
+  const snapshot = Effect.fn("Worktrees.snapshot")(function*(worktree: Worktree, message: string) {
     const cwd = { cwd: worktree.path }
     yield* git(["add", "-A"], cwd)
-    const status = yield* git(["status", "--porcelain"], cwd)
-    if (status === "") return false
-    yield* git(["-c", "user.name=agentrun", "-c", "user.email=agentrun@localhost", "commit", "-m", message], cwd)
-    return true
+    const parent = yield* git(["rev-parse", "HEAD"], cwd)
+    if ((yield* git(["status", "--porcelain"], cwd)) === "") return { commit: parent, committed: false }
+    const tree = yield* git(["write-tree"], cwd)
+    const commit = yield* git([
+      "-c",
+      "user.name=agentrun",
+      "-c",
+      "user.email=agentrun@localhost",
+      "commit-tree",
+      tree,
+      "-p",
+      parent,
+      "-m",
+      message,
+    ], cwd)
+    return { commit, committed: true }
+  })
+  const publish = Effect.fn("Worktrees.publish")(function*(worktree: Worktree, commit: string) {
+    const ref = `refs/heads/${worktree.branch}`
+    const current = yield* git(["rev-parse", "--verify", ref], repo)
+    const delivered = yield* git(["merge-base", "--is-ancestor", commit, current], repo).pipe(
+      Effect.as(true),
+      Effect.catchTag("GitError", (error) => error.exitCode === 1 ? Effect.succeed(false) : Effect.fail(error)),
+    )
+    if (delivered) return
+    const parent = yield* git(["rev-parse", `${commit}^`], repo)
+    // Compare-and-swap refuses to overwrite a user branch changed before publication.
+    yield* git(["update-ref", ref, commit, parent], repo)
+  })
+  const commit = Effect.fn("Worktrees.commit")(function*(worktree: Worktree, message: string) {
+    const prepared = yield* snapshot(worktree, message)
+    yield* publish(worktree, prepared.commit)
+    return prepared.committed
   })
 
-  const diff = Effect.fn("Worktrees.diff")(function*(worktree: Worktree, baseSha: string) {
-    return yield* git(["diff", `${baseSha}..${worktree.branch}`], { cwd: worktree.path })
+  const diff = Effect.fn("Worktrees.diff")(function*(worktree: Worktree, baseSha: string, commit?: string) {
+    return yield* gitBytes(["diff", "--binary", `${baseSha}..${commit ?? worktree.branch}`], repo)
   })
 
   const reconcile = Effect.fn("Worktrees.reconcile")(function*(state: RunState) {
@@ -175,5 +215,13 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
     return actions
   })
 
-  return Worktrees.of({ locate, acquire, commit, diff, reconcile })
+  return Worktrees.of({
+    locate,
+    acquire,
+    commit,
+    diff,
+    reconcile,
+    snapshot,
+    publish,
+  })
 })
