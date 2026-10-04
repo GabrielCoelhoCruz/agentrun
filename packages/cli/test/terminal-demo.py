@@ -1,4 +1,3 @@
-"""Real PTY CLI demo. Explicit fake-provider entry; never calls paid providers."""
 import errno, fcntl, json, os, pathlib, pty, select, signal, struct, subprocess, sys, termios, time
 
 scenario, target, node = sys.argv[1:]
@@ -35,7 +34,6 @@ frames = []
 start = time.monotonic()
 raw = bytearray()
 if scenario in ['pipe', 'json']:
-    # JSON must remain clean even with a real TTY stdout. Keep stderr separate.
     if scenario == 'json':
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))

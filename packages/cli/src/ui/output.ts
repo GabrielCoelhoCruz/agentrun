@@ -1,6 +1,5 @@
 import { stripVTControlCharacters } from "node:util"
 
-// Keep newlines; replace remaining terminal controls and bidi overrides with spaces.
 export const safeText = (text: string): string =>
   // eslint-disable-next-line no-control-regex -- This is the terminal control trust boundary.
   stripVTControlCharacters(text).replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, " ")
