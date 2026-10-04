@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url"
 const repo = fileURLToPath(new URL("../", import.meta.url))
 const output = resolve(process.argv[2])
 const scenario = process.argv[3] ?? "wait"
-assert.ok(["wait", "assertion", "timeout", "success", "unknown", "reused", "linked"].includes(scenario))
+assert.ok(
+  ["wait", "assertion", "timeout", "success", "unknown", "reused", "linked", "lease-timeout"].includes(scenario),
+)
 mkdirSync(output)
 const fixtures = join(output, "fixtures")
 mkdirSync(fixtures)
@@ -29,6 +31,8 @@ const foreign = ["unknown", "reused"].includes(scenario)
 const foreignDone = foreign && new Promise(resolve => foreign.on("exit", resolve))
 const name = scenario === "wait"
   ? "^Ctrl-C persists two interrupted tasks and stops their marked children$"
+  : scenario === "lease-timeout"
+  ? "^kernel lease survives replacement contention and releases on parent SIGKILL$"
   : "^fixture cleanup probe"
 const args = [
   "node_modules/vitest/vitest.mjs",
@@ -62,7 +66,7 @@ const p = spawn(process.execPath, args, {
     ...process.env,
     AGENTRUN_TEST_EVIDENCE: fixtures,
     AGENTRUN_CLEANUP_PROBE: scenario,
-    ...(scenario === "wait" ? {} : { AGENTRUN_CLEANUP_CASE: scenario }),
+    ...(["wait", "lease-timeout"].includes(scenario) ? {} : { AGENTRUN_CLEANUP_CASE: scenario }),
     ...(foreign ? { AGENTRUN_FOREIGN_PID: String(foreign.pid) } : {}),
     NODE_OPTIONS: `--require=${join(repo, "scripts/fixture-cleanup-preload.cjs")}`,
   },
@@ -76,7 +80,7 @@ p.stderr.on("data", x => {
   stderr += x
 })
 const deadline = setTimeout(() => p.kill("SIGTERM"), 120000)
-let records = [], identities = []
+let records = [], identities = [], leases = []
 const f = join(fixtures, "case-1")
 try {
   const code = await new Promise((resolve, reject) => {
@@ -92,11 +96,17 @@ try {
     return token ? [{ pgid: r.pid, processToken: token.slice("agentrun-worker-".length) }] : []
   })
   const runRoot = join(f, scenario === "linked" ? "linked/.agentrun/runs" : "repo/.agentrun/runs")
-  const saved = JSON.parse(readFileSync(join(runRoot, readdirSync(runRoot)[0], "state.json"), "utf8"))
+  const saved = scenario === "lease-timeout"
+    ? undefined
+    : JSON.parse(readFileSync(join(runRoot, readdirSync(runRoot)[0], "state.json"), "utf8"))
+  if (scenario === "lease-timeout") leases = JSON.parse(readFileSync(join(f, "lease-processes.json"), "utf8"))
   const observed = table()
-  const cli = records.filter(r => r.argv[1]?.endsWith("/fixtures/dist/entry.mjs"))
+  const cli = records.filter(r => /\/fixtures\/dist\/(?:entry|lock-entry)\.mjs$/.test(r.argv[1] ?? ""))
   const live = observed.filter(r =>
-    !r.state.startsWith("Z") && (cli.some(c => r.pid === c.pid) || identities.some(w => r.group === w.pgid))
+    !r.state.startsWith("Z")
+    && (cli.some(c => r.pid === c.pid) || identities.some(w => r.group === w.pgid) || leases.some(l =>
+      r.pid === l.pid
+    ))
   )
   writeFileSync(
     join(output, "result.json"),
@@ -104,13 +114,24 @@ try {
   )
   assert.equal(code, scenario === "success" ? 0 : 1, "inner Vitest exit must match injected outcome")
   assert.ok(
-    readFileSync(join(f, scenario === "wait" ? "child-task0.hidden" : "child-task0"), "utf8").trim(),
+    readFileSync(
+      join(
+        f,
+        scenario === "lease-timeout"
+          ? "probe-contender-stopped"
+          : scenario === "wait"
+          ? "child-task0.hidden"
+          : "child-task0",
+      ),
+      "utf8",
+    ).trim(),
     "real hold child started",
   )
   if (scenario === "wait") {
     assert.match(stdout + stderr, /Condition did not complete within 15 seconds/)
     assert.ok(readFileSync(join(f, "child-task1"), "utf8").trim(), "second real hold child started")
   }
+  if (scenario === "lease-timeout") assert.match(stdout + stderr, /Test timed out/)
   if (scenario === "assertion" || scenario === "linked") assert.match(stdout + stderr, /injected assertion failure/)
   if (scenario === "timeout") {
     assert.match(stdout + stderr, /Test timed out/)
@@ -153,7 +174,8 @@ try {
   }
   await delay(300)
   const remaining = table().filter(r =>
-    !r.state.startsWith("Z") && records.some(record => r.pid === record.pid || r.group === record.pid)
+    !r.state.startsWith("Z")
+    && (records.some(record => r.pid === record.pid || r.group === record.pid) || leases.some(l => r.pid === l.pid))
   )
   const foreignRemaining = foreign ? table().filter(r => r.pid === foreign.pid && !r.state.startsWith("Z")) : []
   writeFileSync(
