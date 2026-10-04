@@ -72,7 +72,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
 
     def observed_read(path, *args, **kwargs):
         text = real_read(path, *args, **kwargs)
-        if state.get('launchReceipt') == str(path) and mode in ['launcher-missing', 'launcher-nonce', 'launcher-pid', 'launcher-uid', 'launcher-start', 'launcher-command', 'launcher-path']:
+        if state['armed'] and state.get('launchReceipt') == str(path) and mode in ['launcher-missing', 'launcher-nonce', 'launcher-pid', 'launcher-uid', 'launcher-start', 'launcher-command', 'launcher-path']:
             data = json.loads(text)
             if mode == 'launcher-missing':
                 save('receipt-injection.json', {'path': str(path), 'missing': True})
@@ -109,26 +109,36 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
         frozen = (guard / 'complete-fault-inventory.json').exists()
         freeze_call = any(frame.function == 'freeze_tree' for frame in inspect.stack())
         if registration and not state['armed'] and context.f_code.co_name == '<module>':
-            candidates = [r for r in rows if 'fake-worker.mjs agentrun-worker-' in r['command'] and live(r)]
-            cli_rows = [r for r in rows if '/fixtures/dist/entry.mjs run TASKS.md' in r['command'] and live(r)]
-            leases = [r for r in rows if '/usr/bin/lockf ' in r['command'] and str(guard) in r['command']]
+            owned = {owner['p'].pid} if owner['p'] else set()
+            while True:
+                expanded = owned | {r['pid'] for r in rows if r['parent'] in owned}
+                if expanded == owned:
+                    break
+                owned = expanded
+            candidates = [r for r in rows if r['pid'] in owned and 'fake-worker.mjs agentrun-worker-' in r['command'] and live(r)]
+            cli_rows = [r for r in rows if r['pid'] in owned and '/fixtures/dist/entry.mjs run TASKS.md' in r['command'] and live(r)]
+            leases = [r for r in rows if r['pid'] in owned and '/usr/bin/lockf ' in r['command'] and str(guard) in r['command']]
+            fresh_workers = [r for r in candidates if r['pid'] not in owner['identities']]
+            if partial_case and (len(candidates) < 2 or not fresh_workers):
+                state['deferState'] = True
+                return response
+            if launch_case and cli_rows and not (candidates and leases):
+                receipt = next(guard.rglob('terminal-child-' + str(cli_rows[0]['pid']) + '.json'))
+                launcher = json.loads(real_read(receipt))['commands'][0]
+                save('launcher-seed.json', {'raw': dict(cli_rows[0]), 'launcher': launcher, 'receipt': str(receipt)})
+                cli_rows[0]['command'] = launcher
             if candidates and cli_rows and leases:
                 cli_row = cli_rows[0]
-                worker = next(r for r in candidates if r['parent'] == cli_row['pid'])
-                owned = {owner['p'].pid}
-                while True:
-                    expanded = owned | {r['pid'] for r in rows if r['parent'] in owned}
-                    if expanded == owned:
-                        break
-                    owned = expanded
+                worker = fresh_workers[0] if partial_case else next(r for r in candidates if r['parent'] == cli_row['pid'])
                 captured = [dict(r) for r in rows if r['pid'] in owned]
-                target = cli_row if launch_case or mode in ['cli-command', 'cli-group'] else next(r for r in rows if r['parent'] == leases[0]['pid']) if partial_case else worker
+                target = cli_row if launch_case or mode in ['cli-command', 'cli-group'] else worker
                 for r in captured:
                     if r['pid'] == cli_row['pid'] or r['pid'] == worker['pid'] or r['pid'] == leases[0]['pid'] or r['parent'] == leases[0]['pid']:
                         stop_owned(r, signal.SIGSTOP)
                 state.update(armed=True, target=dict(target), deferState=True)
                 save('precondition.json', {'identities': captured, 'target': dict(target),
-                                          'foreign': owner['foreign_identity'], 'phase': 'registration'})
+                                          'foreign': owner['foreign_identity'], 'phase': 'registration',
+                                          'priorAuthority': owner['identities'].get(target['pid'])})
                 if launch_case:
                     receipt = next(guard.rglob('terminal-child-' + str(target['pid']) + '.json'))
                     launcher = json.loads(real_read(receipt))['commands'][0]
