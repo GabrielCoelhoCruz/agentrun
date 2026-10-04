@@ -13,7 +13,7 @@ wt = Path(__file__).resolve().parents[1]
 node = shutil.which('node')
 assert node, 'Node is required'
 mode = sys.argv[2] if len(sys.argv) > 2 else 'pipe'
-scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe'}.get(mode, mode)
+scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe', 'freeze-hold': 'pipe'}.get(mode, mode)
 out = Path(sys.argv[1]).resolve()
 out.mkdir(exist_ok=False)
 root = out / 'fixture'
@@ -95,9 +95,9 @@ try:
         env['NODE_OPTIONS'] = '--require=' + str(wt / 'scripts/terminal-cleanup-deadline.cjs')
         env['AGENTRUN_TEST_EVIDENCE'] = str(root)
         args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: json']
-    if mode == 'freeze-stall':
+    if mode in ['freeze-stall', 'freeze-hold']:
         driver = out / 'freeze-driver.py'
-        driver.write_text("import sys, runpy\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.dont_write_bytecode = True\nimport terminal_fixture\noriginal = terminal_fixture.table\ndef stalled(timeout=5):\n    rows = original(timeout)\n    for row in rows.values():\n        if 'fake-worker.mjs agentrun-worker-' in row['command'] and row['state'].startswith('T'):\n            row['state'] = 'S'\n    return rows\nterminal_fixture.table = stalled\nsys.argv = sys.argv[1:]\nrunpy.run_path(str(p), run_name='__main__')\n")
+        driver.write_text("import sys, runpy\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.dont_write_bytecode = True\nimport terminal_fixture\noriginal = terminal_fixture.table\ndef stalled(timeout=5):\n    rows = original(timeout)\n    for row in rows.values():\n        if 'fake-worker.mjs agentrun-worker-' in row['command'] and row['state'].startswith('T'):\n            row['state'] = 'S'\n    return rows\nterminal_fixture.table = stalled\nsys.argv = sys.argv[1:]\nsource = p.read_text()\nif 'freeze-hold' == 'MODE_PLACEHOLDER': source = source.replace(\"else 'panel-demo'\", \"else 'panel-demo hold'\")\nexec(compile(source, str(p), 'exec'), {'__file__': str(p), '__name__': '__main__'})\n".replace('MODE_PLACEHOLDER', mode))
         args.insert(1, str(driver))
     if mode == 'hold':
         driver = out / 'hold-driver.py'
@@ -126,7 +126,7 @@ try:
                 if len(workers) != (2 if mode == 'resume-second' else 3):
                     time.sleep(.05)
                     continue
-                if mode == 'hold' and not all((fixture / f'child-task{n}').exists() for n in range(3)):
+                if mode in ['hold', 'freeze-hold'] and not all((fixture / f'child-task{n}').exists() for n in range(3)):
                     time.sleep(.05)
                     continue
                 cli=candidates[0]
@@ -177,7 +177,7 @@ try:
     err=(out/'driver.stderr').read_text()
     result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if mode == 'outer' else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
     save('result.json',result)
-    if mode in ['pipe', 'resume', 'json', 'hold', 'missing-state', 'bad-receipt', 'bad-worker', 'freeze-stall']:
+    if mode in ['pipe', 'resume', 'json', 'hold', 'missing-state', 'bad-receipt', 'bad-worker', 'freeze-stall', 'freeze-hold']:
         assert code == 1 and result['deadlineObserved'], 'Original deadline did not produce the expected failure'
     elif mode in ['pty', 'resume-second']:
         assert code == 1 and 'PTY demo exceeded 22 seconds' in err, err
