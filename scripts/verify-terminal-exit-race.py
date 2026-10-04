@@ -119,7 +119,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
             cli_rows = [r for r in rows if r['pid'] in owned and '/fixtures/dist/entry.mjs run TASKS.md' in r['command'] and live(r)]
             leases = [r for r in rows if r['pid'] in owned and '/usr/bin/lockf ' in r['command'] and str(guard) in r['command']]
             fresh_workers = [r for r in candidates if r['pid'] not in owner['identities']]
-            if partial_case and (len(candidates) < 2 or not fresh_workers):
+            if (partial_case and len(candidates) < 2) or ((partial_case or mode == 'worker-prior-group') and not fresh_workers):
                 state['deferState'] = True
                 return response
             if launch_case and cli_rows and not (candidates and leases):
@@ -129,7 +129,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
                 cli_rows[0]['command'] = launcher
             if candidates and cli_rows and leases:
                 cli_row = cli_rows[0]
-                worker = fresh_workers[0] if partial_case else next(r for r in candidates if r['parent'] == cli_row['pid'])
+                worker = fresh_workers[0] if partial_case or mode == 'worker-prior-group' else next(r for r in candidates if r['parent'] == cli_row['pid'])
                 captured = [dict(r) for r in rows if r['pid'] in owned]
                 target = cli_row if launch_case or mode in ['cli-command', 'cli-group'] else worker
                 for r in captured:
