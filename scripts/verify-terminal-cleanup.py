@@ -13,9 +13,9 @@ wt = Path(__file__).resolve().parents[1]
 node = shutil.which('node')
 assert node, 'Node is required'
 mode = sys.argv[2] if len(sys.argv) > 2 else 'pipe'
-added_outer = mode in ['retry-outer', 'timeout-outer']
+added_outer = mode in ['retry-outer', 'timeout-outer', 'rescue-siblings']
 outer = mode == 'outer' or added_outer
-scenario = {'retry-outer': 'retry', 'timeout-outer': 'timeout', 'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe', 'freeze-hold': 'pipe'}.get(mode, mode)
+scenario = {'rescue-siblings': 'timeout', 'retry-outer': 'retry', 'timeout-outer': 'timeout', 'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe', 'freeze-hold': 'pipe'}.get(mode, mode)
 out = Path(sys.argv[1]).resolve()
 out.mkdir(exist_ok=False)
 root = out / 'fixture'
@@ -28,6 +28,7 @@ foreign_identity = None
 workers = []
 cli = None
 result = {}
+late_workers = []
 
 def save(name, value):
     (out / name).write_text(json.dumps(value, indent=2) + '\n')
@@ -149,6 +150,18 @@ try:
                     assert any(current(identities[w['pgid']]) is not None and current(identities[w['pgid']])['state'].startswith('T') for w in workers), 'Worker fault was not reached'
                 save('state-before-fault.json',saved)
                 save('processes-before-fault.json',list(identities.values()))
+                if mode == 'rescue-siblings':
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        fresh = table()
+                        state = json.loads(states[0].read_text())
+                        late_workers = [dict(pid=w['pgid'], token='agentrun-worker-'+w['processToken']) for w in state['worktrees'].values() if 'pgid' in w and 'processToken' in w]
+                        if len(late_workers) == 3 and all(any(r['pid'] == w['pid'] and live(r) and w['token'] in r['command'].split() for r in fresh) for w in late_workers):
+                            break
+                        time.sleep(.01)
+                    else:
+                        raise RuntimeError('Sibling startup precondition was not reached')
+                    save('late-workers.json', late_workers)
                 if mode != 'normal':
                     send(cli,signal.SIGSTOP)
                     save('fault-receipt.json',receipts[-1])
@@ -224,9 +237,13 @@ try:
         assert code != 0 and 'refused' in err.lower(), err
     else:
         assert code != 0, 'Injected failure did not fail the driver'
-    assert not remaining, f'Owned resources survived driver cleanup: {remaining}'
+    if mode == 'rescue-siblings':
+        assert remaining, 'The original unhooked test must leave work for observer rescue'
+    else:
+        assert not remaining, f'Owned resources survived driver cleanup: {remaining}'
     assert result['foreignStillAlive'], 'Foreign sentinel unexpectedly stopped'
-    print(f'PASS {mode}: zero owned resources before rescue; foreign preserved', flush=True)
+    if mode != 'rescue-siblings':
+        print(f'PASS {mode}: zero owned resources before rescue; foreign preserved', flush=True)
 finally:
     errors=[]
     def reap(child):
@@ -277,7 +294,7 @@ finally:
     remaining = None
     try:
         rows = table()
-        remaining = [r for r in rows if live(r) and (r['pid'] in identities or any(r['group'] == w['pgid'] for w in workers) or (foreign is not None and r['pid'] == foreign.pid))]
+        remaining = [r for r in rows if live(r) and (r['pid'] in identities or any(r['group'] == w['pgid'] for w in workers) or any(r['pid'] == w['pid'] and w['token'] in r['command'].split() for w in late_workers) or (foreign is not None and r['pid'] == foreign.pid))]
     except Exception as error:
         errors.append(repr(error))
     save('cleanup.json', {'signals': receipts, 'refused': refused, 'errors': errors, 'remaining': remaining, 'processInspectionSucceeded': remaining is not None, 'identities': list(identities.values()), 'foreignPid': foreign.pid if foreign else None})
