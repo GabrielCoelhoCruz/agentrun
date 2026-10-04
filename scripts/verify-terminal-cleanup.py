@@ -30,6 +30,9 @@ cli = None
 result = {}
 late_workers = []
 
+class IdentityChanged(RuntimeError):
+    pass
+
 def save(name, value):
     (out / name).write_text(json.dumps(value, indent=2) + '\n')
 
@@ -63,17 +66,21 @@ def remember(rows, parent):
             old = identities.get(row['pid'])
             if old and (old['uid'] != row['uid'] or old['start'] != row['start']):
                 raise RuntimeError('Observed PID reuse')
-            identities[row['pid']] = row
+            identities.setdefault(row['pid'], row)
     return owned
 
 def current(record):
-    row = next((r for r in table() if r['pid'] == record['pid'] and live(r)), None)
-    if row is None:
-        return None
-    if not same(row, record):
+    deadline = time.monotonic() + .5
+    while True:
+        row = next((r for r in table() if r['pid'] == record['pid'] and live(r)), None)
+        if row is None:
+            return None
+        if same(row, record):
+            return row
         refused.append({'expected': record, 'observed': row})
-        raise RuntimeError('Cleanup refused changed identity')
-    return row
+        if time.monotonic() >= deadline:
+            raise IdentityChanged('Cleanup refused changed identity')
+        time.sleep(.02)
 
 def send(record, sig, leader=False, token=None):
     row = current(record)
@@ -100,11 +107,15 @@ def freeze_tree(record, receipt):
             continue
         rows = table()
         owned = remember(rows, record['pid'])
+        unresolved = set()
         for pid in owned:
-            send(identities[pid], signal.SIGSTOP)
+            try:
+                send(identities[pid], signal.SIGSTOP)
+            except IdentityChanged:
+                unresolved.add(pid)
         rows = table()
         expanded = remember(rows, record['pid'])
-        if expanded <= owned and all(not live(r) or 'T' in r['state'] for r in rows if r['pid'] in expanded):
+        if expanded <= owned and all(not live(r) or ('T' in r['state'] and r['pid'] not in unresolved) for r in rows if r['pid'] in expanded):
             save(receipt, {'cliStopped': True, 'identities': [identities[pid] for pid in expanded], 'stoppedRows': [r for r in rows if r['pid'] in expanded]})
             return
     raise TimeoutError('Complete fault inventory did not freeze within 5 seconds')
@@ -284,31 +295,38 @@ finally:
             child.wait(timeout=5)
         except Exception as error:
             errors.append(repr(error))
-    if p is not None:
+    def attempt(action, *args, **kwargs):
         try:
-            rows=table()
-            remember(rows,p.pid)
-            if cli:
-                if current(cli) is not None:
-                    freeze_tree(cli, 'complete-rescue-inventory.json')
-                send(cli,signal.SIGKILL)
-            for w in workers:
-                leader=identities.get(w['pgid'])
-                if leader:
-                    send(leader,signal.SIGKILL,leader=True,token=w['token'])
-            for record in list(identities.values()):
-                if record['pid']==p.pid:
-                    continue
-                send(record,signal.SIGKILL)
-            if p.poll() is None:
-                record=identities.get(p.pid)
-                if record:
-                    send(record,signal.SIGKILL)
-            p.wait(timeout=5)
+            return action(*args, **kwargs)
         except Exception as error:
             errors.append(repr(error))
-        finally:
-            reap(p)
+
+    if p is not None:
+        def discover():
+            remember(table(), p.pid)
+
+        def freeze_cli():
+            if current(cli) is not None:
+                freeze_tree(cli, 'complete-rescue-inventory.json')
+
+        attempt(discover)
+        if cli:
+            attempt(freeze_cli)
+            attempt(send, cli, signal.SIGKILL)
+        for w in workers:
+            leader = identities.get(w['pgid'])
+            if leader:
+                attempt(send, leader, signal.SIGKILL, leader=True, token=w['token'])
+        for _ in range(2):
+            for record in list(identities.values()):
+                if record['pid'] != p.pid:
+                    attempt(send, record, signal.SIGKILL)
+        if p.poll() is None:
+            record = identities.get(p.pid)
+            if record:
+                attempt(send, record, signal.SIGKILL)
+        attempt(p.wait, timeout=5)
+        reap(p)
     if foreign is not None:
         try:
             alive_before = foreign.poll() is None if foreign_identity is None else current(foreign_identity) is not None
