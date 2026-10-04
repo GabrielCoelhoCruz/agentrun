@@ -94,7 +94,7 @@ try {
   const runRoot = join(f, "repo/.agentrun/runs")
   const saved = JSON.parse(readFileSync(join(runRoot, readdirSync(runRoot)[0], "state.json"), "utf8"))
   const observed = table()
-  const cli = records.filter(r => r.argv[1].endsWith("/fixtures/dist/entry.mjs"))
+  const cli = records.filter(r => r.argv[1]?.endsWith("/fixtures/dist/entry.mjs"))
   const live = observed.filter(r =>
     !r.state.startsWith("Z") && (cli.some(c => r.pid === c.pid) || identities.some(w => r.group === w.pgid))
   )
@@ -133,7 +133,7 @@ try {
     if (token && current.group === record.pid && current.command.split(/\s+/).includes(token)) {
       process.kill(-record.pid, "SIGKILL")
       receipts.push({ ...current, signal: "SIGKILL", token })
-    } else if (!token && current.command.includes(record.argv[1])) {
+    } else if (!token && typeof record.argv[1] === "string" && current.command.includes(record.argv[1])) {
       process.kill(record.pid, "SIGKILL")
       receipts.push({ ...current, signal: "SIGKILL" })
     }
