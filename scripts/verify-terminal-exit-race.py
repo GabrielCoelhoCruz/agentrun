@@ -17,6 +17,7 @@ identity_fields = ['pid', 'uid', 'group', 'start', 'command']
 real_run = subprocess.run
 real_kill = os.kill
 real_glob = Path.glob
+real_read = Path.read_text
 
 
 def save(name, value):
@@ -65,7 +66,26 @@ def stop_owned(record, sig):
 if len(sys.argv) > 3 and sys.argv[3] == 'driver':
     guard = out / 'guard'
     state = {'armed': False, 'injected': False, 'target': None, 'deferState': False}
-    registration = mode in ['worker-command', 'worker-group', 'cli-command', 'cli-group', 'initial-partial', 'launcher']
+    launch_case = mode.startswith('launcher')
+    partial_case = mode.startswith('initial-partial')
+    registration = launch_case or partial_case or mode in ['worker-command', 'worker-group', 'worker-prior-group', 'cli-command', 'cli-group']
+
+    def observed_read(path, *args, **kwargs):
+        text = real_read(path, *args, **kwargs)
+        if state.get('launchReceipt') == str(path) and mode in ['launcher-missing', 'launcher-nonce', 'launcher-pid', 'launcher-uid', 'launcher-start', 'launcher-command', 'launcher-path']:
+            data = json.loads(text)
+            if mode == 'launcher-missing':
+                save('receipt-injection.json', {'path': str(path), 'missing': True})
+                raise FileNotFoundError(str(path))
+            if mode == 'launcher-nonce': data['nonce'] = '0' * 32
+            if mode == 'launcher-pid': data['pid'] += 1
+            if mode == 'launcher-uid': data['uid'] += 1
+            if mode == 'launcher-start': data['start'] = 'Thu Jan 1 00:00:00 1970'
+            if mode == 'launcher-command': data['commands'] = [c + ' unsupported' for c in data['commands']]
+            if mode == 'launcher-path': data['commands'] = [c.replace(str(wt), '/unrelated') for c in data['commands']]
+            save('receipt-injection.json', {'path': str(path), 'raw': json.loads(text), 'observed': data})
+            return json.dumps(data)
+        return text
 
     def observed_glob(path, pattern, **kwargs):
         if state['deferState'] and pattern == '*/state.json' and str(guard) in str(path):
@@ -102,29 +122,40 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
                         break
                     owned = expanded
                 captured = [dict(r) for r in rows if r['pid'] in owned]
-                target = cli_row if mode in ['launcher', 'cli-command', 'cli-group'] else worker
+                target = cli_row if launch_case or mode in ['cli-command', 'cli-group'] else next(r for r in rows if r['parent'] == leases[0]['pid']) if partial_case else worker
                 for r in captured:
                     if r['pid'] == cli_row['pid'] or r['pid'] == worker['pid'] or r['pid'] == leases[0]['pid'] or r['parent'] == leases[0]['pid']:
                         stop_owned(r, signal.SIGSTOP)
                 state.update(armed=True, target=dict(target), deferState=True)
                 save('precondition.json', {'identities': captured, 'target': dict(target),
                                           'foreign': owner['foreign_identity'], 'phase': 'registration'})
-                if mode == 'launcher':
+                if launch_case:
                     receipt = next(guard.rglob('terminal-child-' + str(target['pid']) + '.json'))
-                    launcher = json.loads(receipt.read_text())['commands'][0]
+                    launcher = json.loads(real_read(receipt))['commands'][0]
+                    state['launchReceipt'] = str(receipt)
                     target['command'] = launcher
                     state['injected'] = True
                     save('injection.json', {'mode': mode, 'observed': dict(target), 'receipt': str(receipt)})
-                elif mode == 'initial-partial':
+                elif partial_case:
                     target['command'] = '(node)'
-                    state['partialUntil'] = time.monotonic() + 3
+                    state['partialUntil'] = time.monotonic() + (300 if mode == 'initial-partial-persistent' else 3)
+                    if mode == 'initial-partial-exit':
+                        stop_owned(state['target'], signal.SIGKILL)
+                    state['injected'] = True
+                    save('injection.json', {'mode': mode, 'observed': dict(target)})
+                elif mode == 'worker-prior-group':
+                    target['group'] += 1
                     state['injected'] = True
                     save('injection.json', {'mode': mode, 'observed': dict(target)})
         elif registration and state['armed']:
-            if mode == 'initial-partial' and time.monotonic() < state['partialUntil']:
+            if partial_case and mode != 'initial-partial-exit' and time.monotonic() < state['partialUntil']:
                 for row in rows:
                     if row['pid'] == state['target']['pid'] and live(row):
                         row['command'] = '(node)'
+            if mode == 'launcher-unsupported':
+                for row in rows:
+                    if row['pid'] == state['target']['pid'] and live(row):
+                        row['command'] += ' unsupported'
             if mode in ['worker-command', 'worker-group', 'cli-command', 'cli-group']:
                 state['injected'] = True
                 for row in rows:
@@ -207,6 +238,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
                                'afterInjection': state['injected']}) + '\n')
         return real_kill(pid, sig)
 
+    Path.read_text = observed_read
     Path.glob = observed_glob
     subprocess.run = observed_run
     os.kill = observed_kill
@@ -214,7 +246,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
     runpy.run_path(sys.argv[0], run_name='__main__')
     raise SystemExit(0)
 
-assert mode in ['exit', 'command', 'remember-command', 'uid', 'group', 'start', 'inspect', 'lookup', 'freeze-exit', 'worker-command', 'worker-group', 'cli-command', 'cli-group', 'initial-partial', 'launcher']
+assert mode in ['exit', 'command', 'remember-command', 'uid', 'group', 'start', 'inspect', 'lookup', 'freeze-exit', 'worker-command', 'worker-group', 'cli-command', 'cli-group', 'initial-partial', 'initial-partial-exit', 'initial-partial-persistent', 'worker-prior-group', 'launcher', 'launcher-missing', 'launcher-nonce', 'launcher-pid', 'launcher-uid', 'launcher-start', 'launcher-command', 'launcher-path', 'launcher-unsupported']
 out.mkdir(exist_ok=False)
 save('target.json', {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=wt, text=True).strip(),
                      'mode': mode, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True),
@@ -236,7 +268,7 @@ try:
     save('actual-after.json', rows)
     remaining = [r for r in rows if live(r) and any(same(r, old) for old in records)]
     cleanup = json.loads((out / 'guard/cleanup.json').read_text())
-    persistent = mode in ['command', 'remember-command', 'uid', 'group', 'start', 'worker-command', 'worker-group', 'cli-command', 'cli-group']
+    persistent = mode in ['command', 'remember-command', 'uid', 'group', 'start', 'worker-command', 'worker-group', 'worker-prior-group', 'cli-command', 'cli-group', 'initial-partial-persistent'] or mode.startswith('launcher-')
     signals = [json.loads(line) for line in (out / 'observer-signals.jsonl').read_text().splitlines()]
     target_signals = [r for r in signals if r['afterInjection'] and r['pid'] == pre['target']['pid']]
     save('result.json', {'guardExit': code, 'remainingBeforeProbeRescue': remaining,
@@ -246,20 +278,20 @@ try:
     assert all(r['pid'] > 0 for r in signals), 'Broad signal sent'
     if mode not in ['inspect', 'launcher', 'initial-partial']:
         assert not target_signals, 'Observer signaled an ambiguous or exited target'
-    if mode not in ['inspect', 'lookup', 'launcher', 'initial-partial']:
+    if mode not in ['inspect', 'lookup', 'launcher', 'initial-partial', 'initial-partial-exit']:
         assert cleanup['refused'], 'Injected refusal was not recorded'
     if persistent:
         assert code != 0
         assert {r['pid'] for r in remaining} <= {pre['target']['pid']}, 'Other verified resources survived'
         if remaining:
             assert any(r['pid'] == pre['target']['pid'] for r in cleanup['remaining']), 'Live ambiguity omitted from cleanup'
-        if mode not in ['worker-command', 'worker-group', 'cli-command', 'cli-group']:
+        if mode in ['command', 'remember-command', 'uid', 'group', 'start']:
             assert remaining, 'Persistent held-process precondition was lost'
     else:
         assert not remaining, 'Verified resources survived a refused or disappearing identity'
         assert not cleanup['remaining'], 'Observer did not prove absence'
     assert json.loads((out / 'guard/foreign-preserved-through-rescue.json').read_text())['alive']
-    if mode in ['freeze-exit', 'launcher', 'initial-partial']:
+    if mode in ['freeze-exit', 'launcher', 'initial-partial', 'initial-partial-exit']:
         assert code == 0, 'An exited child prevented a complete fault inventory'
     print('PASS', mode, flush=True)
 finally:
