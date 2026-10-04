@@ -153,7 +153,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
 
     subprocess.run = observed_run
     os.kill = observed_kill
-    sys.argv = [str(wt / 'scripts/verify-terminal-cleanup.py'), str(guard), 'retry-outer']
+    sys.argv = [str(wt / 'scripts/verify-terminal-cleanup.py'), str(guard), 'timeout-outer']
     runpy.run_path(sys.argv[0], run_name='__main__')
     raise SystemExit(0)
 
