@@ -22,6 +22,7 @@ identities = {}
 receipts = []
 refused = []
 p = foreign = None
+foreign_identity = None
 workers = []
 cli = None
 result = {}
@@ -87,25 +88,28 @@ try:
     env = {k:v for k,v in os.environ.items() if not any(s in k.upper() for s in ['TOKEN','SECRET','API_KEY','CREDENTIAL','AUTH'])}
     marker = 'pr9-f1-foreign-' + uuid.uuid4().hex
     foreign = subprocess.Popen([node, '-e', 'setInterval(() => {}, 1000)', marker], env=env, start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    save('foreign-handle.json', {'pid': foreign.pid, 'args': foreign.args, 'marker': marker})
     foreign_identity = next(r for r in table() if r['pid'] == foreign.pid)
     save('foreign-owned-by-observer.json', foreign_identity)
     args = [sys.executable, str(wt / 'packages/cli/test/terminal-demo.py'), scenario, str(root), node]
-    save('command.json', {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':22 if mode == 'pty' else 30 if mode == 'outer' else 20, 'fault':'SIGSTOP only the observed CLI after all three workers start', 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest(), 'sourceHashes': {f: hashlib.sha256((wt / f).read_bytes()).hexdigest() for f in ['packages/cli/test/terminal-demo.py', 'packages/cli/test/terminal_fixture.py', 'packages/cli/test/Terminal.test.ts', 'scripts/verify-terminal-cleanup.py', 'scripts/terminal-cleanup-deadline.cjs'] if (wt / f).exists()}, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True)})
+    command = {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':30 if mode == 'outer' else 22 if mode in ['pty', 'resume-second', 'normal', 'exception'] else 20, 'fault':mode, 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest(), 'sourceHashes': {f: hashlib.sha256((wt / f).read_bytes()).hexdigest() for f in ['packages/cli/test/terminal-demo.py', 'packages/cli/test/terminal_fixture.py', 'packages/cli/test/Terminal.test.ts', 'scripts/verify-terminal-cleanup.py', 'scripts/terminal-cleanup-deadline.cjs', 'scripts/verify-terminal-observer.py'] if (wt / f).exists()}, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True)}
     if mode == 'outer':
         env['NODE_OPTIONS'] = '--require=' + str(wt / 'scripts/terminal-cleanup-deadline.cjs')
         env['AGENTRUN_TEST_EVIDENCE'] = str(root)
         args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: json']
     if mode in ['freeze-stall', 'freeze-hold']:
         driver = out / 'freeze-driver.py'
-        driver.write_text("import sys, runpy\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.dont_write_bytecode = True\nimport terminal_fixture\noriginal = terminal_fixture.table\ndef stalled(timeout=5):\n    rows = original(timeout)\n    for row in rows.values():\n        if 'fake-worker.mjs agentrun-worker-' in row['command'] and row['state'].startswith('T'):\n            row['state'] = 'S'\n    return rows\nterminal_fixture.table = stalled\nsys.argv = sys.argv[1:]\nsource = p.read_text()\nif 'freeze-hold' == 'MODE_PLACEHOLDER': source = source.replace(\"else 'panel-demo'\", \"else 'panel-demo hold'\")\nexec(compile(source, str(p), 'exec'), {'__file__': str(p), '__name__': '__main__'})\n".replace('MODE_PLACEHOLDER', mode))
+        driver.write_text("import sys\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.dont_write_bytecode = True\nimport terminal_fixture\noriginal = terminal_fixture.table\ndef stalled(timeout=5):\n    rows = original(timeout)\n    for row in rows.values():\n        if 'fake-worker.mjs agentrun-worker-' in row['command'] and row['state'].startswith('T'):\n            row['state'] = 'S'\n    return rows\nterminal_fixture.table = stalled\nsys.argv = sys.argv[1:]\nsource = p.read_text()\nif 'freeze-hold' == 'MODE_PLACEHOLDER': source = source.replace(\"else 'panel-demo'\", \"else 'panel-demo hold'\")\nexec(compile(source, str(p), 'exec'), {'__file__': str(p), '__name__': '__main__'})\n".replace('MODE_PLACEHOLDER', mode))
         args.insert(1, str(driver))
     if mode == 'hold':
         driver = out / 'hold-driver.py'
         driver.write_text("import sys\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.argv = sys.argv[1:]\nsource = p.read_text().replace(\"else 'panel-demo'\", \"else 'panel-demo hold'\")\nexec(compile(source, str(p), 'exec'), {'__file__': str(p), '__name__': '__main__'})\n")
         args.insert(1, str(driver))
+    save('command.json', {**command, 'args': args})
     start = time.monotonic()
     with (out/'driver.stdout').open('wb') as stdout, (out/'driver.stderr').open('wb') as stderr:
         p = subprocess.Popen(args,cwd=wt,env=env,stdout=stdout,stderr=stderr,start_new_session=True)
+        save('driver-handle.json', {'pid': p.pid, 'args': p.args})
         readiness = time.monotonic() + (90 if mode == 'outer' else 18)
         while time.monotonic()<readiness:
             rows=table()
@@ -196,6 +200,14 @@ try:
     print(f'PASS {mode}: zero owned resources before rescue; foreign preserved', flush=True)
 finally:
     errors=[]
+    def reap(child):
+        try:
+            if child.poll() is None:
+                child.kill()
+                receipts.append({'unreapedHandle': child.pid, 'signal': 'SIGKILL'})
+            child.wait(timeout=5)
+        except Exception as error:
+            errors.append(repr(error))
     if p is not None:
         try:
             rows=table()
@@ -217,20 +229,29 @@ finally:
             p.wait(timeout=5)
         except Exception as error:
             errors.append(repr(error))
+        finally:
+            reap(p)
     if foreign is not None:
         try:
-            alive_before=current(foreign_identity) is not None
+            alive_before = foreign.poll() is None if foreign_identity is None else current(foreign_identity) is not None
             save('foreign-preserved-through-rescue.json',{'alive':alive_before,'identity':foreign_identity})
             if not alive_before:
                 raise RuntimeError('Foreign sentinel was not preserved through rescue')
-            send(foreign_identity,signal.SIGKILL)
-            foreign.wait(timeout=5)
+            if foreign_identity is not None:
+                send(foreign_identity,signal.SIGKILL)
         except Exception as error:
             errors.append(repr(error))
+        finally:
+            reap(foreign)
     time.sleep(.5)
-    rows=table()
-    remaining=[r for r in rows if live(r) and (r['pid'] in identities or any(r['group']==w['pgid'] for w in workers) or (foreign is not None and r['pid']==foreign.pid))]
-    save('cleanup.json',{'signals':receipts,'refused':refused,'errors':errors,'remaining':remaining,'identities':list(identities.values()),'foreignPid':foreign.pid if foreign else None})
-    save('processes-after.json',[r for r in rows if r['pid'] in identities or (foreign is not None and r['pid'] == foreign.pid)])
-    if errors or remaining:
+    rows = []
+    remaining = None
+    try:
+        rows = table()
+        remaining = [r for r in rows if live(r) and (r['pid'] in identities or any(r['group'] == w['pgid'] for w in workers) or (foreign is not None and r['pid'] == foreign.pid))]
+    except Exception as error:
+        errors.append(repr(error))
+    save('cleanup.json', {'signals': receipts, 'refused': refused, 'errors': errors, 'remaining': remaining, 'processInspectionSucceeded': remaining is not None, 'identities': list(identities.values()), 'foreignPid': foreign.pid if foreign else None})
+    save('processes-after.json', [r for r in rows if r['pid'] in identities or (foreign is not None and r['pid'] == foreign.pid)])
+    if errors or remaining is None or remaining:
         raise RuntimeError('Cleanup incomplete; inspect cleanup.json')

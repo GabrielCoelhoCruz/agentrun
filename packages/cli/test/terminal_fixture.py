@@ -148,18 +148,18 @@ def close(root, nonce):
                     attempt(lambda: send(record, signal.SIGSTOP))
                     frozen.add(pid)
             rows = inspect()
-            if any(owned(record, rows) and 'T' not in rows[pid]['state'] for pid, record in records.items()):
-                time.sleep(.01)
-                continue
             additions = []
             for row in rows.values():
                 parent = records.get(row['parent'])
                 if row['pid'] in records or not alive(row) or parent is None:
                     continue
                 parent_row = rows.get(parent['pid'])
-                if alive(parent_row) and owned(parent, rows) and 'T' in parent_row['state']:
+                if alive(parent_row) and owned(parent, rows):
                     additions.append((row, parent))
             if not additions:
+                if any(owned(record, rows) and 'T' not in rows[pid]['state'] for pid, record in records.items()):
+                    time.sleep(.01)
+                    continue
                 break
             for row, parent in additions:
                 attempt(lambda: remember(row, dict(parent=parent)))
