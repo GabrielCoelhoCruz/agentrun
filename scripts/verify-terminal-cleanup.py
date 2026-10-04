@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 import hashlib
 import shutil
@@ -21,6 +22,8 @@ out.mkdir(exist_ok=False)
 root = out / 'fixture'
 root.mkdir()
 identities = {}
+unverified = {}
+transitions = []
 receipts = []
 refused = []
 p = foreign = None
@@ -54,22 +57,80 @@ def same(a, b):
 def live(row):
     return not row['state'].startswith('Z')
 
+def complete(row):
+    return row['uid'] == os.getuid() and bool(row['command']) and not row['command'].startswith(('(', '<'))
+
+def launch_transition(old, row):
+    if any(old[k] != row[k] for k in ['pid', 'uid', 'group', 'start']):
+        return False
+    for owner in root.rglob('terminal-owner.json'):
+        receipt = owner.parent / f"terminal-child-{row['pid']}.json"
+        try:
+            if owner.is_symlink() or receipt.is_symlink():
+                continue
+            nonce = json.loads(owner.read_text())
+            data = json.loads(receipt.read_text())
+            if (not isinstance(nonce, str) or not re.fullmatch('[a-f0-9]{32}', nonce)
+                    or data['nonce'] != nonce or data['parent'] != old['parent']
+                    or any(data[k] != old[k] for k in ['pid', 'uid', 'start'])
+                    or data['commands'] != [old['command'], row['command']]
+                    or not all(nonce in command for command in data['commands'])):
+                continue
+            transitions.append({'original': old, 'identity': row, 'receiptPath': str(receipt), 'receipt': data})
+            save('exec-transitions.json', transitions)
+            return True
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            refused.append({'receiptPath': str(receipt), 'error': repr(error)})
+    return False
+
+def register(row):
+    pid = row['pid']
+    if not complete(row):
+        if unverified.get(pid) != row:
+            refused.append({'observed': row, 'reason': 'Incomplete process identity'})
+        unverified[pid] = row
+        raise IdentityChanged('Registration refused incomplete identity')
+    old = identities.get(pid)
+    if old and not same(old, row) and not launch_transition(old, row):
+        refused.append({'expected': old, 'observed': row})
+        unverified[pid] = row
+        raise IdentityChanged('Registration refused changed identity')
+    if old is None or not same(old, row):
+        identities[pid] = dict(row)
+    unverified.pop(pid, None)
+    return identities[pid]
+
 def remember(rows, parent):
-    owned = {parent}
+    scope = {parent}
     while True:
-        additions = {r['pid'] for r in rows if r['parent'] in owned}
-        if additions <= owned:
+        additions = {r['pid'] for r in rows if r['parent'] in scope}
+        if additions <= scope:
             break
-        owned |= additions
+        scope |= additions
+    pending = [parent]
+    verified = set()
+    by_pid = {r['pid']: r for r in rows}
+    while pending:
+        pid = pending.pop()
+        row = by_pid.get(pid)
+        if row is None or pid in verified:
+            continue
+        try:
+            record = register(row)
+        except IdentityChanged:
+            continue
+        if record:
+            verified.add(pid)
+            pending.extend(r['pid'] for r in rows if r['parent'] == pid)
     for row in rows:
-        if row['pid'] in owned:
-            old = identities.get(row['pid'])
-            if old and (old['uid'] != row['uid'] or old['start'] != row['start']):
-                raise RuntimeError('Observed PID reuse')
-            identities.setdefault(row['pid'], row)
-    return owned
+        if row['pid'] in scope and row['pid'] not in verified:
+            unverified[row['pid']] = row
+    return scope
 
 def current(record):
+    if not complete(record):
+        refused.append({'record': record, 'reason': 'Incomplete signal identity'})
+        raise IdentityChanged('Cleanup refused incomplete identity')
     deadline = time.monotonic() + .5
     while True:
         row = next((r for r in table() if r['pid'] == record['pid'] and live(r)), None)
@@ -109,6 +170,9 @@ def freeze_tree(record, receipt):
         owned = remember(rows, record['pid'])
         unresolved = set()
         for pid in owned:
+            if pid not in identities:
+                unresolved.add(pid)
+                continue
             try:
                 send(identities[pid], signal.SIGSTOP)
             except IdentityChanged:
@@ -116,14 +180,14 @@ def freeze_tree(record, receipt):
         rows = table()
         expanded = remember(rows, record['pid'])
         if expanded <= owned and all(not live(r) or ('T' in r['state'] and r['pid'] not in unresolved) for r in rows if r['pid'] in expanded):
-            save(receipt, {'cliStopped': True, 'identities': [identities[pid] for pid in expanded], 'stoppedRows': [r for r in rows if r['pid'] in expanded]})
+            save(receipt, {'cliStopped': True, 'identities': [identities[pid] for pid in expanded if pid in identities], 'unverified': [unverified[pid] for pid in expanded if pid in unverified], 'stoppedRows': [r for r in rows if r['pid'] in expanded]})
             return
     raise TimeoutError('Complete fault inventory did not freeze within 5 seconds')
 
 def remaining_owned(rows):
     paths = [str(root), str(root.resolve())]
     entries = [str(wt / 'packages/cli/test/fixtures/dist' / name) for name in ['entry.mjs', 'fake-worker.mjs']]
-    return [r for r in rows if live(r) and (r['pid'] in identities or any(r['group'] == w['pgid'] for w in workers)
+    return [r for r in rows if live(r) and (r['pid'] in identities or r['pid'] in unverified or any(r['group'] == w['pgid'] for w in workers)
             or any(path in r['command'] for path in paths + entries)
             or any(r['pid'] == w['pid'] and w['token'] in r['command'].split() for w in late_workers))]
 
@@ -178,12 +242,12 @@ try:
                 if mode in ['hold', 'freeze-hold'] and not all((fixture / f'child-task{n}').exists() for n in range(3)):
                     time.sleep(.05)
                     continue
-                cli=candidates[0]
+                cli=register(candidates[0])
                 for w in workers:
-                    leader=next((r for r in rows if r['pid']==w['pgid'] and r['group']==w['pgid'] and w['token'] in r['command'].split() and live(r)),None)
+                    leader=next((r for r in rows if r['pid'] in identities and r['pid']==w['pgid'] and r['group']==w['pgid'] and w['token'] in r['command'].split() and live(r)),None)
                     if leader is None:
                         raise RuntimeError('Worker ownership is not proven before fault')
-                    identities[leader['pid']]=leader
+                    leader=register(leader)
                     if added_outer:
                         send(leader, signal.SIGSTOP, leader=True, token=w['token'])
                 if added_outer:
@@ -258,7 +322,7 @@ try:
     rows=table()
     remaining=remaining_owned(rows)
     err=(out/'driver.stderr').read_text()
-    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if outer else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'unrecordedScopedBeforeRescue':[r for r in remaining if r['pid'] not in identities],'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
+    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if outer else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'unrecordedScopedBeforeRescue':[r for r in remaining if r['pid'] not in identities],'cli':cli,'workers':workers,'foreignStillAlive':foreign.poll() is None,'rescuePerformedBeforeObservation':False, 'mode':mode}
     if outer:
         deadline = json.loads((root / 'outer-deadline.json').read_text())
         result['outerDeadline'] = deadline
@@ -329,11 +393,11 @@ finally:
         reap(p)
     if foreign is not None:
         try:
-            alive_before = foreign.poll() is None if foreign_identity is None else current(foreign_identity) is not None
+            alive_before = foreign.poll() is None
             save('foreign-preserved-through-rescue.json',{'alive':alive_before,'identity':foreign_identity})
             if not alive_before:
                 raise RuntimeError('Foreign sentinel was not preserved through rescue')
-            if foreign_identity is not None:
+            if foreign_identity is not None and complete(foreign_identity):
                 send(foreign_identity,signal.SIGKILL)
         except Exception as error:
             errors.append(repr(error))
@@ -347,7 +411,7 @@ finally:
         remaining = remaining_owned(rows) + [r for r in rows if live(r) and foreign is not None and r['pid'] == foreign.pid]
     except Exception as error:
         errors.append(repr(error))
-    save('cleanup.json', {'signals': receipts, 'refused': refused, 'errors': errors, 'remaining': remaining, 'processInspectionSucceeded': remaining is not None, 'identities': list(identities.values()), 'foreignPid': foreign.pid if foreign else None})
+    save('cleanup.json', {'signals': receipts, 'refused': refused, 'errors': errors, 'remaining': remaining, 'processInspectionSucceeded': remaining is not None, 'identities': list(identities.values()), 'unverified': list(unverified.values()), 'transitions': transitions, 'foreignPid': foreign.pid if foreign else None})
     save('processes-after.json', [r for r in rows if r['pid'] in identities or (foreign is not None and r['pid'] == foreign.pid)])
     if errors or remaining is None or remaining:
         raise RuntimeError('Cleanup incomplete; inspect cleanup.json')
