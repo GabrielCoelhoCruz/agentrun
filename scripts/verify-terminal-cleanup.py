@@ -1,7 +1,8 @@
 import json
 import os
 from pathlib import Path
-import re
+import hashlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -9,10 +10,10 @@ import time
 import uuid
 
 wt = Path(__file__).resolve().parents[1]
-node = __import__('shutil').which('node')
+node = shutil.which('node')
 assert node, 'Node is required'
 mode = sys.argv[2] if len(sys.argv) > 2 else 'pipe'
-scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json'}.get(mode, mode)
+scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe'}.get(mode, mode)
 out = Path(sys.argv[1]).resolve()
 out.mkdir(exist_ok=False)
 root = out / 'fixture'
@@ -69,16 +70,16 @@ def current(record):
         raise RuntimeError('Cleanup refused changed identity')
     return row
 
-def send(record, sig, group=False, token=None):
+def send(record, sig, leader=False, token=None):
     row = current(record)
     if row is None:
         return
-    if group and (row['group'] != row['pid'] or not token or token not in row['command'].split()):
+    if leader and (row['group'] != row['pid'] or not token or token not in row['command'].split()):
         refused.append({'record': row, 'reason': 'Unverified group ownership'})
         raise RuntimeError('Cleanup refused unknown group')
     try:
         os.kill(row['pid'], sig)
-        receipts.append({'identity': row, 'signal': signal.Signals(sig).name, 'group': group, 'token': token})
+        receipts.append({'identity': row, 'signal': signal.Signals(sig).name, 'leader': leader, 'token': token})
     except ProcessLookupError:
         receipts.append({'identity': row, 'alreadyExited': True})
 
@@ -89,11 +90,15 @@ try:
     foreign_identity = next(r for r in table() if r['pid'] == foreign.pid)
     save('foreign-owned-by-observer.json', foreign_identity)
     args = [sys.executable, str(wt / 'packages/cli/test/terminal-demo.py'), scenario, str(root), node]
-    save('command.json', {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':22 if mode == 'pty' else 30 if mode == 'outer' else 20, 'fault':'SIGSTOP only the observed CLI after all three workers start', 'sourceSha256':__import__('hashlib').sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest()})
+    save('command.json', {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':22 if mode == 'pty' else 30 if mode == 'outer' else 20, 'fault':'SIGSTOP only the observed CLI after all three workers start', 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest()})
     if mode == 'outer':
         env['NODE_OPTIONS'] = '--require=' + str(wt / 'scripts/terminal-cleanup-deadline.cjs')
         env['AGENTRUN_TEST_EVIDENCE'] = str(root)
         args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: json']
+    if mode == 'hold':
+        driver = out / 'hold-driver.py'
+        driver.write_text("import sys\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.argv = sys.argv[1:]\nsource = p.read_text().replace(\"else 'panel-demo'\", \"else 'panel-demo hold'\")\nexec(compile(source, str(p), 'exec'), {'__file__': str(p), '__name__': '__main__'})\n")
+        args.insert(1, str(driver))
     start = time.monotonic()
     with (out/'driver.stdout').open('wb') as stdout, (out/'driver.stderr').open('wb') as stderr:
         p = subprocess.Popen(args,cwd=wt,env=env,stdout=stdout,stderr=stderr,start_new_session=True)
@@ -101,7 +106,8 @@ try:
         while time.monotonic()<readiness:
             rows=table()
             remember(rows,p.pid)
-            candidates=[r for r in rows if r['pid'] in identities and '/fixtures/dist/entry.mjs run TASKS.md --load-project-settings' in r['command']]
+            needle = '/fixtures/dist/entry.mjs resume --retry-failed' if mode == 'resume-second' else '/fixtures/dist/entry.mjs run TASKS.md --load-project-settings'
+            candidates=[r for r in rows if r['pid'] in identities and needle in r['command']]
             if mode == 'outer':
                 roots = list(root.glob('terminal-json-*'))
                 fixture = roots[0] if roots else root
@@ -111,7 +117,12 @@ try:
             if candidates and states and all((fixture/f'starts-task{n}').exists() for n in range(3)):
                 saved=json.loads(states[0].read_text())
                 workers=[{'pgid':x['pgid'],'token':'agentrun-worker-'+x['processToken']} for x in saved['worktrees'].values() if 'pgid' in x and 'processToken' in x]
-                if len(workers)!=3:
+                if mode == 'resume-second':
+                    workers = [w for w in workers if any(r['pid'] == w['pgid'] and live(r) for r in rows)]
+                if len(workers) != (2 if mode == 'resume-second' else 3):
+                    time.sleep(.05)
+                    continue
+                if mode == 'hold' and not all((fixture / f'child-task{n}').exists() for n in range(3)):
                     time.sleep(.05)
                     continue
                 cli=candidates[0]
@@ -131,6 +142,11 @@ try:
                     save('stopped-python.json', driver)
                 if mode == 'exception':
                     send(identities[p.pid], signal.SIGTERM)
+                if mode == 'bad-receipt':
+                    nonce = json.loads((root / 'terminal-owner.json').read_text())
+                    (root / 'terminal-owned.json').write_text(json.dumps([{'nonce': nonce}]))
+                if mode == 'missing-state':
+                    states[0].write_text('{}')
                 if mode == 'ownership':
                     saved['worktrees']['foreign'] = {'pgid': foreign.pid, 'processToken': '0' * 32}
                     states[0].write_text(json.dumps(saved))
@@ -152,23 +168,23 @@ try:
     rows=table()
     remaining=[r for r in rows if live(r) and (r['pid'] in identities or any(r['group']==w['pgid'] for w in workers))]
     err=(out/'driver.stderr').read_text()
-    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure':'subprocess.TimeoutExpired after 20 seconds','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
+    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if mode == 'outer' else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
     save('result.json',result)
-    if mode in ['pipe', 'resume', 'json']:
+    if mode in ['pipe', 'resume', 'json', 'hold', 'missing-state', 'bad-receipt']:
         assert code == 1 and result['deadlineObserved'], 'Original deadline did not produce the expected failure'
-    elif mode == 'pty':
+    elif mode in ['pty', 'resume-second']:
         assert code == 1 and 'PTY demo exceeded 22 seconds' in err, err
     elif mode == 'outer':
         deadline = json.loads((root / 'outer-deadline.json').read_text())
         assert code != 0 and deadline['timeout'] == 30000 and deadline['error'] == 'ETIMEDOUT' and deadline['signal'] == 'SIGKILL', deadline
     elif mode == 'normal':
         assert code == 0, err
+        assert not json.loads((root / 'terminal-cleanup.json').read_text())['signals'], 'Normal exit required fixture rescue'
     elif mode == 'ownership':
         assert code != 0 and 'refused' in err.lower(), err
     else:
         assert code != 0, 'Injected failure did not fail the driver'
     assert not remaining, f'Owned resources survived driver cleanup: {remaining}'
-    assert not remaining, 'Detached worker leak observed'
     assert result['foreignStillAlive'], 'Foreign sentinel unexpectedly stopped'
     print(f'PASS {mode}: zero owned resources before rescue; foreign preserved', flush=True)
 finally:
@@ -182,7 +198,7 @@ finally:
             for w in workers:
                 leader=identities.get(w['pgid'])
                 if leader:
-                    send(leader,signal.SIGKILL,group=True,token=w['token'])
+                    send(leader,signal.SIGKILL,leader=True,token=w['token'])
             for record in list(identities.values()):
                 if record['pid']==p.pid:
                     continue
@@ -208,6 +224,6 @@ finally:
     rows=table()
     remaining=[r for r in rows if live(r) and (r['pid'] in identities or any(r['group']==w['pgid'] for w in workers) or (foreign is not None and r['pid']==foreign.pid))]
     save('cleanup.json',{'signals':receipts,'refused':refused,'errors':errors,'remaining':remaining,'identities':list(identities.values()),'foreignPid':foreign.pid if foreign else None})
-    save('processes-after.json',rows)
+    save('processes-after.json',[r for r in rows if r['pid'] in identities or (foreign is not None and r['pid'] == foreign.pid)])
     if errors or remaining:
         raise RuntimeError('Cleanup incomplete; inspect cleanup.json')
