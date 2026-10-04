@@ -69,12 +69,27 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
 for (const scenario of ["retry", "timeout"]) {
   test(`real PTY: ${scenario} renders runner retries and timeout failures`, () => {
     const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
+    const nonce = randomUUID().replaceAll("-", "")
+    onTestFinished(() => {
+      const cleanup = spawnSync("python3", [
+        fileURLToPath(new URL("./terminal_fixture.py", import.meta.url)),
+        "close",
+        root,
+        nonce,
+      ], { encoding: "utf8", timeout: 55000 })
+      expect(cleanup.status, cleanup.stderr).toBe(0)
+    }, 60000)
     const result = spawnSync("python3", [
       fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
       scenario,
       root,
       process.execPath,
-    ], { encoding: "utf8", timeout: 30000 })
+    ], {
+      encoding: "utf8",
+      timeout: 30000,
+      killSignal: "SIGKILL",
+      env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce },
+    })
     expect(result.status, result.stderr).toBe(0)
     const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
     const output = readFileSync(join(root, "capture.ansi"), "utf8")
