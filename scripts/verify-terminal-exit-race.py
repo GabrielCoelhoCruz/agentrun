@@ -109,7 +109,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
         elif state['armed'] and mode != 'freeze-exit':
             target = state['target']
             matches = record is not None and record['pid'] == target['pid']
-            if matches and not state['injected']:
+            if (matches or mode == 'remember-command') and not state['injected']:
                 state['injected'] = True
                 raw = next((r for r in rows if r['pid'] == target['pid'] and live(r)), None)
                 assert raw and same(raw, target), (raw, target)
@@ -124,7 +124,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
                     if row['pid'] != target['pid'] or not live(row):
                         continue
                     original = dict(row)
-                    if mode in ['command', 'exit']:
+                    if mode in ['command', 'remember-command', 'exit']:
                         row['command'] = '(Python)'
                     elif mode == 'uid':
                         row['uid'] += 1
@@ -157,7 +157,7 @@ if len(sys.argv) > 3 and sys.argv[3] == 'driver':
     runpy.run_path(sys.argv[0], run_name='__main__')
     raise SystemExit(0)
 
-assert mode in ['exit', 'command', 'uid', 'group', 'start', 'inspect', 'lookup', 'freeze-exit']
+assert mode in ['exit', 'command', 'remember-command', 'uid', 'group', 'start', 'inspect', 'lookup', 'freeze-exit']
 out.mkdir(exist_ok=False)
 save('target.json', {'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=wt, text=True).strip(),
                      'mode': mode, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True),
@@ -179,7 +179,7 @@ try:
     save('actual-after.json', rows)
     remaining = [r for r in rows if live(r) and any(same(r, old) for old in records)]
     cleanup = json.loads((out / 'guard/cleanup.json').read_text())
-    persistent = mode in ['command', 'uid', 'group', 'start']
+    persistent = mode in ['command', 'remember-command', 'uid', 'group', 'start']
     signals = [json.loads(line) for line in (out / 'observer-signals.jsonl').read_text().splitlines()]
     target_signals = [r for r in signals if r['afterInjection'] and r['pid'] == pre['target']['pid']]
     save('result.json', {'guardExit': code, 'remainingBeforeProbeRescue': remaining,
