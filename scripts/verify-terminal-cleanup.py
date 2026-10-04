@@ -64,6 +64,7 @@ def remember(rows, parent):
             if old and (old['uid'] != row['uid'] or old['start'] != row['start']):
                 raise RuntimeError('Observed PID reuse')
             identities[row['pid']] = row
+    return owned
 
 def current(record):
     row = next((r for r in table() if r['pid'] == record['pid'] and live(r)), None)
@@ -86,6 +87,34 @@ def send(record, sig, leader=False, token=None):
         receipts.append({'identity': row, 'signal': signal.Signals(sig).name, 'leader': leader, 'token': token})
     except ProcessLookupError:
         receipts.append({'identity': row, 'alreadyExited': True})
+
+def freeze_tree(record, receipt):
+    send(record, signal.SIGSTOP)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        row = current(record)
+        if row is None:
+            raise RuntimeError('CLI exited before complete fault inventory')
+        if 'T' not in row['state']:
+            time.sleep(.01)
+            continue
+        rows = table()
+        owned = remember(rows, record['pid'])
+        for pid in owned:
+            send(identities[pid], signal.SIGSTOP)
+        rows = table()
+        expanded = remember(rows, record['pid'])
+        if expanded <= owned and all(not live(r) or 'T' in r['state'] for r in rows if r['pid'] in expanded):
+            save(receipt, {'cliStopped': True, 'identities': [identities[pid] for pid in expanded], 'stoppedRows': [r for r in rows if r['pid'] in expanded]})
+            return
+    raise TimeoutError('Complete fault inventory did not freeze within 5 seconds')
+
+def remaining_owned(rows):
+    paths = [str(root), str(root.resolve())]
+    entries = [str(wt / 'packages/cli/test/fixtures/dist' / name) for name in ['entry.mjs', 'fake-worker.mjs']]
+    return [r for r in rows if live(r) and (r['pid'] in identities or any(r['group'] == w['pgid'] for w in workers)
+            or any(path in r['command'] for path in paths + entries)
+            or any(r['pid'] == w['pid'] and w['token'] in r['command'].split() for w in late_workers))]
 
 try:
     env = {k:v for k,v in os.environ.items() if not any(s in k.upper() for s in ['TOKEN','SECRET','API_KEY','CREDENTIAL','AUTH'])}
@@ -165,6 +194,7 @@ try:
                 if mode != 'normal':
                     send(cli,signal.SIGSTOP)
                     save('fault-receipt.json',receipts[-1])
+                    freeze_tree(cli, 'complete-fault-inventory.json')
                 if outer:
                     driver = next(r for r in rows if r['pid'] == cli['parent'])
                     send(driver, signal.SIGSTOP)
@@ -215,9 +245,9 @@ try:
         except subprocess.TimeoutExpired:
             raise TimeoutError('Observer deadline reached; not a successful driver-deadline reproduction')
     rows=table()
-    remaining=[r for r in rows if live(r) and (r['pid'] in identities or any(r['group']==w['pgid'] for w in workers))]
+    remaining=remaining_owned(rows)
     err=(out/'driver.stderr').read_text()
-    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if outer else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
+    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if outer else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'unrecordedScopedBeforeRescue':[r for r in remaining if r['pid'] not in identities],'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
     if outer:
         deadline = json.loads((root / 'outer-deadline.json').read_text())
         result['outerDeadline'] = deadline
@@ -259,6 +289,8 @@ finally:
             rows=table()
             remember(rows,p.pid)
             if cli:
+                if current(cli) is not None:
+                    freeze_tree(cli, 'complete-rescue-inventory.json')
                 send(cli,signal.SIGKILL)
             for w in workers:
                 leader=identities.get(w['pgid'])
@@ -294,7 +326,7 @@ finally:
     remaining = None
     try:
         rows = table()
-        remaining = [r for r in rows if live(r) and (r['pid'] in identities or any(r['group'] == w['pgid'] for w in workers) or any(r['pid'] == w['pid'] and w['token'] in r['command'].split() for w in late_workers) or (foreign is not None and r['pid'] == foreign.pid))]
+        remaining = remaining_owned(rows) + [r for r in rows if live(r) and foreign is not None and r['pid'] == foreign.pid]
     except Exception as error:
         errors.append(repr(error))
     save('cleanup.json', {'signals': receipts, 'refused': refused, 'errors': errors, 'remaining': remaining, 'processInspectionSucceeded': remaining is not None, 'identities': list(identities.values()), 'foreignPid': foreign.pid if foreign else None})
