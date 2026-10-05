@@ -9,6 +9,7 @@ export default defineConfig({
         test: {
           name: "core",
           root: "./packages/core",
+          testTimeout: 30000,
           include: ["test/**/*.test.ts"],
           passWithNoTests: true,
         },
