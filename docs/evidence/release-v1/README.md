@@ -1,8 +1,10 @@
 # Release 0.1.0 preparation
 
-Candidate packages: `@agentrun/core` and `agentrun`, both version 0.1.0. They are not published. npm authentication and ownership of the names remain unverified. Registry queries returned 404 for both names; this does not prove ownership.
+The packages are `@agentrun/core` and `agentrun`, both version 0.1.0. Version 0.1.0 is intentionally unpublished on npm. The current plan uses reviewed local tarballs or source.
 
-Verified implementation commit: `06ebdf9b9bea8f48f2da53226fce4c42dfaf00d7`, on branch `chore/release-preparation`. [candidate.json](candidate.json) records the source hashes before that commit. It separates the checked source, the paid-run source, and later documentation changes. Linux CI must verify the committed candidate.
+During preparation, npm authentication and ownership of the names remained unverified. Registry queries returned 404 for both names. Those results did not prove ownership. npm authentication and publication are outside the current plan.
+
+Verified implementation commit: `06ebdf9b9bea8f48f2da53226fce4c42dfaf00d7`, on branch `chore/release-preparation`. [candidate.json](candidate.json) records the source hashes before that commit. It separates the checked source, the paid-run source, and later documentation changes. This is the historical source identity for the preparation evidence below. It does not identify a later merged runtime or final main revision.
 
 ## Scope after the rebase
 
@@ -10,13 +12,29 @@ On 2026-10-05 this branch was rebased onto `main` at `4fb5665`, the squash merge
 
 ## Checks and installed packages
 
-Lint, typecheck, 234 tests in 11 files, both builds, and three driver safety checks passed. Tests used one worker and took 467.12 seconds. The prior exact starting HEAD also passed Linux CI. This candidate has local macOS verification; it does not yet have its own Linux CI result.
+Lint, typecheck, 234 tests in 11 files, both builds, and three driver safety checks passed. Tests used one worker and took 467.12 seconds. These are the retained local macOS results from preparation. The prior exact starting HEAD also passed Linux CI.
 
 [tarballs.json](tarballs.json) records SHA-256 hashes and each packed file. Both tarballs contain MIT LICENSE and README files, ESM exports, and declarations. The CLI has its executable shebang and worker entry. Packing replaces `workspace:*` with `0.1.0`. Tests, fixtures, private captures, and personal source-map paths are absent from these tarballs.
 
 A fresh npm consumer installed both tarballs without workspace symlinks. Installed help, version, doctor, dry run, report, and resume passed. An explicit core test adapter wrote non-UTF-8 text and binary bytes. Saved patches matched Git bytes and applied to the base with exact file equality. Resume preserved the artifacts. Task worktrees, claim locks, Git journals, and workers were cleaned up.
 
 The core README example typechecks against installed Effect 4.0.0. The project uses `skipLibCheck`. A stricter NodeNext check of dependency declarations fails on Pi JSON import declarations. The example itself also passes with bundler resolution and without `skipLibCheck`.
+
+## Linux CI for the original PR #12 head
+
+[CI run #37134424360](https://github.com/GabrielCoelhoCruz/agentrun/actions/runs/37134424360) passed for head `64e7479565f0d38df662dbe01468b3f95979b828`.
+The base was `fbe3f43bcab644f084de381d71454629de20bb86` on `feat/retries-and-timeouts`.
+The job checked out merge commit `9b074fae32510a92c84d55eb2b7daf21ff66fe48`.
+That commit has the stated head and base as parents. Its Git tree equals the head's Git tree.
+
+The Linux job ran from 2026-10-03T15:46:23Z to 2026-10-03T15:56:29Z.
+The suite took 578.84 seconds. All 234 tests in 11 files passed, including nine terminal tests.
+Frozen dependency installation, lint, typecheck, and both package builds passed on Ubuntu with Node 24 and pnpm 10.29.3.
+The existing TypeScript 7 experimental API warnings and the warning about ignored dependency scripts remained in the logs.
+
+This CI run proves the original PR #12 candidate. It does not prove a later main revision or an installed provider run on Linux.
+The installed checks and real provider run below are retained preparation evidence. They are not fresh checks of a later installation.
+New tarballs need their own inventory, hashes, and installed checks. The recorded hashes continue to identify the original tarballs.
 
 ## One real provider run
 
@@ -87,4 +105,6 @@ Current Claude fixtures and older event evidence use synthetic IDs. Local plugin
 
 The prior task stopped due to model capacity. Work resumed from its saved edits and completed checks. Consumer harness failures were retained: the first version assertion expected the wrong display format; later resume used a different or noncanonical fixture home. Corrected isolated E2E passed. An initial strict declaration check exposed Pi dependency errors; both supported project options and bundler resolution passed. A panel renderer initially lost carriage returns; the corrected capture preserves them. The public harness initially used a missing evidence directory; its documented fresh-directory command passed.
 
-The preparation task made no publication, authentication change, commit, push, PR action, or merge. No task-owned runtime remains active. Shared containers and volumes were preserved. See [release-plan.md](release-plan.md) for the parent's remaining steps.
+The preparation task made no publication, authentication change, commit, push, PR action, or merge. That statement describes the preparation task before its handoff. The later Linux verification made no source change.
+
+No task-owned runtime remained active at those handoffs. Shared containers and volumes were preserved. See [release-plan.md](release-plan.md) for the current local installation plan.
