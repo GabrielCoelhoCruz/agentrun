@@ -101,10 +101,10 @@ const child = (f: Fixture, args: string[], shipped = false) => {
   })
   return { p, done, stdout: () => stdout, stderr: () => stderr }
 }
-const wait = async (predicate: () => boolean) => {
-  const deadline = Date.now() + 15000
+const wait = async (predicate: () => boolean, budgetMs = 15000) => {
+  const deadline = Date.now() + budgetMs
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error("Condition did not complete within 15 seconds")
+    if (Date.now() > deadline) throw new Error(`Condition did not complete within ${budgetMs / 1000} seconds`)
     await new Promise((resolve) => setTimeout(resolve, 30))
   }
 }
@@ -247,9 +247,12 @@ test("SIGKILL then resume stops owned group before starting and keeps identity",
   const f = fixture(2)
   writeFileSync(join(f.repo, "TASKS.md"), "## task0: First\nsuccess\n\n## task1: Second\ncrash-once\n")
   const c = child(f, ["run", "TASKS.md", "--concurrency", "1", "--json"])
-  await wait(() => existsSync(join(f.root, "child-task1")))
+  await wait(() => existsSync(join(f.root, "child-task1")), 30000)
   const before = state(f)
   const pid = Number(readFileSync(join(f.root, "child-task1"), "utf8"))
+  expect(before.status.task0?._tag).toBe("succeeded")
+  expect(before.status.task1?._tag).toBe("running")
+  expect(alive(pid)).toBe(true)
   c.p.kill("SIGKILL")
   await c.done
   expect(alive(pid)).toBe(true)
@@ -498,34 +501,37 @@ test("kernel lease survives replacement contention and releases on parent SIGKIL
   const done = new Promise((resolve) => p.on("close", resolve))
   try {
     await wait(() => existsSync(join(f.root, "replacement-stop")))
-    const inode = statSync(`${lockPath(f)}.reclaim`).ino
+    const reclaimPath = `${lockPath(f)}.reclaim`
+    const inode = statSync(reclaimPath).ino
     const table = spawnSync("ps", ["-axo", "pid=,ppid=,pgid=,command="], { encoding: "utf8" }).stdout
     const rows = table.trim().split("\n").map((line) => {
       const [pid, parent, group, ...command] = line.trim().split(/\s+/)
       return { pid: Number(pid), parent: Number(parent), group: Number(group), command: command.join(" ") }
     })
-    const leases = rows.filter((row) => row.command.includes(`${lockPath(f)}.reclaim`))
+    const leases = rows.filter((row) => row.command.includes(reclaimPath))
     expect(leases).toHaveLength(1)
     const helpers = rows.filter((row) => leases.some((lease) => row.group === lease.group))
     expect(helpers.length).toBeGreaterThanOrEqual(2)
     writeFileSync(join(f.root, "lease-processes.json"), JSON.stringify(helpers, null, 2))
-    expect(readFileSync(`${lockPath(f)}.reclaim`, "utf8")).toBe("agentrun-reclaim-v1\n")
+    expect(readFileSync(reclaimPath, "utf8")).toBe("agentrun-reclaim-v1\n")
     const contender = child(f, ["run", "TASKS.md", "--json"])
     expect(await contender.done).toBe(1)
+    expect(contender.stderr()).toBe("RunLocked\n")
+    expect(contender.stdout()).toBe("")
     expect(readFileSync(lockPath(f), "utf8")).toBe("2147483647")
     p.kill("SIGKILL")
     await done
     await wait(() => helpers.every((helper) => !alive(helper.pid)))
     const resumed = child(f, ["run", "TASKS.md", "--json"])
     expect(await resumed.done).toBe(0)
-    expect(statSync(`${lockPath(f)}.reclaim`).ino).toBe(inode)
+    expect(statSync(reclaimPath).ino).toBe(inode)
     expect(existsSync(lockPath(f))).toBe(false)
   } finally {
     p.kill("SIGKILL")
     await done
     writeFileSync(join(f.root, "replacement-process.json"), JSON.stringify({ pid: p.pid, stdout, stderr }))
   }
-}, 30000)
+}, 60000)
 
 test("second Ctrl-C forces exit during slow cleanup and recorded ownership can resume", async () => {
   const f = fixture(1, "slow-cleanup crash-once")
@@ -1180,9 +1186,17 @@ for (const mode of ["stall", "ceiling", "setup", "partial"] as const) {
 }
 
 test("CLI crash at runner retry boundary resumes without assigning an old failure", async () => {
-  const f = timedFixture("retry-success", "2 seconds", "10 seconds")
+  const f = timedFixture("retry-success", "5 minutes", "60 minutes")
   const c = child(f, ["run", "TASKS.md", "--json"])
   await wait(() => c.stdout().includes("\"_tag\":\"Retry\""))
+  const events: import("@agentrun/core").AgentEvent[] = readFileSync(
+    join(artifacts(f), "tasks/task0/events.jsonl"),
+    "utf8",
+  ).trim().split("\n").map((line) => JSON.parse(line))
+  expect(events.filter((event) => event._tag === "Retry")).toEqual([
+    { _tag: "Retry", source: "runner", attempt: 2, reason: expect.stringMatching(/^AgentCrashed:/) },
+  ])
+  expect(startsCount(f)).toBe(1)
   c.p.kill("SIGKILL")
   await c.done
   expect(state(f).status.task0?._tag).toBe("running")
@@ -1193,8 +1207,17 @@ test("CLI crash at runner retry boundary resumes without assigning an old failur
 }, 30000)
 
 test("CLI retries do not rerun successful setup", async () => {
-  const f = timedFixture("retry-success", "2 seconds", "10 seconds", "echo setup >> \"$TEST_RECORDS/setup-count\"")
+  const f = timedFixture("retry-success", "5 minutes", "60 minutes", "echo setup >> \"$TEST_RECORDS/setup-count\"")
   expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(0)
+  const events: import("@agentrun/core").AgentEvent[] = readFileSync(
+    join(artifacts(f), "tasks/task0/events.jsonl"),
+    "utf8",
+  ).trim().split("\n").map((line) => JSON.parse(line))
+  expect(events.filter((event) => event._tag === "Retry")).toEqual([
+    { _tag: "Retry", source: "runner", attempt: 2, reason: expect.stringMatching(/^AgentCrashed:/) },
+    { _tag: "Retry", source: "runner", attempt: 3, reason: expect.stringMatching(/^AgentCrashed:/) },
+  ])
+  expect(state(f).status.task0?._tag).toBe("succeeded")
   expect(startsCount(f)).toBe(3)
   expect(readFileSync(join(f.root, "setup-count"), "utf8").trim().split("\n")).toHaveLength(1)
 }, 30000)
@@ -1270,11 +1293,21 @@ const r=spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:'inher
 }, 30000)
 
 test("resume runs setup again when an interrupted worktree must be recreated", async () => {
-  const f = timedFixture("retry-success", "2 seconds", "10 seconds", "echo setup >> \"$TEST_RECORDS/setup-count\"")
+  const f = timedFixture("retry-success", "5 minutes", "60 minutes", "echo setup >> \"$TEST_RECORDS/setup-count\"")
   const c = child(f, ["run", "TASKS.md", "--json"])
   await wait(() => c.stdout().includes("\"_tag\":\"Retry\""))
+  const events: import("@agentrun/core").AgentEvent[] = readFileSync(
+    join(artifacts(f), "tasks/task0/events.jsonl"),
+    "utf8",
+  ).trim().split("\n").map((line) => JSON.parse(line))
+  expect(events.filter((event) => event._tag === "Retry")).toEqual([
+    { _tag: "Retry", source: "runner", attempt: 2, reason: expect.stringMatching(/^AgentCrashed:/) },
+  ])
+  expect(startsCount(f)).toBe(1)
   c.p.kill("SIGINT")
   expect(await c.done).toBe(130)
+  expect(state(f).status.task0?._tag).toBe("interrupted")
+  expect(JSON.parse(readFileSync(statePath(f), "utf8")).taskReports.task0.setupCompleted).toBe(true)
   git(f.repo, ["worktree", "remove", state(f).worktrees.task0!.path])
   expect(await child(f, ["resume", "--json"]).done).toBe(0)
   expect(readFileSync(join(f.root, "setup-count"), "utf8").trim().split("\n")).toHaveLength(2)
@@ -1303,16 +1336,26 @@ if(args?.some(a=>String(a).startsWith('agentrun-worker-'))) fs.appendFileSync(${
 test("review explicit failed retry recreates ignored setup dependency", async () => {
   const f = timedFixture(
     "setup-dependency",
-    "2 seconds",
-    "10 seconds",
+    "5 minutes",
+    "60 minutes",
     "echo setup >> \"$TEST_RECORDS/setup-count\"; touch dependency",
   )
   writeFileSync(join(f.repo, ".gitignore"), ".agentrun/\ndependency\n")
   git(f.repo, ["add", ".gitignore"])
   git(f.repo, ["-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-qm", "ignore dependency"])
   expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(1)
+  expect(state(f).status.task0?.reason).toBe("AgentTaskFailed: dependency or first failure")
+  const events: import("@agentrun/core").AgentEvent[] = readFileSync(
+    join(artifacts(f), "tasks/task0/events.jsonl"),
+    "utf8",
+  ).trim().split("\n").map((line) => JSON.parse(line))
+  expect(events).toEqual([{ _tag: "Started" }, { _tag: "Failed", reason: "dependency or first failure" }])
+  expect(startsCount(f)).toBe(1)
+  expect(readFileSync(join(f.root, "setup-count"), "utf8").trim().split("\n")).toHaveLength(1)
+  expect(JSON.parse(readFileSync(statePath(f), "utf8")).taskReports.task0.setupCompleted).toBe(true)
   expect(existsSync(state(f).worktrees.task0!.path)).toBe(false)
   expect(await child(f, ["resume", "--retry-failed", "--json"]).done).toBe(0)
+  expect(state(f).status.task0?._tag).toBe("succeeded")
   expect(startsCount(f)).toBe(2)
   expect(readFileSync(join(f.root, "setup-count"), "utf8").trim().split("\n")).toHaveLength(2)
 }, 30000)
@@ -1348,8 +1391,22 @@ for (const mode of ["protocol", "stall", "ceiling"] as const) {
 const hangingGit = (f: Fixture, operation: "acquire" | "delivery") => {
   mkdirSync(join(f.root, "bin"))
   const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+  const handler = join(f.root, "bin/git-hang.cjs")
   writeFileSync(
     join(f.root, "bin/git"),
+    `#!/bin/sh
+if [ ! -e ${quote(join(f.root, "git-hang"))} ] && ${
+      operation === "acquire" ? "[ \"$1\" = worktree ] && [ \"$2\" = add ]" : "[ \"$1\" = update-ref ]"
+    }; then
+ exec ${quote(process.execPath)} ${quote(handler)} "$@"
+fi
+exec ${quote(realGit)} "$@"
+`,
+    { mode: 0o700 },
+  )
+  writeFileSync(
+    handler,
     `#!${process.execPath}
 const {spawn,spawnSync}=require('node:child_process'); const fs=require('node:fs');
 const args=process.argv.slice(2); const marker=${JSON.stringify(join(f.root, "git-hang"))};
@@ -1377,7 +1434,7 @@ for (const dirty of [false, true]) {
     const f = fixture(2)
     writeFileSync(
       join(f.repo, "TASKS.md"),
-      "---\nmaxDuration: 5 seconds\nstallTimeout: 20 seconds\n---\n## task0: First\nsuccess\n## task1: Queued\nsuccess\n",
+      "## task0: First\nmaxDuration: 5 seconds\nstallTimeout: 20 seconds\n\nsuccess\n\n## task1: Queued\n\nsuccess\n",
     )
     hangingGit(f, "acquire")
     const c = child(f, ["run", "TASKS.md", "--json", "--concurrency", "1"])
@@ -1386,10 +1443,20 @@ for (const dirty of [false, true]) {
       const partial = state(f).worktrees.task0!.path
       expect(existsSync(partial)).toBe(true)
       if (dirty) writeFileSync(join(partial, "partial-user-work"), "preserve this\n")
-      await wait(() => c.stdout().includes("\"_tag\":\"RunFinished\""))
       expect(await c.done).toBe(1)
-      expect(state(f).status.task0?.reason).toMatch(/^AgentTimedOut:/)
+      expect(c.stdout().trim().split("\n").at(-1)).toContain("\"_tag\":\"RunFinished\"")
+      const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
+      expect(saved.tasks).toMatchObject([
+        { id: "task0", maxDuration: { _tag: "Millis", value: 5000 }, stallTimeout: { _tag: "Millis", value: 20000 } },
+        {
+          id: "task1",
+          maxDuration: { _tag: "Millis", value: 3600000 },
+          stallTimeout: { _tag: "Millis", value: 300000 },
+        },
+      ])
+      expect(state(f).status.task0?.reason).toBe("AgentTimedOut: Exceeded 5000ms")
       expect(state(f).status.task1?._tag).toBe("succeeded")
+      expect(readFileSync(join(f.root, "starts-task1"), "utf8").trim().split("\n")).toHaveLength(1)
       const owned = JSON.parse(readFileSync(join(f.root, "git-hang"), "utf8"))
       expect(alive(owned.pid)).toBe(false)
       expect(alive(owned.child)).toBe(false)
@@ -1401,6 +1468,7 @@ for (const dirty of [false, true]) {
       expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
     } finally {
       if (alive(c.p.pid!)) c.p.kill("SIGKILL")
+      await c.done
       if (existsSync(join(f.root, "git-hang"))) {
         const owned = JSON.parse(readFileSync(join(f.root, "git-hang"), "utf8"))
         for (const pid of [owned.pid, owned.child]) if (alive(pid)) process.kill(pid, "SIGKILL")
@@ -1449,6 +1517,7 @@ for (const crash of [false, true]) {
         expect(startsCount(f)).toBe(1)
       } finally {
         if (alive(c.p.pid!)) c.p.kill("SIGKILL")
+        await c.done
         if (existsSync(join(f.root, "git-hang"))) {
           const owned = JSON.parse(readFileSync(join(f.root, "git-hang"), "utf8"))
           for (const pid of [owned.pid, owned.child]) if (alive(pid)) process.kill(pid, "SIGKILL")
