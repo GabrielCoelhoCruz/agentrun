@@ -1,33 +1,33 @@
-{"_tag":"Started","sessionId":"fd995ea7-436a-4aa5-8040-afa671a22232"}
+{"_tag":"Started","sessionId":"synthetic-session-id"}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolCall","id":"toolu_01XRn4RW9xY8M8xkdhfXG1Dd","name":"Write","input":{"file_path":"<cwd>/f1.txt","content":"f1.txt"}}
+{"_tag":"ToolCall","id":"synthetic-tool-1","name":"Write","input":{"file_path":"<cwd>/f1.txt","content":"f1.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01XRn4RW9xY8M8xkdhfXG1Dd","isError":false,"summary":"File created successfully at: <cwd>/f1.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_01E1egyzNE5X6Eve2wzf5KHd","name":"Write","input":{"file_path":"<cwd>/f2.txt","content":"f2.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-1","isError":false,"summary":"File created successfully at: <cwd>/f1.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-2","name":"Write","input":{"file_path":"<cwd>/f2.txt","content":"f2.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01E1egyzNE5X6Eve2wzf5KHd","isError":false,"summary":"File created successfully at: <cwd>/f2.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_013sMXkvLFPCRhcefiytR7cs","name":"Write","input":{"file_path":"<cwd>/f3.txt","content":"f3.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-2","isError":false,"summary":"File created successfully at: <cwd>/f2.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-3","name":"Write","input":{"file_path":"<cwd>/f3.txt","content":"f3.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_013sMXkvLFPCRhcefiytR7cs","isError":false,"summary":"File created successfully at: <cwd>/f3.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_01TK6gzSyFKxHjgSGErz8RJD","name":"Write","input":{"file_path":"<cwd>/f4.txt","content":"f4.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-3","isError":false,"summary":"File created successfully at: <cwd>/f3.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-4","name":"Write","input":{"file_path":"<cwd>/f4.txt","content":"f4.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01TK6gzSyFKxHjgSGErz8RJD","isError":false,"summary":"File created successfully at: <cwd>/f4.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_01RmgPhmXNcnHJaVunFeTJ8z","name":"Write","input":{"file_path":"<cwd>/f5.txt","content":"f5.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-4","isError":false,"summary":"File created successfully at: <cwd>/f4.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-5","name":"Write","input":{"file_path":"<cwd>/f5.txt","content":"f5.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01RmgPhmXNcnHJaVunFeTJ8z","isError":false,"summary":"File created successfully at: <cwd>/f5.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_01M47REb54K4MXVZtjoGgFmP","name":"Write","input":{"file_path":"<cwd>/f6.txt","content":"f6.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-5","isError":false,"summary":"File created successfully at: <cwd>/f5.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-6","name":"Write","input":{"file_path":"<cwd>/f6.txt","content":"f6.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01M47REb54K4MXVZtjoGgFmP","isError":false,"summary":"File created successfully at: <cwd>/f6.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_01YQPBrMCwFbCoZJM472395F","name":"Write","input":{"file_path":"<cwd>/f7.txt","content":"f7.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-6","isError":false,"summary":"File created successfully at: <cwd>/f6.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-7","name":"Write","input":{"file_path":"<cwd>/f7.txt","content":"f7.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01YQPBrMCwFbCoZJM472395F","isError":false,"summary":"File created successfully at: <cwd>/f7.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_01Q2rskXkBFQAa18upSF1mpL","name":"Write","input":{"file_path":"<cwd>/f8.txt","content":"f8.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-7","isError":false,"summary":"File created successfully at: <cwd>/f7.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-8","name":"Write","input":{"file_path":"<cwd>/f8.txt","content":"f8.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01Q2rskXkBFQAa18upSF1mpL","isError":false,"summary":"File created successfully at: <cwd>/f8.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_01VFtU6KuUAWCkpRS7NRFntF","name":"Write","input":{"file_path":"<cwd>/f9.txt","content":"f9.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-8","isError":false,"summary":"File created successfully at: <cwd>/f8.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-9","name":"Write","input":{"file_path":"<cwd>/f9.txt","content":"f9.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01VFtU6KuUAWCkpRS7NRFntF","isError":false,"summary":"File created successfully at: <cwd>/f9.txt (file state is current in your context — no need to Read it back)"}
-{"_tag":"ToolCall","id":"toolu_01Dpx53oZhVCPVeghwfCcDEs","name":"Write","input":{"file_path":"<cwd>/f10.txt","content":"f10.txt"}}
+{"_tag":"ToolResult","id":"synthetic-tool-9","isError":false,"summary":"File created successfully at: <cwd>/f9.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolCall","id":"synthetic-tool-10","name":"Write","input":{"file_path":"<cwd>/f10.txt","content":"f10.txt"}}
 {"_tag":"Usage","inputTokens":2,"outputTokens":2}
-{"_tag":"ToolResult","id":"toolu_01Dpx53oZhVCPVeghwfCcDEs","isError":false,"summary":"File created successfully at: <cwd>/f10.txt (file state is current in your context — no need to Read it back)"}
+{"_tag":"ToolResult","id":"synthetic-tool-10","isError":false,"summary":"File created successfully at: <cwd>/f10.txt (file state is current in your context — no need to Read it back)"}
 {"_tag":"Failed","reason":"error_max_turns"}

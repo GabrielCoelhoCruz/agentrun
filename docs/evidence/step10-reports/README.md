@@ -78,7 +78,7 @@ For another explicitly authorized paid run, use a new private directory:
 
 ```sh
 PRIVATE_DIR="$(mktemp -d)/run"
-AGENTRUN_E2E_REAL=1 python3 packages/cli/scripts/run-report-e2e.py "$NODE24" "$PRIVATE_DIR"
+AGENTRUN_E2E_REAL=1 python3 packages/cli/scripts/run-report-e2e.py "$NODE24" "$PRIVATE_DIR" "$INSTALLED_CLI"
 ```
 
 The driver checks doctor and model availability before prompts.
