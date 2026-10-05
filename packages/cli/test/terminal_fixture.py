@@ -54,11 +54,24 @@ def close(root, nonce):
     refused = []
     signals = []
 
-    def inspect():
-        remaining = phase_deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError('Fixture cleanup phase exceeded its deadline')
-        return table(min(5, remaining))
+    def unreadable(row):
+        # Linux shows `[comm]` while a process is inside exec and has no command line yet.
+        return not row['state'].startswith('Z') and row['command'].startswith('[') and row['command'].endswith(']')
+
+    def inspect(pids=()):
+        watched = {*records, *pids}
+        while True:
+            remaining = phase_deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Fixture cleanup phase exceeded its deadline')
+            try:
+                rows = table(min(5, remaining))
+            except subprocess.SubprocessError:
+                time.sleep(.05)
+                continue
+            if not any(pid in rows and unreadable(rows[pid]) for pid in watched):
+                return rows
+            time.sleep(.01)
 
     def owned(record, rows):
         row = rows.get(record['pid'])
@@ -73,8 +86,8 @@ def close(root, nonce):
         return (row['parent'] == parent['pid'] and owned(parent, rows)
                 and ('inspectionParent' not in record or owned_ps(row, rows[parent['pid']])))
 
-    def current(record):
-        rows = inspect()
+    def current(record, rows=None):
+        rows = rows or inspect([record['pid']])
         row = rows.get(record['pid'])
         if not alive(row):
             return None
@@ -82,8 +95,8 @@ def close(root, nonce):
             raise RuntimeError(f"Process {record['pid']} identity changed; cleanup refused")
         return row
 
-    def send(record, sig):
-        if current(record) is not None:
+    def send(record, sig, rows=None):
+        if current(record, rows) is not None:
             try:
                 os.kill(record['pid'], sig)
                 signals.append(dict(pid=record['pid'], signal=signal.Signals(sig).name))
@@ -109,7 +122,9 @@ def close(root, nonce):
         try:
             action()
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as error:
-            refused.append(f'Cleanup refused: {error}')
+            message = f'Cleanup refused: {error}'
+            if message not in refused:
+                refused.append(message)
 
     def discover():
         saved = root / 'terminal-owned.json'
@@ -178,13 +193,14 @@ def close(root, nonce):
         attempt(discover)
         phase_deadline = deadline
         ordered = list(records.values())
-        for record in [r for r in ordered if 'inspectionParent' in r] + [r for r in reversed(ordered) if 'inspectionParent' not in r]:
-            attempt(lambda: send(record, signal.SIGKILL))
+        order = [r for r in ordered if 'inspectionParent' in r] + [r for r in reversed(ordered) if 'inspectionParent' not in r]
         while True:
             rows = inspect()
-            remaining = [r for r in records.values() if alive(rows.get(r['pid'])) and matches(r, rows[r['pid']])]
+            remaining = [r for r in order if alive(rows.get(r['pid'])) and matches(r, rows[r['pid']])]
             if not remaining or time.monotonic() >= deadline:
                 break
+            for record in remaining:
+                attempt(lambda: send(record, signal.SIGKILL, rows))
             time.sleep(.05)
         if remaining:
             refused.append('Owned processes remain after SIGKILL')
