@@ -54,15 +54,24 @@ def close(root, nonce):
     refused = []
     signals = []
 
-    def inspect():
+    def unreadable(row):
+        # Linux shows `[comm]` while a process is inside exec and has no command line yet.
+        return not row['state'].startswith('Z') and row['command'].startswith('[') and row['command'].endswith(']')
+
+    def inspect(pids=()):
+        watched = {*records, *pids}
         while True:
             remaining = phase_deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError('Fixture cleanup phase exceeded its deadline')
             try:
-                return table(min(5, remaining))
+                rows = table(min(5, remaining))
             except subprocess.SubprocessError:
                 time.sleep(.05)
+                continue
+            if not any(pid in rows and unreadable(rows[pid]) for pid in watched):
+                return rows
+            time.sleep(.01)
 
     def owned(record, rows):
         row = rows.get(record['pid'])
@@ -78,7 +87,7 @@ def close(root, nonce):
                 and ('inspectionParent' not in record or owned_ps(row, rows[parent['pid']])))
 
     def current(record, rows=None):
-        rows = rows or inspect()
+        rows = rows or inspect([record['pid']])
         row = rows.get(record['pid'])
         if not alive(row):
             return None
