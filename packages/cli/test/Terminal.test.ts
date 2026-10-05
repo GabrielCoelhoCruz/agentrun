@@ -1,17 +1,27 @@
 import { spawnSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { mkdtempSync, readFileSync } from "node:fs"
+import { accessSync, constants, mkdtempSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { expect, onTestFinished, test } from "vitest"
+
+const python = process.env.AGENTRUN_TERMINAL_PYTHON ?? "python3"
+if (process.env.AGENTRUN_TERMINAL_PYTHON !== undefined) {
+  try {
+    if (!isAbsolute(python) || !statSync(python).isFile()) throw new Error("Expected an absolute file")
+    accessSync(python, constants.X_OK)
+  } catch (cause) {
+    throw new Error("AGENTRUN_TERMINAL_PYTHON must name an absolute executable file", { cause })
+  }
+}
 
 for (const scenario of ["success", "failed", "interrupted", "resize", "resume", "json", "pipe"]) {
   test(`real PTY: ${scenario} preserves output and exit semantics`, () => {
     const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
     const nonce = randomUUID().replaceAll("-", "")
     onTestFinished(() => {
-      const cleanup = spawnSync("python3", [
+      const cleanup = spawnSync(python, [
         fileURLToPath(new URL("./terminal_fixture.py", import.meta.url)),
         "close",
         root,
@@ -19,7 +29,7 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
       ], { encoding: "utf8", timeout: 55000 })
       expect(cleanup.status, cleanup.stderr).toBe(0)
     }, 60000)
-    const result = spawnSync("python3", [
+    const result = spawnSync(python, [
       fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
       scenario,
       root,
@@ -71,7 +81,7 @@ for (const scenario of ["retry", "timeout"]) {
     const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
     const nonce = randomUUID().replaceAll("-", "")
     onTestFinished(() => {
-      const cleanup = spawnSync("python3", [
+      const cleanup = spawnSync(python, [
         fileURLToPath(new URL("./terminal_fixture.py", import.meta.url)),
         "close",
         root,
@@ -79,7 +89,7 @@ for (const scenario of ["retry", "timeout"]) {
       ], { encoding: "utf8", timeout: 55000 })
       expect(cleanup.status, cleanup.stderr).toBe(0)
     }, 60000)
-    const result = spawnSync("python3", [
+    const result = spawnSync(python, [
       fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
       scenario,
       root,

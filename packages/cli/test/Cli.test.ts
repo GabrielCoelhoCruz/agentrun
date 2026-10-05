@@ -1481,24 +1481,46 @@ for (const crash of [false, true]) {
   test(
     `review hanging delivery Git preserves immutable recovery without provider replay (${crash ? "crash" : "timeout"})`,
     async () => {
-      const f = timedFixture("success", "20 seconds", "10 seconds")
+      const f = timedFixture("success", "5 minutes", "30 seconds")
       hangingGit(f, "delivery")
       const c = child(f, ["run", "TASKS.md", "--json", "--keep-worktrees"])
       try {
-        await wait(() => existsSync(join(f.root, "git-hang")))
+        await wait(() => existsSync(join(f.root, "git-hang")), 60000)
+        const checkpoint = JSON.parse(readFileSync(statePath(f), "utf8"))
+        writeFileSync(join(f.root, "delivery-hang-state.json"), readFileSync(statePath(f)))
+        expect(checkpoint.tasks).toMatchObject([
+          {
+            id: "task0",
+            maxDuration: { _tag: "Millis", value: 30000 },
+            stallTimeout: { _tag: "Millis", value: 300000 },
+          },
+        ])
+        expect(startsCount(f)).toBe(1)
+        expect(checkpoint.taskReports.task0.phase).toBe("completed")
+        expect(checkpoint.taskReports.task0.deliveryCommit).toMatch(/^[a-f0-9]{40}$/)
+        const owned = JSON.parse(readFileSync(join(f.root, "git-hang"), "utf8"))
+        expect(owned.args).toEqual([
+          "update-ref",
+          `refs/heads/${checkpoint.worktrees.task0.branch}`,
+          checkpoint.taskReports.task0.deliveryCommit,
+          checkpoint.baseSha,
+        ])
         if (crash) {
-          await wait(() => existsSync(join(f.root, "git-cleanup")))
+          await wait(() => existsSync(join(f.root, "git-cleanup")), 60000)
+          expect(readFileSync(join(f.root, "git-cleanup"), "utf8")).toBe("ready")
           c.p.kill("SIGKILL")
           expect(await c.done).toBe(null)
         } else {
-          await wait(() => c.stdout().includes("\"_tag\":\"RunFinished\""))
           expect(await c.done).toBe(1)
+          expect(c.stdout().trim().split("\n").at(-1)).toContain("\"_tag\":\"RunFinished\"")
+          expect(state(f).status.task0?.reason).toBe("AgentTimedOut: Exceeded 30000ms")
         }
         const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
         expect(saved.taskReports.task0.phase).toBe("completed")
         const commit = saved.taskReports.task0.deliveryCommit
         expect(commit).toMatch(/^[a-f0-9]{40}$/)
-        const owned = JSON.parse(readFileSync(join(f.root, "git-hang"), "utf8"))
+        expect(commit).toBe(checkpoint.taskReports.task0.deliveryCommit)
+        expect(saved.taskReports.task0).toEqual(checkpoint.taskReports.task0)
         if (!crash) {
           expect(alive(owned.pid)).toBe(false)
           expect(alive(owned.child)).toBe(false)
@@ -1524,31 +1546,91 @@ for (const crash of [false, true]) {
         }
       }
     },
-    30000,
+    120000,
   )
 }
 
 test("review partial acquisition clears setup before a failed retry can reuse the directory", async () => {
   const f = timedFixture(
     "setup-dependency",
-    "20 seconds",
-    "5 seconds",
+    "5 minutes",
+    "30 seconds",
     "echo setup >> \"$TEST_RECORDS/setup-count\"; touch dependency",
   )
   writeFileSync(join(f.repo, ".gitignore"), ".agentrun/\ndependency\n")
   git(f.repo, ["add", ".gitignore"])
   git(f.repo, ["-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-qm", "ignore dependency"])
   expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(1)
+  const first = JSON.parse(readFileSync(statePath(f), "utf8"))
+  writeFileSync(join(f.root, "first-failure-state.json"), readFileSync(statePath(f)))
+  expect(first.tasks).toMatchObject([
+    { id: "task0", maxDuration: { _tag: "Millis", value: 30000 }, stallTimeout: { _tag: "Millis", value: 300000 } },
+  ])
+  expect(first.status.task0).toEqual({
+    _tag: "failed",
+    attempt: 1,
+    reason: "AgentTaskFailed: dependency or first failure",
+  })
+  expect(first.taskReports.task0).toMatchObject({
+    phase: "failed",
+    attempt: 1,
+    failureReason: "AgentTaskFailed: dependency or first failure",
+    setupCompleted: true,
+    toolsStarted: false,
+  })
+  const events: import("@agentrun/core").AgentEvent[] = readFileSync(
+    join(artifacts(f), "tasks/task0/events.jsonl"),
+    "utf8",
+  ).trim().split("\n").map((line) => JSON.parse(line))
+  expect(events).toEqual([{ _tag: "Started" }, { _tag: "Failed", reason: "dependency or first failure" }])
+  writeFileSync(
+    join(f.root, "first-failure-events.jsonl"),
+    readFileSync(join(artifacts(f), "tasks/task0/events.jsonl")),
+  )
+  expect(startsCount(f)).toBe(1)
+  expect(readFileSync(join(f.root, "setup-count"), "utf8").trim().split("\n")).toHaveLength(1)
+  expect(existsSync(first.worktrees.task0.path)).toBe(false)
   hangingGit(f, "acquire")
   const retry = child(f, ["resume", "--retry-failed", "--json"])
-  await wait(() => existsSync(join(f.root, "git-hang")))
+  await wait(() => existsSync(join(f.root, "git-hang")), 60000)
   const partial = state(f).worktrees.task0!.path
+  expect(state(f).worktrees.task0).toEqual(first.worktrees.task0)
+  expect(existsSync(partial)).toBe(true)
+  const owned = JSON.parse(readFileSync(join(f.root, "git-hang"), "utf8"))
+  expect(owned.args).toEqual(["worktree", "add", partial, first.worktrees.task0.branch])
   writeFileSync(join(partial, "partial-user-work"), "preserve this\n")
   expect(await retry.done).toBe(1)
   expect(state(f).status.task0?.reason).toMatch(/^AgentTimedOut:/)
+  expect(retry.stdout().trim().split("\n").at(-1)).toContain("\"_tag\":\"RunFinished\"")
+  const middle = JSON.parse(readFileSync(statePath(f), "utf8"))
+  writeFileSync(join(f.root, "acquisition-timeout-state.json"), readFileSync(statePath(f)))
+  expect(middle.tasks).toEqual(first.tasks)
+  expect(middle.status.task0).toEqual({ _tag: "failed", attempt: 2, reason: "AgentTimedOut: Exceeded 30000ms" })
+  expect(middle.taskReports.task0).toMatchObject({
+    phase: "failed",
+    attempt: 2,
+    failureReason: "AgentTimedOut: Exceeded 30000ms",
+    setupCompleted: false,
+  })
+  expect(existsSync(partial)).toBe(true)
+  expect(startsCount(f)).toBe(1)
+  expect(readFileSync(join(f.root, "setup-count"), "utf8").trim().split("\n")).toHaveLength(1)
   expect(existsSync(join(partial, "dependency"))).toBe(false)
+  expect(alive(owned.pid)).toBe(false)
+  expect(alive(owned.child)).toBe(false)
+  expect(existsSync(lockPath(f))).toBe(false)
   expect(await child(f, ["resume", "--retry-failed", "--json"]).done).toBe(0)
+  expect(state(f).status.task0?._tag).toBe("succeeded")
+  expect(JSON.parse(readFileSync(statePath(f), "utf8")).taskReports.task0).toMatchObject({
+    phase: "delivered",
+    setupCompleted: true,
+  })
+  expect(JSON.parse(readFileSync(statePath(f), "utf8")).tasks).toEqual(first.tasks)
   expect(startsCount(f)).toBe(2)
   expect(readFileSync(join(f.root, "setup-count"), "utf8").trim().split("\n")).toHaveLength(2)
   expect(git(f.repo, ["show", `${state(f).worktrees.task0!.branch}:partial-user-work`])).toBe("preserve this")
-}, 30000)
+  const contents = spawnSync("git", ["show", `${state(f).worktrees.task0!.branch}:partial-user-work`], { cwd: f.repo })
+  expect(contents.status).toBe(0)
+  writeFileSync(join(f.root, "delivered-partial-user-work"), contents.stdout)
+  expect(contents.stdout).toEqual(Buffer.from("preserve this\n"))
+}, 120000)

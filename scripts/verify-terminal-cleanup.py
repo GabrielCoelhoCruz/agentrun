@@ -7,10 +7,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
 import time
 import uuid
 
 wt = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(wt / 'packages/cli/test'))
+from terminal_inspection import owned_ps
 node = shutil.which('node')
 assert node, 'Node is required'
 mode = sys.argv[2] if len(sys.argv) > 2 else 'pipe'
@@ -39,6 +42,18 @@ class IdentityChanged(RuntimeError):
 def save(name, value):
     (out / name).write_text(json.dumps(value, indent=2) + '\n')
 
+def stable_python_runtime():
+    framework = sysconfig.get_config_var('PYTHONFRAMEWORK')
+    candidate = Path(sys.executable)
+    if sys.platform == 'darwin' and framework:
+        if not isinstance(framework, str) or framework in ('.', '..') or '/' in framework or '\\' in framework:
+            raise ValueError('PYTHONFRAMEWORK must be a single path component')
+        candidate = Path(sys.base_prefix) / 'Resources/Python.app/Contents/MacOS' / framework
+    candidate = candidate.resolve(strict=True)
+    if not candidate.is_absolute() or not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise ValueError('Terminal Python must be an absolute executable file')
+    return candidate
+
 def table():
     r = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,stat=,command='], capture_output=True, text=True, timeout=8)
     if r.returncode != 0:
@@ -58,7 +73,8 @@ def live(row):
     return not row['state'].startswith('Z')
 
 def complete(row):
-    return row['uid'] == os.getuid() and bool(row['command']) and not row['command'].startswith(('(', '<'))
+    return ((row['uid'] == os.getuid() or 'inspectionParent' in row)
+            and bool(row['command']) and not row['command'].startswith(('(', '<')))
 
 def launch_transition(old, row):
     if any(old[k] != row[k] for k in ['pid', 'uid', 'group', 'start']):
@@ -83,7 +99,12 @@ def launch_transition(old, row):
             refused.append({'receiptPath': str(receipt), 'error': repr(error)})
     return False
 
-def register(row):
+def register(row, parent=None):
+    row = dict(row)
+    if row['uid'] != os.getuid():
+        parent = parent or identities.get(row['parent'])
+        if parent and owned_ps(row, parent):
+            row['inspectionParent'] = dict(parent)
     pid = row['pid']
     if not complete(row):
         if unverified.get(pid) != row:
@@ -120,7 +141,7 @@ def remember(rows, parent):
         if row is None or pid in verified:
             continue
         try:
-            record = register(row)
+            record = register(row, by_pid.get(row['parent']) if row['parent'] in verified else None)
         except IdentityChanged:
             continue
         if record:
@@ -142,7 +163,13 @@ def current(record):
         raise IdentityChanged('Cleanup refused incomplete identity')
     deadline = time.monotonic() + .5
     while True:
-        row = next((r for r in table() if r['pid'] == record['pid'] and live(r)), None)
+        rows = table()
+        row = next((r for r in rows if r['pid'] == record['pid'] and live(r)), None)
+        if row is not None and 'inspectionParent' in record:
+            parent = next((r for r in rows if r['pid'] == record['inspectionParent']['pid']), None)
+            if (parent is None or not same(parent, record['inspectionParent'])
+                    or not owned_ps(row, parent)):
+                raise IdentityChanged('Cleanup refused changed inspection helper')
         if row is None:
             return None
         if same(row, record):
@@ -182,6 +209,8 @@ def freeze_tree(record, receipt):
         captured |= remember(rows, record['pid'])
         unresolved = set()
         for pid in captured:
+            if any(r['pid'] == pid and pid in identities and same(identities[pid], r) and live(r) and 'T' in r['state'] for r in rows):
+                continue
             if pid not in identities:
                 unresolved.add(pid)
                 continue
@@ -217,6 +246,9 @@ try:
     args = [sys.executable, str(wt / 'packages/cli/test/terminal-demo.py'), scenario, str(root), node]
     command = {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':30 if outer else 22 if mode in ['pty', 'resume-second', 'normal', 'exception'] else 20, 'fault':mode, 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest(), 'sourceHashes': {f: hashlib.sha256((wt / f).read_bytes()).hexdigest() for f in ['packages/cli/test/terminal-demo.py', 'packages/cli/test/terminal_fixture.py', 'packages/cli/test/Terminal.test.ts', 'scripts/verify-terminal-cleanup.py', 'scripts/terminal-cleanup-deadline.cjs', 'scripts/verify-terminal-observer.py'] if (wt / f).exists()}, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True)}
     if outer:
+        env['AGENTRUN_TERMINAL_PYTHON'] = str(stable_python_runtime())
+        command['terminalPython'] = {'requested': sys.executable, 'runtime': env['AGENTRUN_TERMINAL_PYTHON'],
+                                    'basePrefix': sys.base_prefix, 'framework': sysconfig.get_config_var('PYTHONFRAMEWORK')}
         env['NODE_OPTIONS'] = '--require=' + str(wt / 'scripts/terminal-cleanup-deadline.cjs')
         env['AGENTRUN_TEST_EVIDENCE'] = str(root)
         args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: ' + scenario]
@@ -393,6 +425,10 @@ finally:
         attempt(discover)
         if cli:
             attempt(freeze_cli)
+        for record in list(identities.values()):
+            if 'inspectionParent' in record:
+                attempt(send, record, signal.SIGKILL)
+        if cli:
             attempt(send, cli, signal.SIGKILL)
         for w in workers:
             leader = identities.get(w['pgid'])

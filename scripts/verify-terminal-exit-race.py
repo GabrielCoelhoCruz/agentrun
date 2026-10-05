@@ -10,6 +10,8 @@ import sys
 import time
 
 wt = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(wt / 'packages/cli/test'))
+from terminal_inspection import owned_ps
 out = Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
 fields = ['pid', 'parent', 'group', 'uid', 'start', 'state', 'command']
@@ -57,7 +59,11 @@ def exact(record):
 def stop_owned(record, sig):
     row = exact(record)
     if row is not None:
-        assert row['uid'] == os.getuid() and not row['command'].startswith(('(', '<'))
+        if 'inspectionParent' in record:
+            parent = next((r for r in table() if r['pid'] == record['inspectionParent']['pid']), None)
+            assert parent is not None and same(parent, record['inspectionParent']) and owned_ps(row, parent)
+        else:
+            assert row['uid'] == os.getuid() and not row['command'].startswith(('(', '<'))
         real_kill(row['pid'], sig)
         with (out / 'probe-signals.jsonl').open('a') as f:
             f.write(json.dumps({'identity': row, 'signal': signal.Signals(sig).name}) + '\n')
@@ -81,10 +87,20 @@ def freeze_owned_tree(root_record):
                 break
             scope = expanded
         for row in rows:
-            if row['pid'] in scope and live(row) and row['uid'] == os.getuid() and not row['command'].startswith(('(', '<')) and (row['pid'] == root_record['pid']
-                    or (row['parent'] in records and any(same(r, records[row['parent']]) and 'T' in r['state'] for r in rows))):
-                records.setdefault(row['pid'], dict(row))
+            parent = next((r for r in rows if r['pid'] == row['parent'] and r['pid'] in records and same(r, records[r['pid']]) and 'T' in r['state']), None)
+            if row['pid'] not in scope or not live(row) or (row['pid'] != root_record['pid'] and parent is None):
+                continue
+            record = dict(row)
+            if row['uid'] != os.getuid():
+                if not owned_ps(row, parent):
+                    continue
+                record['inspectionParent'] = dict(parent)
+            elif row['command'].startswith(('(', '<')):
+                continue
+            records.setdefault(row['pid'], record)
         for record in list(records.values()):
+            if any(same(row, record) and live(row) and 'T' in row['state'] for row in rows):
+                continue
             try:
                 stop_owned(record, signal.SIGSTOP)
             except RuntimeError:
@@ -439,6 +455,8 @@ try:
         code = p.wait(timeout=150)
     pre = json.loads((out / 'precondition.json').read_text())
     records = pre['identities'] + [pre['target'], pre['foreign']]
+    if (out / 'probe-frozen-tree.json').exists():
+        records += json.loads((out / 'probe-frozen-tree.json').read_text())['identities']
     assert (out / 'injection.json').exists(), 'Fault was not reached'
     rows = table()
     save('actual-after.json', rows)
@@ -486,7 +504,7 @@ finally:
     records += state_workers(table())
     errors = []
     seen = set()
-    for record in records:
+    for record in [r for r in records if 'inspectionParent' in r] + [r for r in records if 'inspectionParent' not in r]:
         key = tuple(record[k] for k in identity_fields)
         if key in seen:
             continue
