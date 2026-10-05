@@ -177,12 +177,16 @@ test.each([
   const done = once(child, "close")
   const sentinelDone = once(sentinel, "close")
   const childRow = `${child.pid} ${process.pid} ${leader === "wrong-group" ? sentinel.pid : child.pid} S ${command}`
-  const sentinelRow = `${sentinel.pid} ${process.pid} ${leader === "missing" || leader === "wrong-group" ? child.pid : sentinel.pid} S node agentrun-worker-${token}`
+  const sentinelRow = `${sentinel.pid} ${process.pid} ${
+    leader === "missing" || leader === "wrong-group" ? child.pid : sentinel.pid
+  } S node agentrun-worker-${token}`
   const rows = [sentinelRow]
   if (leader !== "missing") rows.push(childRow)
   if (leader === "duplicate") rows.push(`${child.pid} ${process.pid} ${child.pid} S node changed-command`)
   try {
-    writeFileSync(join(directory, "ps"), `#!/bin/sh
+    writeFileSync(
+      join(directory, "ps"),
+      `#!/bin/sh
 if ! kill -0 ${child.pid} 2>/dev/null; then exec /bin/ps "$@"; fi
 case "$1" in
   -axo)
@@ -197,7 +201,9 @@ AGENTRUN_COMMAND
     ;;
   *) exec /bin/ps "$@";;
 esac
-`, { mode: 0o755 })
+`,
+      { mode: 0o755 },
+    )
     process.env.PATH = `${directory}:${original}`
     const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
     expect(() => process.kill(sentinel.pid!, 0)).not.toThrow()
@@ -219,14 +225,18 @@ test("separate cleanup calls reject changed leader command evidence", async () =
   const done = once(child, "close")
   try {
     for (const command of [`node agentrun-worker-${token}`, "node changed-command"]) {
-      writeFileSync(join(directory, "ps"), `#!/bin/sh
+      writeFileSync(
+        join(directory, "ps"),
+        `#!/bin/sh
 case "$1" in
   -axo) echo '${child.pid} ${process.pid} ${child.pid} S ${command}'
          echo '999999 ${child.pid} 0 S';;
   -p) echo '${command}';;
   *) exec /bin/ps "$@";;
 esac
-`, { mode: 0o755 })
+`,
+        { mode: 0o755 },
+      )
       process.env.PATH = `${directory}:${original}`
       await expect(Effect.runPromise(stopProcessGroup(child.pid!, token))).rejects.toMatchObject({
         reason: { cause: expect.stringMatching(command.includes(token) ? /unowned group/ : /ownership changed/) },
@@ -242,7 +252,9 @@ esac
 })
 
 test("owned cleanup stops a nested detached child and preserves a foreign sentinel", async () => {
-  const leader = spawn(process.execPath, ["-e", `
+  const leader = spawn(process.execPath, [
+    "-e",
+    `
 const { spawn } = require('node:child_process')
 const child = spawn(process.execPath, ['-e', "process.on('disconnect', () => process.exit(70)); process.send('ready'); setInterval(() => {}, 1000)"], {
   detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc']
@@ -254,7 +266,9 @@ child.once('close', (code, signal) => {
 })
 process.stdin.resume()
 process.stdin.on('end', () => child.kill('SIGKILL'))
-`, `agentrun-worker-${token}`], { detached: true, stdio: ["pipe", "ignore", "ignore", "ipc"] })
+`,
+    `agentrun-worker-${token}`,
+  ], { detached: true, stdio: ["pipe", "ignore", "ignore", "ipc"] })
   const sentinel = start()
   const done = once(leader, "close")
   const sentinelDone = once(sentinel, "close")
@@ -275,9 +289,19 @@ process.stdin.on('end', () => child.kill('SIGKILL'))
     expect(() => process.kill(leader.pid!, 0)).toThrow()
     expect(() => process.kill(sentinel.pid!, 0)).not.toThrow()
     if (process.env.AGENTRUN_TEST_EVIDENCE) {
-      writeFileSync(join(process.env.AGENTRUN_TEST_EVIDENCE, "nested-processes.json"), JSON.stringify({
-        leader: leader.pid, nested: receipt, sentinel: sentinel.pid, sentinelAliveAfterCleanup: true,
-      }, null, 2))
+      writeFileSync(
+        join(process.env.AGENTRUN_TEST_EVIDENCE, "nested-processes.json"),
+        JSON.stringify(
+          {
+            leader: leader.pid,
+            nested: receipt,
+            sentinel: sentinel.pid,
+            sentinelAliveAfterCleanup: true,
+          },
+          null,
+          2,
+        ),
+      )
     }
   } finally {
     leader.stdin!.end()
