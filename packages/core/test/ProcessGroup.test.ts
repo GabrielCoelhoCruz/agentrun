@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import { spawn, spawnSync } from "node:child_process"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { once } from "node:events"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, test } from "vitest"
@@ -122,3 +123,190 @@ child.wait()
     await done
   }
 }, 10000)
+
+test("owned cleanup accepts a complete long multiline Git leader command", async () => {
+  const argument = `argument-start ${"space separated words ".repeat(1024)}\tline one\nline two argument-end`
+  const child = spawn(process.execPath, [
+    "-e",
+    `
+const timer = setInterval(() => {}, 1000)
+process.on('SIGTERM', () => { clearInterval(timer); process.exit(0) })
+`,
+    "--",
+    argument,
+    `agentrun-git-${token}`,
+  ], { detached: true, stdio: "ignore" })
+  const done = once(child, "close")
+  try {
+    const snapshot = spawnSync("/bin/ps", ["-axo", "pid=,ppid=,pgid=,stat=,command=", "-ww"], { encoding: "utf8" })
+    expect(snapshot.status).toBe(0)
+    const rows = snapshot.stdout.split("\n").filter((line) => line.trim().split(/\s+/)[0] === String(child.pid))
+    if (process.env.AGENTRUN_TEST_EVIDENCE) {
+      writeFileSync(join(process.env.AGENTRUN_TEST_EVIDENCE, "long-command.txt"), rows.join("\n"))
+    }
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toContain("space separated words ".repeat(1024))
+    expect(rows[0]).toContain("argument-start")
+    expect(rows[0]).toContain("argument-end")
+    expect(rows[0]!.trim().split(/\s+/).at(-1)).toBe(`agentrun-git-${token}`)
+    await Effect.runPromise(stopProcessGroup(child.pid!, token, "git"))
+    await done
+    expect(() => process.kill(child.pid!, 0)).toThrow()
+  } finally {
+    child.kill("SIGKILL")
+    await done
+  }
+})
+
+test.each([
+  { name: "missing command", command: "" },
+  { name: "unavailable command", command: "(node)" },
+  { name: "command cut before the marker ends", command: `node agentrun-worker-${token.slice(0, 16)}` },
+  { name: "wrong marker kind", command: `node agentrun-git-${token}` },
+  { name: "marker with an attached prefix", command: `node prefix-agentrun-worker-${token}` },
+  { name: "marker with an attached suffix", command: `node agentrun-worker-${token}-suffix` },
+  { name: "marker only on another row", command: "node foreign-command" },
+  { name: "missing leader row", command: `node agentrun-worker-${token}`, leader: "missing" },
+  { name: "leader in a different group", command: `node agentrun-worker-${token}`, leader: "wrong-group" },
+  { name: "duplicate PID with conflicting commands", command: `node agentrun-worker-${token}`, leader: "duplicate" },
+])("$name refuses cleanup and preserves both real processes", async ({ command, leader }) => {
+  const directory = mkdtempSync(join(tmpdir(), "agentrun-ps-evidence-"))
+  const original = process.env.PATH
+  const child = start()
+  const sentinel = start()
+  const done = once(child, "close")
+  const sentinelDone = once(sentinel, "close")
+  const childRow = `${child.pid} ${process.pid} ${leader === "wrong-group" ? sentinel.pid : child.pid} S ${command}`
+  const sentinelRow = `${sentinel.pid} ${process.pid} ${
+    leader === "missing" || leader === "wrong-group" ? child.pid : sentinel.pid
+  } S node agentrun-worker-${token}`
+  const rows = [sentinelRow]
+  if (leader !== "missing") rows.push(childRow)
+  if (leader === "duplicate") rows.push(`${child.pid} ${process.pid} ${child.pid} S node changed-command`)
+  try {
+    writeFileSync(
+      join(directory, "ps"),
+      `#!/bin/sh
+if ! kill -0 ${child.pid} 2>/dev/null; then exec /bin/ps "$@"; fi
+case "$1" in
+  -axo)
+    cat <<'AGENTRUN_TABLE'
+${rows.join("\n")}
+AGENTRUN_TABLE
+    ;;
+  -p)
+    cat <<'AGENTRUN_COMMAND'
+${command}
+AGENTRUN_COMMAND
+    ;;
+  *) exec /bin/ps "$@";;
+esac
+`,
+      { mode: 0o755 },
+    )
+    process.env.PATH = `${directory}:${original}`
+    const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
+    expect(() => process.kill(sentinel.pid!, 0)).not.toThrow()
+    expect(() => process.kill(child.pid!, 0)).not.toThrow()
+    expect(result._tag).toBe("Failure")
+  } finally {
+    process.env.PATH = original
+    child.kill("SIGKILL")
+    sentinel.kill("SIGKILL")
+    await Promise.all([done, sentinelDone])
+    rmSync(directory, { recursive: true })
+  }
+})
+
+test("separate cleanup calls reject changed leader command evidence", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "agentrun-ps-fresh-"))
+  const original = process.env.PATH
+  const child = start()
+  const done = once(child, "close")
+  try {
+    for (const command of [`node agentrun-worker-${token}`, "node changed-command"]) {
+      writeFileSync(
+        join(directory, "ps"),
+        `#!/bin/sh
+case "$1" in
+  -axo) echo '${child.pid} ${process.pid} ${child.pid} S ${command}'
+         echo '999999 ${child.pid} 0 S';;
+  -p) echo '${command}';;
+  *) exec /bin/ps "$@";;
+esac
+`,
+        { mode: 0o755 },
+      )
+      process.env.PATH = `${directory}:${original}`
+      await expect(Effect.runPromise(stopProcessGroup(child.pid!, token))).rejects.toMatchObject({
+        reason: { cause: expect.stringMatching(command.includes(token) ? /unowned group/ : /ownership changed/) },
+      })
+      expect(() => process.kill(child.pid!, 0)).not.toThrow()
+    }
+  } finally {
+    process.env.PATH = original
+    child.kill("SIGKILL")
+    await done
+    rmSync(directory, { recursive: true })
+  }
+})
+
+test("owned cleanup stops a nested detached child and preserves a foreign sentinel", async () => {
+  const leader = spawn(process.execPath, [
+    "-e",
+    `
+const { spawn } = require('node:child_process')
+const child = spawn(process.execPath, ['-e', "process.on('disconnect', () => process.exit(70)); process.send('ready'); setInterval(() => {}, 1000)"], {
+  detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc']
+})
+process.on('SIGTERM', () => {})
+child.once('message', () => process.send(child.pid))
+child.once('close', (code, signal) => {
+  process.send({ pid: child.pid, code, signal }, () => process.exit(0))
+})
+process.stdin.resume()
+process.stdin.on('end', () => child.kill('SIGKILL'))
+`,
+    `agentrun-worker-${token}`,
+  ], { detached: true, stdio: ["pipe", "ignore", "ignore", "ipc"] })
+  const sentinel = start()
+  const done = once(leader, "close")
+  const sentinelDone = once(sentinel, "close")
+  let receipt: unknown
+  leader.on("message", (message) => {
+    if (typeof message === "object") receipt = message
+  })
+  try {
+    const [nestedPid] = await once(leader, "message", { signal: AbortSignal.timeout(4000) })
+    expect(Number.isSafeInteger(nestedPid)).toBe(true)
+    const membership = spawnSync("/bin/ps", ["-p", String(nestedPid), "-o", "pid=,ppid=,pgid="], { encoding: "utf8" })
+    expect(membership.status).toBe(0)
+    expect(membership.stdout.trim().split(/\s+/).map(Number)).toEqual([nestedPid, leader.pid, nestedPid])
+    await Effect.runPromise(stopProcessGroup(leader.pid!, token))
+    await done
+    expect(receipt).toEqual({ pid: nestedPid, code: null, signal: "SIGTERM" })
+    expect(() => process.kill(nestedPid, 0)).toThrow()
+    expect(() => process.kill(leader.pid!, 0)).toThrow()
+    expect(() => process.kill(sentinel.pid!, 0)).not.toThrow()
+    if (process.env.AGENTRUN_TEST_EVIDENCE) {
+      writeFileSync(
+        join(process.env.AGENTRUN_TEST_EVIDENCE, "nested-processes.json"),
+        JSON.stringify(
+          {
+            leader: leader.pid,
+            nested: receipt,
+            sentinel: sentinel.pid,
+            sentinelAliveAfterCleanup: true,
+          },
+          null,
+          2,
+        ),
+      )
+    }
+  } finally {
+    leader.stdin!.end()
+    await done
+    sentinel.kill("SIGKILL")
+    await sentinelDone
+  }
+})

@@ -1,24 +1,32 @@
 import json
 import os
+import re
 from pathlib import Path
 import hashlib
 import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
 import time
 import uuid
 
 wt = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(wt / 'packages/cli/test'))
+from terminal_inspection import owned_ps
 node = shutil.which('node')
 assert node, 'Node is required'
 mode = sys.argv[2] if len(sys.argv) > 2 else 'pipe'
-scenario = {'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe', 'freeze-hold': 'pipe'}.get(mode, mode)
+added_outer = mode in ['retry-outer', 'timeout-outer', 'rescue-siblings']
+outer = mode == 'outer' or added_outer
+scenario = {'rescue-siblings': 'timeout', 'retry-outer': 'retry', 'timeout-outer': 'timeout', 'pty': 'success', 'exception': 'success', 'normal': 'success', 'ownership': 'pipe', 'outer': 'json', 'hold': 'pipe', 'resume-second': 'resume', 'missing-state': 'pipe', 'bad-receipt': 'pipe', 'bad-worker': 'pipe', 'freeze-stall': 'pipe', 'freeze-hold': 'pipe'}.get(mode, mode)
 out = Path(sys.argv[1]).resolve()
 out.mkdir(exist_ok=False)
 root = out / 'fixture'
 root.mkdir()
 identities = {}
+unverified = {}
+transitions = []
 receipts = []
 refused = []
 p = foreign = None
@@ -26,9 +34,25 @@ foreign_identity = None
 workers = []
 cli = None
 result = {}
+late_workers = []
+
+class IdentityChanged(RuntimeError):
+    pass
 
 def save(name, value):
     (out / name).write_text(json.dumps(value, indent=2) + '\n')
+
+def stable_python_runtime():
+    framework = sysconfig.get_config_var('PYTHONFRAMEWORK')
+    candidate = Path(sys.executable)
+    if sys.platform == 'darwin' and framework:
+        if not isinstance(framework, str) or framework in ('.', '..') or '/' in framework or '\\' in framework:
+            raise ValueError('PYTHONFRAMEWORK must be a single path component')
+        candidate = Path(sys.base_prefix) / 'Resources/Python.app/Contents/MacOS' / framework
+    candidate = candidate.resolve(strict=True)
+    if not candidate.is_absolute() or not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise ValueError('Terminal Python must be an absolute executable file')
+    return candidate
 
 def table():
     r = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,stat=,command='], capture_output=True, text=True, timeout=8)
@@ -48,28 +72,114 @@ def same(a, b):
 def live(row):
     return not row['state'].startswith('Z')
 
-def remember(rows, parent):
-    owned = {parent}
+def complete(row):
+    return ((row['uid'] == os.getuid() or 'inspectionParent' in row)
+            and bool(row['command']) and not row['command'].startswith(('(', '<')))
+
+def launch_transition(old, row):
+    if any(old[k] != row[k] for k in ['pid', 'uid', 'group', 'start']):
+        return False
+    for owner in root.rglob('terminal-owner.json'):
+        receipt = owner.parent / f"terminal-child-{row['pid']}.json"
+        try:
+            if owner.is_symlink() or receipt.is_symlink():
+                continue
+            nonce = json.loads(owner.read_text())
+            data = json.loads(receipt.read_text())
+            if (not isinstance(nonce, str) or not re.fullmatch('[a-f0-9]{32}', nonce)
+                    or data['nonce'] != nonce or data['parent'] != old['parent']
+                    or any(data[k] != old[k] for k in ['pid', 'uid', 'start'])
+                    or data['commands'] != [old['command'], row['command']]
+                    or not all(nonce in command for command in data['commands'])):
+                continue
+            transitions.append({'original': old, 'identity': row, 'receiptPath': str(receipt), 'receipt': data})
+            save('exec-transitions.json', transitions)
+            return True
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            refused.append({'receiptPath': str(receipt), 'error': repr(error)})
+    return False
+
+def register(row, parent=None):
+    row = dict(row)
+    if row['uid'] != os.getuid():
+        parent = parent or identities.get(row['parent'])
+        if parent and owned_ps(row, parent):
+            row['inspectionParent'] = dict(parent)
+    pid = row['pid']
+    if not complete(row):
+        if unverified.get(pid) != row:
+            refused.append({'observed': row, 'reason': 'Incomplete process identity'})
+        unverified.setdefault(pid, row)
+        raise IdentityChanged('Registration refused incomplete identity')
+    old = identities.get(pid)
+    if old and not same(old, row) and not launch_transition(old, row):
+        refused.append({'expected': old, 'observed': row})
+        unverified.setdefault(pid, row)
+        raise IdentityChanged('Registration refused changed identity')
+    if old is None or not same(old, row):
+        identities[pid] = dict(row)
+    unverified.pop(pid, None)
+    return identities[pid]
+
+def descendants(rows, parent):
+    scope = {parent}
     while True:
-        additions = {r['pid'] for r in rows if r['parent'] in owned}
-        if additions <= owned:
+        additions = {r['pid'] for r in rows if r['parent'] in scope}
+        if additions <= scope:
             break
-        owned |= additions
+        scope |= additions
+    return scope
+
+def remember(rows, parent):
+    scope = descendants(rows, parent)
+    pending = [parent]
+    verified = set()
+    by_pid = {r['pid']: r for r in rows}
+    while pending:
+        pid = pending.pop()
+        row = by_pid.get(pid)
+        if row is None or pid in verified:
+            continue
+        try:
+            record = register(row, by_pid.get(row['parent']) if row['parent'] in verified else None)
+        except IdentityChanged:
+            continue
+        if record:
+            verified.add(pid)
+            pending.extend(r['pid'] for r in rows if r['parent'] == pid)
     for row in rows:
-        if row['pid'] in owned:
-            old = identities.get(row['pid'])
-            if old and (old['uid'] != row['uid'] or old['start'] != row['start']):
-                raise RuntimeError('Observed PID reuse')
-            identities[row['pid']] = row
+        if row['pid'] in scope and row['pid'] not in verified:
+            unverified.setdefault(row['pid'], row)
+    return scope
 
 def current(record):
-    row = next((r for r in table() if r['pid'] == record['pid'] and live(r)), None)
-    if row is None:
-        return None
-    if not same(row, record):
+    saved = identities.get(record['pid'])
+    if saved is None or not same(saved, record):
+        refused.append({'expected': saved, 'observed': record, 'reason': 'Unregistered signal identity'})
+        raise IdentityChanged('Cleanup refused unregistered identity')
+    record = saved
+    if not complete(record):
+        refused.append({'record': record, 'reason': 'Incomplete signal identity'})
+        raise IdentityChanged('Cleanup refused incomplete identity')
+    deadline = time.monotonic() + .5
+    while True:
+        rows = table()
+        row = next((r for r in rows if r['pid'] == record['pid'] and live(r)), None)
+        if row is not None and 'inspectionParent' in record:
+            parent = next((r for r in rows if r['pid'] == record['inspectionParent']['pid']), None)
+            if (parent is None or not same(parent, record['inspectionParent'])
+                    or not owned_ps(row, parent)):
+                raise IdentityChanged('Cleanup refused changed inspection helper')
+        if row is None:
+            return None
+        if same(row, record):
+            unverified.pop(record['pid'], None)
+            return row
         refused.append({'expected': record, 'observed': row})
-        raise RuntimeError('Cleanup refused changed identity')
-    return row
+        unverified.setdefault(record['pid'], row)
+        if time.monotonic() >= deadline:
+            raise IdentityChanged('Cleanup refused changed identity')
+        time.sleep(.02)
 
 def send(record, sig, leader=False, token=None):
     row = current(record)
@@ -84,6 +194,48 @@ def send(record, sig, leader=False, token=None):
     except ProcessLookupError:
         receipts.append({'identity': row, 'alreadyExited': True})
 
+def freeze_tree(record, receipt):
+    captured = descendants(list(identities.values()) + list(unverified.values()), record['pid'])
+    send(record, signal.SIGSTOP)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        row = current(record)
+        if row is None:
+            raise RuntimeError('CLI exited before complete fault inventory')
+        if 'T' not in row['state']:
+            time.sleep(.01)
+            continue
+        rows = table()
+        captured |= remember(rows, record['pid'])
+        unresolved = set()
+        for pid in captured:
+            if any(r['pid'] == pid and pid in identities and same(identities[pid], r) and live(r) and 'T' in r['state'] for r in rows):
+                continue
+            if pid not in identities:
+                unresolved.add(pid)
+                continue
+            try:
+                send(identities[pid], signal.SIGSTOP)
+            except IdentityChanged:
+                unresolved.add(pid)
+        rows = table()
+        expanded = remember(rows, record['pid'])
+        if expanded <= captured and all(not live(r) or (
+                r['pid'] in identities and same(identities[r['pid']], r) and 'T' in r['state']
+                and r['pid'] not in unresolved and r['pid'] not in unverified)
+                for r in rows if r['pid'] in captured):
+            save(receipt, {'cliStopped': True, 'identities': [identities[pid] for pid in captured if pid in identities], 'unverified': [unverified[pid] for pid in captured if pid in unverified], 'stoppedRows': [r for r in rows if r['pid'] in captured]})
+            return
+        captured |= expanded
+    raise TimeoutError('Complete fault inventory did not freeze within 5 seconds')
+
+def remaining_owned(rows):
+    paths = [str(root), str(root.resolve())]
+    entries = [str(wt / 'packages/cli/test/fixtures/dist' / name) for name in ['entry.mjs', 'fake-worker.mjs']]
+    return [r for r in rows if live(r) and (r['pid'] in identities or r['pid'] in unverified or any(r['group'] == w['pgid'] for w in workers)
+            or any(path in r['command'] for path in paths + entries)
+            or any(r['pid'] == w['pid'] and w['token'] in r['command'].split() for w in late_workers))]
+
 try:
     env = {k:v for k,v in os.environ.items() if not any(s in k.upper() for s in ['TOKEN','SECRET','API_KEY','CREDENTIAL','AUTH'])}
     marker = 'pr9-f1-foreign-' + uuid.uuid4().hex
@@ -92,11 +244,14 @@ try:
     foreign_identity = next(r for r in table() if r['pid'] == foreign.pid)
     save('foreign-owned-by-observer.json', foreign_identity)
     args = [sys.executable, str(wt / 'packages/cli/test/terminal-demo.py'), scenario, str(root), node]
-    command = {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':30 if mode == 'outer' else 22 if mode in ['pty', 'resume-second', 'normal', 'exception'] else 20, 'fault':mode, 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest(), 'sourceHashes': {f: hashlib.sha256((wt / f).read_bytes()).hexdigest() for f in ['packages/cli/test/terminal-demo.py', 'packages/cli/test/terminal_fixture.py', 'packages/cli/test/Terminal.test.ts', 'scripts/verify-terminal-cleanup.py', 'scripts/terminal-cleanup-deadline.cjs', 'scripts/verify-terminal-observer.py'] if (wt / f).exists()}, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True)}
-    if mode == 'outer':
+    command = {'args':args, 'cwd':str(wt), 'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=wt,text=True).strip(), 'originalDeadlineSeconds':30 if outer else 22 if mode in ['pty', 'resume-second', 'normal', 'exception'] else 20, 'fault':mode, 'sourceSha256':hashlib.sha256((wt/'packages/cli/test/terminal-demo.py').read_bytes()).hexdigest(), 'sourceHashes': {f: hashlib.sha256((wt / f).read_bytes()).hexdigest() for f in ['packages/cli/test/terminal-demo.py', 'packages/cli/test/terminal_fixture.py', 'packages/cli/test/Terminal.test.ts', 'scripts/verify-terminal-cleanup.py', 'scripts/terminal-cleanup-deadline.cjs', 'scripts/verify-terminal-observer.py'] if (wt / f).exists()}, 'dirty': subprocess.check_output(['git', 'status', '--porcelain'], cwd=wt, text=True)}
+    if outer:
+        env['AGENTRUN_TERMINAL_PYTHON'] = str(stable_python_runtime())
+        command['terminalPython'] = {'requested': sys.executable, 'runtime': env['AGENTRUN_TERMINAL_PYTHON'],
+                                    'basePrefix': sys.base_prefix, 'framework': sysconfig.get_config_var('PYTHONFRAMEWORK')}
         env['NODE_OPTIONS'] = '--require=' + str(wt / 'scripts/terminal-cleanup-deadline.cjs')
         env['AGENTRUN_TEST_EVIDENCE'] = str(root)
-        args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: json']
+        args = [node, str(wt / 'node_modules/vitest/vitest.mjs'), 'run', '--project', 'cli', 'packages/cli/test/Terminal.test.ts', '--maxWorkers=1', '-t', 'real PTY: ' + scenario]
     if mode in ['freeze-stall', 'freeze-hold']:
         driver = out / 'freeze-driver.py'
         driver.write_text("import sys\nfrom pathlib import Path\np = Path(sys.argv[1])\nsys.path.insert(0, str(p.parent))\nsys.dont_write_bytecode = True\nimport terminal_fixture\noriginal = terminal_fixture.table\ndef stalled(timeout=5):\n    rows = original(timeout)\n    for row in rows.values():\n        if 'fake-worker.mjs agentrun-worker-' in row['command'] and row['state'].startswith('T'):\n            row['state'] = 'S'\n    return rows\nterminal_fixture.table = stalled\nsys.argv = sys.argv[1:]\nsource = p.read_text()\nif 'freeze-hold' == 'MODE_PLACEHOLDER': source = source.replace(\"else 'panel-demo'\", \"else 'panel-demo hold'\")\nexec(compile(source, str(p), 'exec'), {'__file__': str(p), '__name__': '__main__'})\n".replace('MODE_PLACEHOLDER', mode))
@@ -110,44 +265,69 @@ try:
     with (out/'driver.stdout').open('wb') as stdout, (out/'driver.stderr').open('wb') as stderr:
         p = subprocess.Popen(args,cwd=wt,env=env,stdout=stdout,stderr=stderr,start_new_session=True)
         save('driver-handle.json', {'pid': p.pid, 'args': p.args})
-        readiness = time.monotonic() + (90 if mode == 'outer' else 18)
+        readiness = time.monotonic() + (90 if outer else 20 + 22 if mode == 'resume-second' else 18)
         while time.monotonic()<readiness:
             rows=table()
             remember(rows,p.pid)
             needle = '/fixtures/dist/entry.mjs resume --retry-failed' if mode == 'resume-second' else '/fixtures/dist/entry.mjs run TASKS.md --load-project-settings'
             candidates=[r for r in rows if r['pid'] in identities and needle in r['command']]
-            if mode == 'outer':
-                roots = list(root.glob('terminal-json-*'))
+            if outer:
+                roots = list(root.glob('terminal-' + scenario + '-*'))
                 fixture = roots[0] if roots else root
             else:
                 fixture = root
             states=list((fixture/'repo/.agentrun/runs').glob('*/state.json'))
-            if candidates and states and all((fixture/f'starts-task{n}').exists() for n in range(3)):
+            if candidates and states and (added_outer or all((fixture/f'starts-task{n}').exists() for n in range(3))):
                 saved=json.loads(states[0].read_text())
                 workers=[{'pgid':x['pgid'],'token':'agentrun-worker-'+x['processToken']} for x in saved['worktrees'].values() if 'pgid' in x and 'processToken' in x]
                 if mode == 'resume-second':
+                    assert saved['status']['task0']['_tag'] == 'succeeded', 'Task 0 did not remain succeeded before resume fault'
                     workers = [w for w in workers if any(r['pid'] == w['pgid'] and live(r) for r in rows)]
-                if len(workers) != (2 if mode == 'resume-second' else 3):
+                if added_outer:
+                    workers = [w for w in workers if any(r['pid'] == w['pgid'] and live(r) and w['token'] in r['command'].split() for r in rows)]
+                if (added_outer and not workers) or (not added_outer and len(workers) != (2 if mode == 'resume-second' else 3)):
                     time.sleep(.05)
                     continue
                 if mode in ['hold', 'freeze-hold'] and not all((fixture / f'child-task{n}').exists() for n in range(3)):
                     time.sleep(.05)
                     continue
-                cli=candidates[0]
+                cli=register(candidates[0])
                 for w in workers:
-                    leader=next((r for r in rows if r['pid']==w['pgid'] and r['group']==w['pgid'] and w['token'] in r['command'].split() and live(r)),None)
+                    leader=next((r for r in rows if r['pid'] in identities and r['pid']==w['pgid'] and r['group']==w['pgid'] and w['token'] in r['command'].split() and live(r)),None)
                     if leader is None:
                         raise RuntimeError('Worker ownership is not proven before fault')
-                    identities[leader['pid']]=leader
+                    leader=register(leader)
+                    if added_outer:
+                        send(leader, signal.SIGSTOP, leader=True, token=w['token'])
+                if added_outer:
+                    assert any(current(identities[w['pgid']]) is not None and current(identities[w['pgid']])['state'].startswith('T') for w in workers), 'Worker fault was not reached'
                 save('state-before-fault.json',saved)
                 save('processes-before-fault.json',list(identities.values()))
+                if mode == 'rescue-siblings':
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        fresh = table()
+                        state = json.loads(states[0].read_text())
+                        late_workers = [dict(pid=w['pgid'], token='agentrun-worker-'+w['processToken']) for w in state['worktrees'].values() if 'pgid' in w and 'processToken' in w]
+                        if len(late_workers) == 3 and all(any(r['pid'] == w['pid'] and live(r) and w['token'] in r['command'].split() for r in fresh) for w in late_workers):
+                            break
+                        time.sleep(.01)
+                    else:
+                        raise RuntimeError('Sibling startup precondition was not reached')
+                    save('late-workers.json', late_workers)
                 if mode != 'normal':
                     send(cli,signal.SIGSTOP)
                     save('fault-receipt.json',receipts[-1])
-                if mode == 'outer':
-                    driver = next(r for r in rows if r['pid'] == cli['parent'])
+                    freeze_tree(cli, 'complete-fault-inventory.json')
+                if outer:
+                    driver = identities[cli['parent']]
                     send(driver, signal.SIGSTOP)
                     save('stopped-python.json', driver)
+                    if added_outer:
+                        assert scenario in (fixture / 'repo/TASKS.md').read_text() or scenario == 'timeout' and 'deadline-active' in (fixture / 'repo/TASKS.md').read_text()
+                        assert current(driver)['state'].startswith('T'), 'Python fault was not reached'
+                        save('fault-precondition.json', {'scenario': scenario, 'workers': workers, 'cli': cli, 'python': driver, 'saved': saved})
+                        fault_at = time.monotonic()
                 if mode == 'exception':
                     send(identities[p.pid], signal.SIGTERM)
                 if mode == 'bad-worker':
@@ -173,21 +353,37 @@ try:
         else:
             raise TimeoutError('Fault readiness not reached; original driver remains unmodified')
         try:
-            code=p.wait(timeout=85)
+            if added_outer:
+                end = time.monotonic() + 85
+                released = False
+                while p.poll() is None and time.monotonic() < end:
+                    if not released and time.monotonic() - fault_at > 32:
+                        if current(driver) is not None:
+                            send(driver, signal.SIGKILL)
+                            save('forced-python-death.json', receipts[-1])
+                        released = True
+                    time.sleep(.1)
+                code = p.wait(timeout=1)
+            else:
+                code=p.wait(timeout=85)
         except subprocess.TimeoutExpired:
             raise TimeoutError('Observer deadline reached; not a successful driver-deadline reproduction')
     rows=table()
-    remaining=[r for r in rows if live(r) and (r['pid'] in identities or any(r['group']==w['pgid'] for w in workers))]
+    remaining=remaining_owned(rows)
     err=(out/'driver.stderr').read_text()
-    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if mode == 'outer' else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'cli':cli,'workers':workers,'foreignStillAlive':current(foreign_identity) is not None,'rescuePerformedBeforeObservation':False, 'mode':mode}
+    result={'driverExit':code,'elapsedSeconds':time.monotonic()-start,'expectedFailure': 'normal exit' if mode == 'normal' else 'outer 30-second timeout' if outer else 'PTY 22-second timeout' if mode in ['pty', 'resume-second'] else 'injected exception' if mode == 'exception' else '20-second timeout','deadlineObserved':'subprocess.TimeoutExpired' in err and '20 seconds' in err,'liveBeforeRescue':remaining,'unrecordedScopedBeforeRescue':[r for r in remaining if r['pid'] not in identities],'cli':cli,'workers':workers,'foreignStillAlive':foreign.poll() is None,'rescuePerformedBeforeObservation':False, 'mode':mode}
+    if outer:
+        deadline = json.loads((root / 'outer-deadline.json').read_text())
+        result['outerDeadline'] = deadline
+        result['deadlineObserved'] = deadline['timeout'] == 30000 and deadline['error'] == 'ETIMEDOUT'
     save('result.json',result)
     if mode in ['pipe', 'resume', 'json', 'hold', 'missing-state', 'bad-receipt', 'bad-worker', 'freeze-stall', 'freeze-hold']:
         assert code == 1 and result['deadlineObserved'], 'Original deadline did not produce the expected failure'
     elif mode in ['pty', 'resume-second']:
         assert code == 1 and 'PTY demo exceeded 22 seconds' in err, err
-    elif mode == 'outer':
+    elif outer:
         deadline = json.loads((root / 'outer-deadline.json').read_text())
-        assert code != 0 and deadline['timeout'] == 30000 and deadline['error'] == 'ETIMEDOUT' and deadline['signal'] == 'SIGKILL', deadline
+        assert code != 0 and deadline['timeout'] == 30000 and deadline['error'] == 'ETIMEDOUT' and deadline['signal'] in (['SIGKILL', 'SIGTERM'] if added_outer else ['SIGKILL']), deadline
     elif mode == 'normal':
         assert code == 0, err
         assert not json.loads((root / 'terminal-cleanup.json').read_text())['signals'], 'Normal exit required fixture rescue'
@@ -195,9 +391,13 @@ try:
         assert code != 0 and 'refused' in err.lower(), err
     else:
         assert code != 0, 'Injected failure did not fail the driver'
-    assert not remaining, f'Owned resources survived driver cleanup: {remaining}'
+    if mode == 'rescue-siblings':
+        assert remaining, 'The original unhooked test must leave work for observer rescue'
+    else:
+        assert not remaining, f'Owned resources survived driver cleanup: {remaining}'
     assert result['foreignStillAlive'], 'Foreign sentinel unexpectedly stopped'
-    print(f'PASS {mode}: zero owned resources before rescue; foreign preserved', flush=True)
+    if mode != 'rescue-siblings':
+        print(f'PASS {mode}: zero owned resources before rescue; foreign preserved', flush=True)
 finally:
     errors=[]
     def reap(child):
@@ -208,37 +408,48 @@ finally:
             child.wait(timeout=5)
         except Exception as error:
             errors.append(repr(error))
-    if p is not None:
+    def attempt(action, *args, **kwargs):
         try:
-            rows=table()
-            remember(rows,p.pid)
-            if cli:
-                send(cli,signal.SIGKILL)
-            for w in workers:
-                leader=identities.get(w['pgid'])
-                if leader:
-                    send(leader,signal.SIGKILL,leader=True,token=w['token'])
-            for record in list(identities.values()):
-                if record['pid']==p.pid:
-                    continue
-                send(record,signal.SIGKILL)
-            if p.poll() is None:
-                record=identities.get(p.pid)
-                if record:
-                    send(record,signal.SIGKILL)
-            p.wait(timeout=5)
+            return action(*args, **kwargs)
         except Exception as error:
             errors.append(repr(error))
-        finally:
-            reap(p)
+
+    if p is not None:
+        def discover():
+            remember(table(), p.pid)
+
+        def freeze_cli():
+            if current(cli) is not None:
+                freeze_tree(cli, 'complete-rescue-inventory.json')
+
+        attempt(discover)
+        if cli:
+            attempt(freeze_cli)
+        for record in list(identities.values()):
+            if 'inspectionParent' in record:
+                attempt(send, record, signal.SIGKILL)
+        if cli:
+            attempt(send, cli, signal.SIGKILL)
+        for w in workers:
+            leader = identities.get(w['pgid'])
+            if leader:
+                attempt(send, leader, signal.SIGKILL, leader=True, token=w['token'])
+        for _ in range(2):
+            for record in list(identities.values()):
+                if record['pid'] != p.pid:
+                    attempt(send, record, signal.SIGKILL)
+        if p.poll() is None:
+            record = identities.get(p.pid)
+            if record:
+                attempt(send, record, signal.SIGKILL)
+        attempt(p.wait, timeout=5)
+        reap(p)
     if foreign is not None:
         try:
-            alive_before = foreign.poll() is None if foreign_identity is None else current(foreign_identity) is not None
+            alive_before = foreign.poll() is None
             save('foreign-preserved-through-rescue.json',{'alive':alive_before,'identity':foreign_identity})
             if not alive_before:
                 raise RuntimeError('Foreign sentinel was not preserved through rescue')
-            if foreign_identity is not None:
-                send(foreign_identity,signal.SIGKILL)
         except Exception as error:
             errors.append(repr(error))
         finally:
@@ -248,10 +459,10 @@ finally:
     remaining = None
     try:
         rows = table()
-        remaining = [r for r in rows if live(r) and (r['pid'] in identities or any(r['group'] == w['pgid'] for w in workers) or (foreign is not None and r['pid'] == foreign.pid))]
+        remaining = remaining_owned(rows) + [r for r in rows if live(r) and foreign is not None and r['pid'] == foreign.pid]
     except Exception as error:
         errors.append(repr(error))
-    save('cleanup.json', {'signals': receipts, 'refused': refused, 'errors': errors, 'remaining': remaining, 'processInspectionSucceeded': remaining is not None, 'identities': list(identities.values()), 'foreignPid': foreign.pid if foreign else None})
+    save('cleanup.json', {'signals': receipts, 'refused': refused, 'errors': errors, 'remaining': remaining, 'processInspectionSucceeded': remaining is not None, 'identities': list(identities.values()), 'unverified': list(unverified.values()), 'transitions': transitions, 'foreignPid': foreign.pid if foreign else None})
     save('processes-after.json', [r for r in rows if r['pid'] in identities or (foreign is not None and r['pid'] == foreign.pid)])
     if errors or remaining is None or remaining:
         raise RuntimeError('Cleanup incomplete; inspect cleanup.json')

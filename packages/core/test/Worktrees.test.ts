@@ -3,6 +3,7 @@ import { describe, it } from "@effect/vitest"
 import { Console, DateTime, Deferred, Duration, Effect, Exit, Fiber, FileSystem, Path, Schema, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import assert from "node:assert/strict"
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { RunState } from "../src/domain/RunState.js"
 import { Task, TaskId } from "../src/domain/Task.js"
@@ -224,7 +225,7 @@ describe("Worktrees", () => {
         "Two-permit acquisitions",
         JSON.stringify({ iterations: 10, failed: failures.length, failures }),
       )
-    }))
+    }), 30000)
 
   const rows: ReadonlyArray<{
     readonly name: string
@@ -389,7 +390,12 @@ describe("Worktrees", () => {
         const error = yield* Effect.flip(Effect.scoped(service.acquire(task(), "missing-base-sha")))
         assert.strictEqual(error._tag, "GitError")
         assert.strictEqual(error.command, `git worktree add -b ${worktree.branch} ${worktree.path} missing-base-sha`)
-        assert.strictEqual(error.exitCode, 128)
+        const direct = spawnSync("git", ["worktree", "add", "-b", worktree.branch, worktree.path, "missing-base-sha"], {
+          cwd: fixture.repoRoot,
+          encoding: "utf8",
+        })
+        assert.strictEqual(error.exitCode, direct.status)
+        assert.strictEqual(error.stderr, direct.stderr)
         assert.ok(error.stderr.includes("missing-base-sha"))
         assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
       })

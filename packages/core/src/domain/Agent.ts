@@ -6,6 +6,7 @@ export interface AgentInput {
   readonly taskId?: TaskId
   readonly loadProjectSettings?: boolean
   readonly setup?: string
+  readonly setupCompleted?: () => Effect.Effect<void, AgentError>
   readonly workerProcessGroup?: boolean
   readonly registerProcess?: (pgid: number, token: string) => Effect.Effect<void, AgentError>
   readonly prompt: string

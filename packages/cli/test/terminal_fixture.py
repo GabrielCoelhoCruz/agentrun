@@ -8,6 +8,8 @@ import sys
 import time
 import uuid
 
+from terminal_inspection import owned_ps
+
 
 def write(path, value):
     temporary = path.with_suffix('.tmp')
@@ -17,16 +19,16 @@ def write(path, value):
 
 def table(timeout=5):
     result = subprocess.run(
-        ['ps', '-ww', '-axo', 'pid=,ppid=,uid=,lstart=,stat=,command='],
+        ['ps', '-ww', '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,stat=,command='],
         capture_output=True, text=True, check=True, timeout=timeout,
     )
     rows = {}
     for line in result.stdout.splitlines():
-        fields = line.split(None, 9)
-        if len(fields) != 10:
+        fields = line.split(None, 10)
+        if len(fields) != 11:
             raise RuntimeError('Process inspection returned an invalid row')
-        rows[int(fields[0])] = dict(pid=int(fields[0]), parent=int(fields[1]), uid=int(fields[2]),
-                                   start=' '.join(fields[3:8]), state=fields[8], command=fields[9])
+        rows[int(fields[0])] = dict(pid=int(fields[0]), parent=int(fields[1]), group=int(fields[2]), uid=int(fields[3]),
+                                   start=' '.join(fields[4:9]), state=fields[9], command=fields[10])
     return rows
 
 
@@ -35,7 +37,8 @@ def alive(row):
 
 
 def matches(record, row):
-    return (row['uid'] == os.getuid() == record['uid'] and row['start'] == record['start']
+    return (row['uid'] == record['uid'] and (row['uid'] == os.getuid() or 'inspectionParent' in record)
+            and row['group'] == record['group'] and row['start'] == record['start']
             and row['pid'] == record['pid'] and row['command'] in record['commands'])
 
 
@@ -67,7 +70,8 @@ def close(root, nonce):
         if 'workerToken' in authority:
             return f"agentrun-worker-{authority['workerToken']}" in row['command'].split()
         parent = authority['parent']
-        return row['parent'] == parent['pid'] and owned(parent, rows)
+        return (row['parent'] == parent['pid'] and owned(parent, rows)
+                and ('inspectionParent' not in record or owned_ps(row, rows[parent['pid']])))
 
     def current(record):
         rows = inspect()
@@ -88,6 +92,12 @@ def close(root, nonce):
 
     def remember(row, authority):
         record = dict(row, commands=[row['command']], authority=authority, nonce=nonce)
+        if row['uid'] != os.getuid():
+            parent = authority.get('parent') if isinstance(authority, dict) else None
+            parent_row = inspect().get(parent['pid']) if parent else None
+            if not parent or not owned(parent, inspect()) or not owned_ps(row, parent_row):
+                raise RuntimeError('Unverified inspection helper; cleanup refused')
+            record['inspectionParent'] = dict(parent_row)
         old = records.get(row['pid'])
         if old is not None and not matches(old, row):
             raise RuntimeError('Observed process reuse; cleanup refused')
@@ -167,7 +177,8 @@ def close(root, nonce):
     try:
         attempt(discover)
         phase_deadline = deadline
-        for record in reversed(list(records.values())):
+        ordered = list(records.values())
+        for record in [r for r in ordered if 'inspectionParent' in r] + [r for r in reversed(ordered) if 'inspectionParent' not in r]:
             attempt(lambda: send(record, signal.SIGKILL))
         while True:
             rows = inspect()

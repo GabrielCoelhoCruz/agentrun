@@ -27,7 +27,11 @@ export class GitError extends Schema.TaggedError<GitError>()("GitError", {
 export class AgentSpawnError extends Schema.TaggedError<AgentSpawnError>()("AgentSpawnError", {
   agent: AgentId,
   cause: Schema.Defect(),
+  retryable: Schema.optional(Schema.Boolean),
 }) {}
+
+export const retryableSpawnError = (error: AgentSpawnError): boolean =>
+  error.retryable !== false && !(typeof error.cause === "object" && error.cause !== null && "_tag" in error.cause)
 
 export class AgentCrashed extends Schema.TaggedError<AgentCrashed>()("AgentCrashed", {
   agent: AgentId,

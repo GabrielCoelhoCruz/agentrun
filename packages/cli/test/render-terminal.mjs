@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 const root = resolve(process.argv[2])
 const cases = []
-for (const scenario of ["success", "failed", "interrupted", "resize", "resume", "pipe"]) {
+for (const scenario of ["success", "failed", "interrupted", "resize", "resume", "pipe", "retry", "timeout"]) {
   const candidate = readdirSync(root).filter((name) => name.startsWith(`terminal-${scenario}-`))
     .filter((name) => {
       try {
@@ -16,10 +16,15 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
   const dir = join(root, candidate)
   const result = JSON.parse(readFileSync(join(dir, "result.json"), "utf8"))
   const raw = readFileSync(join(dir, "capture.ansi"))
-  if (scenario === "success") {
+  if (scenario === "success" || scenario === "retry") {
     const frame = result.frames.find((frame) => frame.name === "running")
     if (!frame) throw new Error("Missing live snapshot")
-    cases.push({ name: "running", columns: 80, rows: 24, chunks: [{ text: raw.subarray(0, frame.bytes).toString() }] })
+    cases.push({
+      name: scenario === "retry" ? "retry-backoff" : "running",
+      columns: 80,
+      rows: 24,
+      chunks: [{ text: raw.subarray(0, frame.bytes).toString() }],
+    })
   }
   if (scenario === "resume") {
     const initial = raw.toString().split("\x1b[H")[1]

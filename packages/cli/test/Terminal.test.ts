@@ -1,17 +1,27 @@
 import { spawnSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { mkdtempSync, readFileSync } from "node:fs"
+import { accessSync, constants, mkdtempSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { expect, onTestFinished, test } from "vitest"
+
+const python = process.env.AGENTRUN_TERMINAL_PYTHON ?? "python3"
+if (process.env.AGENTRUN_TERMINAL_PYTHON !== undefined) {
+  try {
+    if (!isAbsolute(python) || !statSync(python).isFile()) throw new Error("Expected an absolute file")
+    accessSync(python, constants.X_OK)
+  } catch (cause) {
+    throw new Error("AGENTRUN_TERMINAL_PYTHON must name an absolute executable file", { cause })
+  }
+}
 
 for (const scenario of ["success", "failed", "interrupted", "resize", "resume", "json", "pipe"]) {
   test(`real PTY: ${scenario} preserves output and exit semantics`, () => {
     const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
     const nonce = randomUUID().replaceAll("-", "")
     onTestFinished(() => {
-      const cleanup = spawnSync("python3", [
+      const cleanup = spawnSync(python, [
         fileURLToPath(new URL("./terminal_fixture.py", import.meta.url)),
         "close",
         root,
@@ -19,7 +29,7 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
       ], { encoding: "utf8", timeout: 55000 })
       expect(cleanup.status, cleanup.stderr).toBe(0)
     }, 60000)
-    const result = spawnSync("python3", [
+    const result = spawnSync(python, [
       fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
       scenario,
       root,
@@ -63,5 +73,49 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
       )
       if (scenario === "resume") expect(output).toContain("saved failure")
     }
+  }, 35000)
+}
+
+for (const scenario of ["retry", "timeout"]) {
+  test(`real PTY: ${scenario} renders runner retries and timeout failures`, () => {
+    const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
+    const nonce = randomUUID().replaceAll("-", "")
+    onTestFinished(() => {
+      const cleanup = spawnSync(python, [
+        fileURLToPath(new URL("./terminal_fixture.py", import.meta.url)),
+        "close",
+        root,
+        nonce,
+      ], { encoding: "utf8", timeout: 55000 })
+      expect(cleanup.status, cleanup.stderr).toBe(0)
+    }, 60000)
+    const result = spawnSync(python, [
+      fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
+      scenario,
+      root,
+      process.execPath,
+    ], {
+      encoding: "utf8",
+      timeout: 30000,
+      killSignal: "SIGKILL",
+      env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce },
+    })
+    expect(result.status, result.stderr).toBe(0)
+    const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
+    const output = readFileSync(join(root, "capture.ansi"), "utf8")
+    expect(saved.exitCode).toBe(scenario === "retry" ? 0 : 1)
+    expect(output).toContain(scenario === "retry" ? "Runner retry 2" : "AgentTimedOut")
+    expect(output).toContain("\x1b[?25h")
+    expect(Object.values(saved.savedStatus).map((s) => (s as { _tag: string })._tag)).toEqual(
+      Array(3).fill(scenario === "retry" ? "succeeded" : "failed"),
+    )
+    for (let n = 0; n < 3; n++) {
+      const starts = readFileSync(join(root, `starts-task${n}`), "utf8").trim().split("\n")
+      expect(starts).toHaveLength(scenario === "retry" ? 3 : 1)
+      if (scenario === "timeout") {
+        expect(saved.savedStatus[`task${n}`].reason).toMatch(/^AgentTimedOut:/)
+      }
+    }
+    if (scenario === "timeout") expect(output).toContain("alive")
   }, 35000)
 }
