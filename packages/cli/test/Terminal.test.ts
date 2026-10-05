@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { accessSync, constants, mkdtempSync, readFileSync, statSync } from "node:fs"
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -119,3 +119,77 @@ for (const scenario of ["retry", "timeout"]) {
     if (scenario === "timeout") expect(output).toContain("alive")
   }, 35000)
 }
+
+const processTable = () =>
+  spawnSync("ps", ["-ww", "-axo", "pid=,ppid=,lstart=,stat=,command="], { encoding: "utf8" }).stdout
+    .split("\n").filter((line) => line.trim() !== "").map((line) => {
+      const fields = line.trim().split(/\s+/)
+      return {
+        pid: Number(fields[0]),
+        parent: Number(fields[1]),
+        start: fields.slice(2, 7).join(" "),
+        zombie: (fields[7] ?? "").startsWith("Z"),
+        command: fields.slice(8).join(" "),
+      }
+    })
+
+test("fixture cleanup removes the whole tree after the driver is killed while ps fails", async () => {
+  const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), "terminal-killed-driver-"))
+  const nonce = randomUUID().replaceAll("-", "")
+  const fixture = fileURLToPath(new URL("./terminal_fixture.py", import.meta.url))
+  const driver = spawn(python, [
+    fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
+    "timeout",
+    root,
+    process.execPath,
+  ], { stdio: "ignore", env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce } })
+  onTestFinished(() => {
+    driver.kill("SIGKILL")
+    const cleanup = spawnSync(python, [fixture, "close", root, nonce], { encoding: "utf8", timeout: 55000 })
+    expect(cleanup.status, cleanup.stderr).toBe(0)
+  }, 60000)
+
+  const deadline = Date.now() + 25000
+  while (!existsSync(join(root, "starts-task2"))) {
+    if (driver.exitCode !== null || Date.now() > deadline) throw new Error("The workers did not start")
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  const tree = new Map<number, ReturnType<typeof processTable>[number]>()
+  const collect = () => {
+    const rows = processTable()
+    for (const row of rows) {
+      if (row.command.includes(nonce) || row.command.includes(root) || tree.has(row.parent)) tree.set(row.pid, row)
+    }
+  }
+  collect()
+  driver.kill("SIGKILL")
+  await new Promise((resolve) => driver.once("exit", resolve))
+  collect()
+  expect(tree.size).toBeGreaterThan(3)
+
+  // `ps` fails on every second call, as it does when the host is overloaded.
+  const shim = mkdtempSync(join(tmpdir(), "flaky-ps-"))
+  writeFileSync(
+    join(shim, "ps"),
+    [
+      "#!/bin/bash",
+      `n=$(( $(cat ${shim}/count 2>/dev/null || echo 0) + 1 ))`,
+      `echo $n > ${shim}/count`,
+      "if [ $((n % 2)) -eq 0 ]; then echo 'ps: simulated failure' >&2; exit 1; fi",
+      "exec /bin/ps \"$@\"",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  )
+  const cleanup = spawnSync(python, [fixture, "close", root, nonce], {
+    encoding: "utf8",
+    timeout: 55000,
+    env: { ...process.env, PATH: `${shim}:${process.env.PATH}` },
+  })
+  const survivors = processTable().filter((row) => {
+    const before = tree.get(row.pid)
+    return before !== undefined && before.start === row.start && !row.zombie
+  })
+  expect(survivors.map((row) => `${row.pid} ${row.command}`)).toEqual([])
+  expect(cleanup.status, cleanup.stderr).toBe(0)
+}, 60000)
