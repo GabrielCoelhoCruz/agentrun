@@ -10,14 +10,24 @@ The demo uses explicit test adapters. It does not call a paid provider.
 
 Use Node.js 24 and Git on macOS or Linux. Repository locks require `/usr/bin/lockf` on macOS or `flock` on Linux. Configure provider authentication with the provider's own tools before running tasks. `agentrun doctor` checks the runtime, lock utility, and both provider accounts.
 
-Version 0.1.0 is a release candidate. npm publication and namespace ownership are pending. The candidate package names are `agentrun` and `@agentrun/core`. To install the prepared local tarballs together:
+Version 0.1.0 is intentionally unpublished on npm. npm publication is outside the current plan. The package names are `agentrun` and `@agentrun/core`. Install both reviewed local tarballs together:
 
 ```sh
 npm install ./agentrun-core-0.1.0.tgz ./agentrun-0.1.0.tgz
 npx --no-install agentrun doctor
 ```
 
-This command assumes the two reviewed tarballs are in the current directory. Do not use an npm registry install until publication is confirmed.
+These commands assume that both reviewed tarballs are in the current directory. Keep the installation directory to reuse its `node_modules/.bin/agentrun` executable. Registry installation is not available for this version.
+
+To run from a reviewed source checkout, use Node.js 24 and pnpm 10.29.3. Run these commands from the repository root:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm build
+node packages/cli/dist/bin.mjs doctor
+```
+
+Use `node packages/cli/dist/bin.mjs` instead of `agentrun` for the commands below. From another repository, use the absolute path to that built file.
 
 ## Run a task
 
