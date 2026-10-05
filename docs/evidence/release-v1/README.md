@@ -4,6 +4,10 @@ Candidate packages: `@agentrun/core` and `agentrun`, both version 0.1.0. They ar
 
 Verified implementation commit: `06ebdf9b9bea8f48f2da53226fce4c42dfaf00d7`, on branch `chore/release-preparation`. [candidate.json](candidate.json) records the source hashes before that commit. It separates the checked source, the paid-run source, and later documentation changes. Linux CI must verify the committed candidate.
 
+## Scope after the rebase
+
+On 2026-10-05 this branch was rebased onto `main` at `4fb5665`, the squash merge of PR #11. Thirteen package source files changed between the verified candidate and that merge, in process ownership and cleanup. The checks, tarball hashes and real provider run below describe the earlier candidate, not the rebased commit. Before `npm publish`, pack both packages again on the exact publish commit and rerun the installed consumer check.
+
 ## Checks and installed packages
 
 Lint, typecheck, 234 tests in 11 files, both builds, and three driver safety checks passed. Tests used one worker and took 467.12 seconds. The prior exact starting HEAD also passed Linux CI. This candidate has local macOS verification; it does not yet have its own Linux CI result.
