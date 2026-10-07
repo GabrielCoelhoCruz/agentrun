@@ -61,7 +61,12 @@ export function query({ prompt, options }) {
         if (mode === 'crash-tools') process.kill(Number(process.env.FACTORY_FIXTURE_COORDINATOR), 'SIGKILL');
         await new Promise(() => {});
       }
-      const firstIncorrect = mode === 'correct' && task.stage === 'implement';
+      const firstIncorrect = ['correct', 'hang-correct'].includes(mode) && task.stage === 'implement';
+      if (mode === 'hang-correct' && task.stage === 'correct' && !prior.some((r) => r.stage === 'correct')) {
+        writeFileSync(join(options.cwd, 'partial.txt'), 'partial correction effect\\n');
+        setInterval(() => record({ kind: 'heartbeat', pid: process.pid, at: Date.now() }), 100);
+        await new Promise(() => {});
+      }
       if (!['no-change', 'wrong-output'].includes(mode)) {
         if (firstIncorrect || mode === 'correction-limit') {
           writeFileSync(join(options.cwd, 'attempt.txt'), task.attemptId + '\\n');

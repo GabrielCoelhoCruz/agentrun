@@ -10,6 +10,14 @@ DatabaseSync.prototype.prepare = function(sql) {
   if (!/INSERT INTO facts/i.test(sql)) return statement
   const run = statement.run.bind(statement)
   statement.run = (...args) => {
+    if (
+      process.env.FACTORY_FIXTURE_CRASH === "HumanDeciding"
+      && !existsSync(process.env.FACTORY_FIXTURE_CRASH_MARKER)
+      && args.some((arg) => typeof arg === "string" && arg.includes('"_tag":"HumanDecided"'))
+    ) {
+      writeFileSync(process.env.FACTORY_FIXTURE_CRASH_MARKER, String(process.pid))
+      process.kill(process.pid, "SIGKILL")
+    }
     const result = run(...args)
     const tag = process.env.FACTORY_FIXTURE_CRASH
     if (tag === undefined || existsSync(process.env.FACTORY_FIXTURE_CRASH_MARKER)) return result

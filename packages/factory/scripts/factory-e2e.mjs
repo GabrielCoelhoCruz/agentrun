@@ -74,6 +74,7 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
       executable,
       argv,
       cwd: repo,
+      extraEnv: extra,
       code: result.status,
       signal: result.signal,
       stdout: result.stdout,
@@ -115,6 +116,7 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
           executable: process.execPath,
           argv: [cli, ...args, "--json"],
           cwd: repo,
+          extraEnv: extra,
           pid: child.pid,
           code,
           signal,
@@ -222,6 +224,54 @@ const activeCheck = (context) => {
 const assertExited = (pid) => {
   const probe = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" })
   assert.ok(probe.status === 1 || probe.stdout.trim().startsWith("Z"), `owned process ${pid} remains`)
+}
+const processRow = (pid) => {
+  const result = spawnSync("ps", ["-o", "pid=,ppid=,pgid=,stat=,command=", "-ww", "-p", String(pid)], {
+    encoding: "utf8",
+  })
+  assert.ok(result.status === 0 || result.status === 1, result.stderr)
+  const fields = result.stdout.trim().split(/\s+/)
+  return result.stdout.trim() === "" || fields[3].startsWith("Z") ? undefined : {
+    pid: Number(fields[0]),
+    parent: Number(fields[1]),
+    group: Number(fields[2]),
+    command: fields.slice(4).join(" "),
+  }
+}
+const note = (c, name, value) => writeFileSync(join(c.directory, `${name}.json`), JSON.stringify(value, null, 2))
+const holdGitLock = async (c) => {
+  const guard = join(c.home, ".agentrun/locks", `${hash(realpathSync(join(c.repo, ".git"))).slice(0, 12)}.lock.reclaim`)
+  assert.ok(existsSync(guard))
+  const argv = process.platform === "darwin" ? ["-k", guard] : [guard]
+  argv.push("/bin/sh", "-c", "echo locked; read line")
+  const child = spawn(process.platform === "darwin" ? "/usr/bin/lockf" : "flock", argv, {
+    stdio: ["pipe", "pipe", "pipe"],
+  })
+  let output = ""
+  child.stdout.on("data", (data) => { output += String(data) })
+  const ended = new Promise((done) => child.once("exit", done))
+  try {
+    await waitFor(() => output.includes("locked"), "executor Git lock")
+  } catch (error) {
+    child.stdin.end()
+    throw error
+  }
+  note(c, "lock-owner", { pid: child.pid, argv, guard })
+  return async () => { child.stdin.end(); await ended }
+}
+const copyRuntime = (c, name) => {
+  const resolved = spawnSync(process.execPath, ["--input-type=module", "-e", "console.log(import.meta.resolve('agentrun'))"], {
+    cwd: dirname(realpathSync(cli)), encoding: "utf8",
+  })
+  assert.equal(resolved.status, 0, resolved.stderr)
+  const original = dirname(dirname(fileURLToPath(resolved.stdout.trim())))
+  const runtime = join(c.directory, name)
+  mkdirSync(runtime)
+  cpSync(join(original, "dist"), join(runtime, "dist"), { recursive: true })
+  cpSync(join(original, "package.json"), join(runtime, "package.json"))
+  symlinkSync(existsSync(join(original, "node_modules/@agentrun/core"))
+    ? join(original, "node_modules") : dirname(original), join(runtime, "node_modules"), "dir")
+  return runtime
 }
 const scenario = async (name, run) => {
   if (
@@ -653,6 +703,152 @@ try {
     assert.equal(c.records().length, 0)
     assert.equal(c.events().length, before)
   })
+  for (const entry of ["resume", "start"]) {
+    await scenario(`relocated-executor-${entry}`, async () => {
+      const c = setup(`relocated-executor-${entry}`)
+      const original = copyRuntime(c, "runtime-original")
+      const relocated = copyRuntime(c, "runtime-relocated")
+      c.env.FACTORY_FIXTURE_EXECUTOR_INDEX = pathToFileURL(join(original, "dist/index.mjs")).href
+      assert.equal((await c.startAsync({ FACTORY_FIXTURE_CRASH: "AttemptPrepared" }).completed).signal, "SIGKILL")
+      const bin = join(original, "dist/bin.mjs")
+      const marker = join(c.directory, "changed-executor-ran")
+      const bytes = readFileSync(bin)
+      writeFileSync(bin, Buffer.concat([bytes, Buffer.from(
+        `\nimport { writeFileSync as markRelocation } from 'node:fs'; markRelocation(${JSON.stringify(marker)}, 'executed');\n`,
+      )]))
+      c.env.FACTORY_FIXTURE_EXECUTOR_INDEX = pathToFileURL(join(relocated, "dist/index.mjs")).href
+      note(c, "runtime-binding", { savedBin: bin, currentBin: join(relocated, "dist/bin.mjs"),
+        original: hash(bytes), current: hash(readFileSync(join(relocated, "dist/bin.mjs"))), changed: hash(readFileSync(bin)) })
+      const before = c.events().length
+      const result = entry === "resume"
+        ? c.run(process.execPath, [cli, "resume", c.id, "--json"])
+        : await c.startAsync().completed
+      note(c, "relocation-result", { code: result.code, marker: existsSync(marker), providers: c.records(), events: c.events() })
+      assert.equal(existsSync(marker), false, "changed saved executor ran despite unchanged current pin")
+      assert.equal(result.code, 1, result.stderr)
+      assert.equal(c.events().length, before)
+      assert.equal(c.records().length, 0)
+    })
+  }
+  for (const mode of ["fault", "approval"]) {
+    for (const entry of ["resume", "start", "decision"]) {
+      await scenario(`reject-crash-${mode}-${entry}`, async () => {
+        const c = setup(`reject-crash-${mode}-${entry}`)
+        let release
+        let request
+        try {
+          if (mode === "fault") {
+            assert.equal((await c.startAsync({ FACTORY_FIXTURE_CRASH: "AgentRecorded" }).completed).signal, "SIGKILL")
+            release = await holdGitLock(c)
+            request = c.command(["resume", c.id], 1)
+            assert.match(request.blocker, /resources are active/i)
+          } else request = c.start()
+          const result = c.run(process.execPath, [cli, ...decisionArgs(c, request, "reject"), "--json"], {
+            FACTORY_FIXTURE_CRASH: "HumanDecided", FACTORY_FIXTURE_CRASH_MARKER: join(c.directory, "reject-crashed"),
+          })
+          assert.equal(result.signal, "SIGKILL", result.stderr)
+        } finally {
+          if (release !== undefined) await release()
+        }
+        assert.equal(c.status().decision.action, "reject")
+        const facts = c.events().length
+        const providers = c.records().length
+        if (entry === "resume") c.run(process.execPath, [cli, "resume", c.id, "--json"])
+        if (entry === "start") await c.startAsync().completed
+        if (entry === "decision") c.run(process.execPath, [cli, ...decisionArgs(c, request, "reject"), "--json"])
+        note(c, "after-restart", { status: c.status(), facts: c.events().slice(facts), providers: c.records() })
+        assert.equal(c.status().decision?.action, "reject")
+        assert.equal(c.status().stage, "cancelled")
+        for (let repeat = 0; repeat < 2; repeat++) {
+          c.run(process.execPath, [cli, "resume", c.id, "--json"])
+          await c.startAsync().completed
+          c.run(process.execPath, [cli, ...decisionArgs(c, request, "reject"), "--json"])
+          c.command(decisionArgs(c, request, "approve"), 1)
+          c.command(decisionArgs(c, request, "correct"), 1)
+          c.command(["export", c.id], 1)
+        }
+        assert.equal(c.status().decision.action, "reject")
+        assert.equal(c.records().length, providers)
+        assert.equal(c.events().slice(facts).some((e) => ["AttemptPrepared", "DispatchReleased", "RecoveryStarted"].includes(e.fact._tag)), false)
+      })
+    }
+  }
+  for (const boundary of ["normal", "unknown-token", "foreign-token", "HumanDeciding", "HumanDecided"]) {
+    await scenario(`correct-executor-crash-${boundary}`, async () => {
+      const c = setup(`correct-executor-crash-${boundary}`, "hang-correct")
+      const running = c.startAsync()
+      let worker
+      let token
+      try {
+        worker = await waitFor(() => c.records().find((r) => r.kind === "heartbeat"), "first correction heartbeat", 90000)
+        const attempt = c.events().filter((e) => e.fact._tag === "AttemptPrepared").at(-1).fact.attempt
+        assert.equal(attempt.kind, "correct")
+        const file = join(c.repo, ".agentrun/runs", attempt.executorRunId, "state.json")
+        const bytes = readFileSync(file, "utf8")
+        const saved = JSON.parse(bytes)
+        const owned = saved.worktrees[attempt.taskId]
+        token = owned.processToken
+        const row = processRow(worker.pid)
+        assert.equal(row.group, owned.pgid)
+        assert.ok(row.command.split(/\s+/).includes(`agentrun-worker-${token}`))
+        const parent = processRow(row.parent)
+        assert.ok(parent.command.includes(`--run-id ${attempt.executorRunId}`))
+        assert.match(parent.command, /bin\.mjs run /)
+        note(c, "before-parent-kill", { worker: row, executor: parent, owned, attempt })
+        process.kill(parent.pid, "SIGKILL")
+        assert.equal((await running.completed).code, 1)
+        const blocked = c.status()
+        assert.ok(blocked.request.allowedActions.includes("correct"))
+        assert.ok(c.events().some((e) => e.fact._tag === "ProcessCompleted" && e.fact.attemptId === attempt.id))
+        const beats = () => c.records().filter((r) => r.kind === "heartbeat").length
+        const atBlock = beats()
+        await waitFor(() => beats() > atBlock, "worker survives terminal supervisor receipt")
+        const args = decisionArgs(c, blocked, "correct")
+        const facts = c.events().length
+        if (boundary.endsWith("token")) {
+          if (boundary === "unknown-token") delete owned.processToken
+          else owned.processToken = "0".repeat(32)
+          writeFileSync(file, JSON.stringify(saved))
+          try {
+            const refused = c.run(process.execPath, [cli, ...args, "--json"])
+            note(c, "ownership-refusal", { ...refused, worker: processRow(worker.pid), version: c.status().version })
+            assert.equal(refused.code, 1, "unproved worker permitted replacement")
+            assert.equal(c.events().length, facts)
+            assert.ok(processRow(worker.pid))
+          } finally { writeFileSync(file, bytes) }
+        }
+        if (boundary.startsWith("HumanDecid")) {
+          const crashed = c.run(process.execPath, [cli, ...args, "--json"], { FACTORY_FIXTURE_CRASH: boundary })
+          assert.equal(crashed.signal, "SIGKILL", crashed.stderr)
+          assertExited(worker.pid)
+          assert.equal(c.status().version, blocked.version + (boundary === "HumanDecided" ? 1 : 0))
+        }
+        const decided = c.command(args)
+        assertExited(worker.pid)
+        assert.equal(decided.version, blocked.version + 1)
+        assert.deepEqual(c.command(args), decided)
+        const bad = [...args]
+        bad[bad.indexOf("--evidence") + 1] = "0".repeat(64)
+        c.command(bad, 1)
+        assert.equal(c.status().version, decided.version)
+        const stoppedBeats = beats()
+        assertHuman(c.command(["resume", c.id]))
+        assert.equal(beats(), stoppedBeats)
+        assert.equal(c.records().filter((r) => r.kind === "provider" && r.stage === "correct").length, 2)
+        c.command(args, 1)
+        note(c, "replacement-proof", { worker, token, atBlock, stoppedBeats, finalBeats: beats(), facts: c.events(), providers: c.records() })
+      } finally {
+        if (worker !== undefined && processRow(worker.pid) !== undefined) {
+          const row = processRow(worker.pid)
+          assert.equal(row.group, worker.pid)
+          assert.ok(row.command.split(/\s+/).includes(`agentrun-worker-${token}`))
+          note(c, "owned-cleanup", row)
+          process.kill(-row.group, "SIGTERM")
+          await waitFor(() => processRow(worker.pid) === undefined, "owned fixture worker exit")
+        }
+      }
+    })
+  }
   await scenario("unknown-cost", async () => {
     const c = setup("unknown-cost", "unknown-cost")
     const state = c.start()
