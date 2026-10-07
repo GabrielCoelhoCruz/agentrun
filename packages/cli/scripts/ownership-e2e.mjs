@@ -26,9 +26,18 @@ const selected = process.argv[4]
 const setupCommands = []
 const setup = (executable, args, cwd = source) => {
   const started = Date.now()
-  const result = spawnSync(executable, args, {cwd, encoding: "utf8", timeout: 120000, killSignal: "SIGKILL"})
-  setupCommands.push({executable, args, cwd, elapsedMs: Date.now() - started, code: result.status, signal: result.signal,
-    stdout: result.stdout, stderr: result.stderr, error: result.error?.message})
+  const result = spawnSync(executable, args, { cwd, encoding: "utf8", timeout: 120000, killSignal: "SIGKILL" })
+  setupCommands.push({
+    executable,
+    args,
+    cwd,
+    elapsedMs: Date.now() - started,
+    code: result.status,
+    signal: result.signal,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    error: result.error?.message,
+  })
   writeFileSync(join(evidence, "setup-commands.json"), JSON.stringify(setupCommands, null, 2))
   assert.equal(result.error, undefined)
   assert.equal(result.status, 0, result.stderr + result.stdout)
@@ -38,7 +47,7 @@ let installedCli = process.argv[2]
 let packageProof
 if (packageTarget) {
   assert.match(process.version, /^v24\./, "Installed proof requires Node24")
-  mkdirSync(evidence, {recursive: false})
+  mkdirSync(evidence, { recursive: false })
   const head = setup("git", ["rev-parse", "HEAD"])
   const branch = setup("git", ["branch", "--show-current"])
   const base = setup("git", ["rev-parse", process.env.AGENTRUN_CANDIDATE_BASE ?? "HEAD^"])
@@ -47,25 +56,39 @@ if (packageTarget) {
   const consumer = join(evidence, "consumer")
   mkdirSync(packs)
   mkdirSync(consumer)
-  for (const name of ["core", "cli"]) setup("pnpm", ["pack", "--pack-destination", packs], join(source, "packages", name))
+  for (const name of ["core", "cli"]) {
+    setup("pnpm", ["pack", "--pack-destination", packs], join(source, "packages", name))
+  }
   const corePack = join(packs, "agentrun-core-0.1.0.tgz")
   const cliPack = join(packs, "agentrun-0.1.0.tgz")
-  const {parse} = createRequire(new URL("../../core/package.json", import.meta.url))("yaml")
+  const { parse } = createRequire(new URL("../../core/package.json", import.meta.url))("yaml")
   const lock = parse(readFileSync(join(source, "pnpm-lock.yaml"), "utf8"))
-  const overrides = {"@agentrun/core": `file:${corePack}`}
+  const overrides = { "@agentrun/core": `file:${corePack}` }
   for (const name of ["core", "cli"]) {
     for (const [dependency, entry] of Object.entries(lock.importers[`packages/${name}`].dependencies)) {
       if (dependency !== "@agentrun/core") overrides[dependency] = entry.version.split("(")[0]
     }
   }
-  writeFileSync(join(consumer, "package.json"), JSON.stringify({private: true, type: "module",
-    dependencies: {"@agentrun/core": `file:${corePack}`, agentrun: `file:${cliPack}`}, pnpm: {overrides}}, null, 2))
+  writeFileSync(
+    join(consumer, "package.json"),
+    JSON.stringify(
+      {
+        private: true,
+        type: "module",
+        dependencies: { "@agentrun/core": `file:${corePack}`, agentrun: `file:${cliPack}` },
+        pnpm: { overrides },
+      },
+      null,
+      2,
+    ),
+  )
   setup("pnpm", ["install"], consumer)
   setup("pnpm", ["install", "--frozen-lockfile"], consumer)
   const coreRoot = realpathSync(join(consumer, "node_modules/@agentrun/core"))
   const cliRoot = realpathSync(join(consumer, "node_modules/agentrun"))
   const bindings = {
-    core: coreRoot, cli: cliRoot,
+    core: coreRoot,
+    cli: cliRoot,
     cliCore: realpathSync(join(dirname(cliRoot), "@agentrun/core")),
     coreEffect: realpathSync(join(dirname(dirname(coreRoot)), "effect")),
     cliEffect: realpathSync(join(dirname(cliRoot), "effect")),
@@ -87,9 +110,20 @@ if (packageTarget) {
   }
   compare(join(source, "packages/core/dist"), join(coreRoot, "dist"))
   compare(join(source, "packages/cli/dist"), join(cliRoot, "dist"))
-  for (const file of [corePack, cliPack, join(consumer, "pnpm-lock.yaml")]) hashes[file] = createHash("sha256").update(readFileSync(file)).digest("hex")
-  packageProof = {head, base, branch, node: process.version, platform: process.platform, arch: process.arch,
-    pnpm: setup("pnpm", ["--version"]), bindings, hashes}
+  for (const file of [corePack, cliPack, join(consumer, "pnpm-lock.yaml")]) {
+    hashes[file] = createHash("sha256").update(readFileSync(file)).digest("hex")
+  }
+  packageProof = {
+    head,
+    base,
+    branch,
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    pnpm: setup("pnpm", ["--version"]),
+    bindings,
+    hashes,
+  }
   writeFileSync(join(evidence, "package-proof.json"), JSON.stringify(packageProof, null, 2))
   installedCli = join(cliRoot, "dist/bin.mjs")
 }
@@ -627,11 +661,28 @@ for (const record of ["reservation", "receipt"]) {
 if (selected === undefined) assert.deepEqual(outcomes.map((outcome) => outcome.name), declared)
 assert.equal(new Set(declared).size, declared.length, "Scenario names must be unique")
 if (packageTarget) {
-  for (const [file, hash] of Object.entries(packageProof.hashes)) assert.equal(createHash("sha256").update(readFileSync(file)).digest("hex"), hash)
+  for (const [file, hash] of Object.entries(packageProof.hashes)) {
+    assert.equal(createHash("sha256").update(readFileSync(file)).digest("hex"), hash)
+  }
   assert.equal(setup("git", ["status", "--porcelain"]), "", "Source changed during installed proof")
-  writeFileSync(join(evidence, "final-proof.json"), JSON.stringify({head: packageProof.head, sourceClean: true,
-    hashesUnchanged: true, bindingsUnchanged: realpathSync(join(dirname(packageProof.bindings.cli), "@agentrun/core")) === packageProof.bindings.core,
-    scope: selected ?? "all", declared, outcomes: outcomes.length, passed: outcomes.filter((outcome) => outcome.result === "passed").length}, null, 2))
+  writeFileSync(
+    join(evidence, "final-proof.json"),
+    JSON.stringify(
+      {
+        head: packageProof.head,
+        sourceClean: true,
+        hashesUnchanged: true,
+        bindingsUnchanged:
+          realpathSync(join(dirname(packageProof.bindings.cli), "@agentrun/core")) === packageProof.bindings.core,
+        scope: selected ?? "all",
+        declared,
+        outcomes: outcomes.length,
+        passed: outcomes.filter((outcome) => outcome.result === "passed").length,
+      },
+      null,
+      2,
+    ),
+  )
 }
 assert.ok(outcomes.length > 0, "No scenario selected")
 process.exitCode = outcomes.some((outcome) => outcome.result === "failed") ? 1 : 0
