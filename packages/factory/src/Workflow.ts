@@ -419,6 +419,9 @@ export const handle = (command: WorkflowCommand, cwd = process.cwd()) =>
           const store = yield* Store.open(directory, !exists)
           if (!exists) yield* store.append({ _tag: "WorkflowStarted", run: preparation.run }, preparation.blobs)
           const state = yield* store.verify()
+          if (state.run.executor.digest !== preparation.run.executor.digest) {
+            return yield* failure("executor", "Installed executor differs from this workflow's pinned runtime")
+          }
           if (
             state.run.profileHash !== preparation.run.profileHash || state.run.goal !== command.goal
             || state.run.baseSha !== preparation.run.baseSha || state.run.repoRoot !== repo.repoRoot
