@@ -125,6 +125,14 @@ export const fromSdkMessage = Effect.fnUntraced(
 
 export const make = (deps: { readonly query: typeof query }): AgentAdapter => {
   const run = Effect.fn("ClaudeCode.run")(function*(input: AgentInput) {
+    const readOnly = input.tools === "read-only"
+    if (readOnly && (input.loadProjectSettings || input.setup !== undefined)) {
+      return yield* new AgentSpawnError({
+        agent: "claude-code",
+        cause: "read-only tools cannot load project settings or run setup",
+        retryable: false,
+      })
+    }
     const abortController = yield* Effect.sync(() => new AbortController())
     const model = Option.getOrUndefined(input.model)
     const maxTurns = Option.getOrUndefined(input.maxTurns)
@@ -138,14 +146,17 @@ export const make = (deps: { readonly query: typeof query }): AgentAdapter => {
               cwd: input.cwd,
               permissionMode: "dontAsk",
               settingSources: input.loadProjectSettings ? ["project", "local"] : [],
-              allowedTools: ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
-              disallowedTools: [
-                "Bash(git worktree *)",
-                "Bash(git checkout *)",
-                "Bash(git switch *)",
-                "Bash(git push *)",
-                "AskUserQuestion",
-              ],
+              allowedTools: readOnly ? ["Read", "Glob", "Grep"] : ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
+              ...(readOnly ? { tools: ["Read", "Glob", "Grep"], strictMcpConfig: true, mcpServers: {} } : {}),
+              disallowedTools: readOnly
+                ? ["Bash", "Edit", "Write", "NotebookEdit", "Agent", "Task", "AskUserQuestion"]
+                : [
+                  "Bash(git worktree *)",
+                  "Bash(git checkout *)",
+                  "Bash(git switch *)",
+                  "Bash(git push *)",
+                  "AskUserQuestion",
+                ],
               ...(model === undefined ? {} : { model }),
               ...(maxTurns === undefined ? {} : { maxTurns }),
               ...(maxBudgetUsd === undefined ? {} : { maxBudgetUsd }),
@@ -183,7 +194,7 @@ export const make = (deps: { readonly query: typeof query }): AgentAdapter => {
   })
   return {
     id: "claude-code",
-    capabilities: { maxTurns: true, maxBudgetUsd: true, model: true, costReporting: true },
+    capabilities: { maxTurns: true, maxBudgetUsd: true, model: true, costReporting: true, readOnlyTools: true },
     run: (input) => Stream.unwrap(run(input)),
   }
 }

@@ -2,10 +2,11 @@ import { Duration, Effect, Option, Predicate, Schema, SchemaIssue } from "effect
 import { isMap, isScalar, LineCounter, parseDocument } from "yaml"
 import type { AgentCapabilities } from "./domain/Agent.js"
 import { TaskFileError, UnsupportedOption } from "./domain/Errors.js"
-import { AgentId, Task, TaskId } from "./domain/Task.js"
+import { AgentId, Task, TaskId, ToolProfile } from "./domain/Task.js"
 
 const taskOptions = {
   agent: Schema.optional(AgentId),
+  tools: Schema.optional(ToolProfile),
   model: Schema.optional(Schema.String),
   maxTurns: Schema.optional(Schema.Int),
   maxBudgetUsd: Schema.optional(Schema.Finite),
@@ -136,7 +137,7 @@ export class TaskFile extends Schema.Class<TaskFile>("agentrun/TaskFile")({
       )
       const options = { ...defaults, ...overrides }
       const agent = options.agent ?? "claude-code"
-      const capabilityOptions: ReadonlyArray<UnsupportedOption["option"]> = ["maxBudgetUsd", "maxTurns", "model"]
+      const capabilityOptions = ["maxBudgetUsd", "maxTurns", "model"] as const
       for (const option of capabilityOptions) {
         if (options[option] !== undefined && !capabilities[agent][option]) {
           const optionLine = overrideLines.get(option) ?? frontLines.get(option) ?? line
@@ -149,6 +150,25 @@ export class TaskFile extends Schema.Class<TaskFile>("agentrun/TaskFile")({
             message: `${path}:${optionLine}: task "${id}": ${option} is not supported by agent "${agent}"`,
           })
         }
+      }
+      if (options.tools !== undefined && capabilities[agent].readOnlyTools !== true) {
+        const optionLine = overrideLines.get("tools") ?? frontLines.get("tools") ?? line
+        return yield* new UnsupportedOption({
+          path,
+          line: optionLine,
+          taskId: id,
+          agent,
+          option: "tools",
+          message: `${path}:${optionLine}: task "${id}": read-only tools are not supported by agent "${agent}"`,
+        })
+      }
+      if (options.tools === "read-only" && setup !== undefined) {
+        const setupLine = frontLines.get("setup") ?? line
+        return yield* new TaskFileError({
+          path,
+          line: setupLine,
+          message: `${path}:${setupLine}: setup is not supported with read-only tasks`,
+        })
       }
       const taskLines = new Map([...frontLines, ...overrideLines])
       const task = yield* Schema.decodeEffect(Task)({

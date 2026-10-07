@@ -115,6 +115,20 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
 
   const run = Effect.fn("Runner.run")(
     function*(state: RunState): Effect.fn.Return<RunState, RunnerError, Scope.Scope> {
+      for (const task of state.tasks) {
+        if (task.tools !== "read-only") continue
+        const adapter = agents.get(task.agent)
+        if (
+          Option.isNone(adapter) || adapter.value.capabilities.readOnlyTools !== true
+          || options.loadProjectSettings || state.setup !== undefined
+        ) {
+          return yield* new AgentSpawnError({
+            agent: task.agent,
+            cause: "read-only tools require provider support and exclude project settings and setup",
+            retryable: false,
+          })
+        }
+      }
       yield* lock.acquire(state.repoRoot)
       yield* worktrees.recoverProcesses ?? Effect.void
       const current = yield* SynchronizedRef.make(state)
@@ -372,6 +386,7 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
           const start = yield* Clock.currentTimeMillis
           const previous = (yield* SynchronizedRef.get(current)).status[task.id]
           const attempt = previous?._tag === "interrupted" || previous?._tag === "failed" ? previous.attempt + 1 : 1
+          const reuseExisting = (yield* SynchronizedRef.get(current)).worktrees[task.id] !== undefined
           const priorData = (yield* SynchronizedRef.get(current)).taskReports?.[task.id]
           let toolsStarted = priorData?.toolsStarted === true
           let setupDone = priorData?.setupCompleted === true
@@ -412,7 +427,7 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                       exitCode: -1,
                       stderr: error.message,
                     })
-                  )))
+                  )), reuseExisting)
               })
               if (state.setup !== undefined && !options.setupInAgent && !setupDone) {
                 yield* setup(task.id, state.setup, worktree.path)
@@ -439,6 +454,7 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                   let lastEventAt = yield* Clock.currentTimeMillis
                   const consume = adapter.value.run({
                     taskId: task.id,
+                    ...(task.tools === undefined ? {} : { tools: task.tools }),
                     loadProjectSettings: options.loadProjectSettings === true,
                     ...(options.setupInAgent && state.setup !== undefined && !setupDone ? { setup: state.setup } : {}),
                     setupCompleted: () =>

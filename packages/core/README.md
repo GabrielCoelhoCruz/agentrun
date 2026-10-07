@@ -24,6 +24,12 @@ const parse = Effect.gen(function*() {
 
 This example is checked against the installed package. It parses input without invoking providers.
 
+`Task.tools` and `AgentInput.tools` accept the optional `"read-only"` profile.
+An adapter declares support with `AgentCapabilities.readOnlyTools: true`.
+The parser rejects an unsupported request. The runner also checks saved tasks before work.
+An omitted field keeps the default tools. Read-only tasks reject setup and project settings.
+Use the CLI for exclusive initial run reservation and the production worker boundary.
+
 ## Services and layers
 
 | Service | Supported operations | Layer |

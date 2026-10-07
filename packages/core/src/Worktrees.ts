@@ -44,6 +44,7 @@ export class Worktrees extends Context.Service<Worktrees, {
     baseSha: string,
     retainOnFailure?: () => boolean,
     onCreate?: () => Effect.Effect<void, GitError>,
+    reuseExisting?: boolean,
   ) => Effect.Effect<Worktree, GitError, Scope.Scope>
   readonly commit: (worktree: Worktree, message: string) => Effect.Effect<boolean, GitError>
   readonly snapshot: (
@@ -187,10 +188,21 @@ process.stdin.once('data',()=>{
       baseSha: string,
       retainOnFailure?: () => boolean,
       onCreate?: () => Effect.Effect<void, GitError>,
+      reuseExisting = true,
     ) {
       return yield* Effect.acquireRelease(
         Effect.gen(function*() {
           const worktree = locate(task.id)
+          if (
+            !reuseExisting
+            && ((yield* fs.exists(worktree.path).pipe(Effect.orDie)) || (yield* branchExists(worktree.branch)))
+          ) {
+            return yield* new GitError({
+              command: "create worktree",
+              exitCode: -1,
+              stderr: `Worktree collision: ${worktree.branch}`,
+            })
+          }
           yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.orDie)
           if (yield* fs.exists(worktree.path).pipe(Effect.orDie)) {
             const branch = yield* git(["symbolic-ref", "--short", "HEAD"], { cwd: worktree.path })
@@ -204,7 +216,7 @@ process.stdin.once('data',()=>{
             return worktree
           }
           yield* onCreate?.() ?? Effect.void
-          const exists = yield* branchExists(worktree.branch)
+          const exists = reuseExisting && (yield* branchExists(worktree.branch))
           yield* git(
             exists
               ? ["worktree", "add", worktree.path, worktree.branch]
@@ -268,6 +280,17 @@ process.stdin.once('data',()=>{
   })
 
   const reconcile = Effect.fn("Worktrees.reconcile")(function*(state: RunState) {
+    for (const task of state.tasks) {
+      if (state.worktrees[task.id] !== undefined) continue
+      const worktree = locate(task.id)
+      if ((yield* fs.exists(worktree.path).pipe(Effect.orDie)) || (yield* branchExists(worktree.branch))) {
+        return yield* new GitError({
+          command: "reconcile ownership",
+          exitCode: -1,
+          stderr: `Worktree collision without recorded ownership: ${worktree.branch}`,
+        })
+      }
+    }
     yield* git(["worktree", "prune"], repo).pipe(semaphore.withPermits(1))
     const actions: Array<Reconciled> = []
     for (const task of state.tasks) {

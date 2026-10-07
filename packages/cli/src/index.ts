@@ -66,6 +66,7 @@ const RunId = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,
 
 export const execute = Effect.fn("cli.execute")(
   function*(state: RunState, options: Options, retryFailed = false, resumeExisting = false) {
+    yield* Schema.decodeUnknownEffect(RunId)(state.runId).pipe(Effect.mapError(bad))
     const agents = yield* Agents
     const fs = yield* FileSystem.FileSystem
     const ignore = yield* fs.readFileString(`${state.repoRoot}/.gitignore`).pipe(Effect.catch(() => Effect.succeed("")))
@@ -80,7 +81,12 @@ export const execute = Effect.fn("cli.execute")(
       yield* lock.acquire(state.repoRoot)
       const store = yield* StateStore
       const candidate = resumeExisting ? yield* store.load(state.runId) : state
-      if (!resumeExisting) yield* store.save(candidate)
+      if (candidate.runId !== state.runId || candidate.repoRoot !== state.repoRoot) {
+        return yield* bad("Saved run identity differs from repository")
+      }
+      if (candidate.tasks.some((task) => task.tools === "read-only") && options.loadProjectSettings) {
+        return yield* bad("read-only tools cannot load project settings")
+      }
       const services = Layer.mergeAll(
         Report.layer,
         Layer.succeed(Agents, agents),
@@ -94,6 +100,29 @@ export const execute = Effect.fn("cli.execute")(
         }),
       )
       const program = Effect.gen(function*() {
+        if (!resumeExisting) {
+          const directory = `${state.repoRoot}/.agentrun/runs/${state.runId}`
+          if (yield* fs.exists(directory)) {
+            return yield* bad(`Run ID already exists: ${state.runId}; use resume with this exact ID`)
+          }
+          const worktrees = yield* Worktrees
+          const branches = new Set(
+            (yield* git(["for-each-ref", "--format=%(refname)", "refs/heads"], state.repoRoot)).split("\n"),
+          )
+          for (const task of candidate.tasks) {
+            const located = worktrees.locate(task.id)
+            if (branches.has(`refs/heads/${located.branch}`) || (yield* fs.exists(located.path))) {
+              return yield* bad(`Worktree collision: ${located.branch}; choose a different run ID`)
+            }
+          }
+          yield* fs.makeDirectory(`${state.repoRoot}/.agentrun/runs`, { recursive: true })
+          yield* fs.makeDirectory(directory).pipe(
+            Effect.mapError((error) =>
+              error.reason._tag === "AlreadyExists" ? bad(`Run ID already exists: ${state.runId}`) : error
+            ),
+          )
+          yield* store.save(candidate)
+        }
         const panel = !options.json && process.stdout.isTTY ? yield* panelScoped(candidate) : undefined
         const runner = yield* Runner
         const events = yield* runner.subscribe
@@ -120,7 +149,7 @@ export const execute = Effect.fn("cli.execute")(
           retryFailed,
           setupInAgent: true,
           loadProjectSettings: options.loadProjectSettings,
-        }).pipe(Layer.provide(services)),
+        }).pipe(Layer.provideMerge(services)),
       ))
       yield* program
     }).pipe(
@@ -129,14 +158,23 @@ export const execute = Effect.fn("cli.execute")(
         StateStore.layerFile({ repoRoot: state.repoRoot }),
         RunLock.layer({ home: homedir() }),
       )),
-      Effect.mapError(failed),
+      Effect.mapError((error) => error instanceof CliFailure ? error : failed(error)),
     )
     yield* run
   },
 )
 
 export const run = Effect.fn("cli.run")(
-  function*(options: Options & { readonly file: string; readonly base: Option.Option<string> }) {
+  function*(
+    options: Options & {
+      readonly file: string
+      readonly base: Option.Option<string>
+      readonly runId?: Option.Option<string>
+    },
+  ) {
+    if (options.runId !== undefined && Option.isSome(options.runId)) {
+      yield* Schema.decodeUnknownEffect(RunId)(options.runId.value).pipe(Effect.mapError(bad))
+    }
     const agents = yield* Agents
     const fs = yield* FileSystem.FileSystem
     const repoRoot = yield* git(["rev-parse", "--show-toplevel"])
@@ -153,6 +191,9 @@ export const run = Effect.fn("cli.run")(
         pi: pi.value.capabilities,
       },
     }).pipe(Effect.mapError(bad))
+    if (options.loadProjectSettings && parsed.tasks.some((task) => task.tools === "read-only")) {
+      return yield* bad("read-only tools cannot load project settings")
+    }
     const base = Option.getOrElse(options.base, () => parsed.base)
     const baseSha = yield* git(["rev-parse", "--verify", `${base}^{commit}`], realRoot)
     if (options.dryRun) {
@@ -164,7 +205,10 @@ export const run = Effect.fn("cli.run")(
       }, options.json)
     }
     const now = yield* Clock.currentTimeMillis
-    const runId = `${new Date(now).toISOString().replace(/[-:.]/g, "")}-${randomBytes(8).toString("hex")}`
+    const runId = Option.getOrElse(
+      options.runId ?? Option.none(),
+      () => `${new Date(now).toISOString().replace(/[-:.]/g, "")}-${randomBytes(8).toString("hex")}`,
+    )
     const state = new RunState({
       version: 1,
       runId,
@@ -235,7 +279,12 @@ export const doctor = Effect.fn("cli.doctor")(
 export const command = Command.make("agentrun").pipe(Command.withSubcommands([
   Command.make(
     "run",
-    { ...common, file: Argument.String("TASKS.md"), base: Flag.String("base").pipe(Flag.optional) },
+    {
+      ...common,
+      file: Argument.String("TASKS.md"),
+      base: Flag.String("base").pipe(Flag.optional),
+      runId: Flag.String("run-id").pipe(Flag.withSchema(RunId), Flag.optional),
+    },
     run,
   ),
   Command.make("resume", {

@@ -61,6 +61,40 @@ A dry run validates tasks and resolves the Git base without invoking providers. 
 
 `run --json` emits one JSON event per line. `report --json` emits one JSON report. Reports contain task prompts, result text, repository paths, and diffs. Keep them private unless you review and sanitize them. Worker ownership tokens and Git process journals are excluded from report JSON.
 
+## Choose an execution ID
+
+Automation can save an ID before starting work:
+
+```sh
+agentrun run TASKS.md --run-id attempt-001-abcd --json
+agentrun report attempt-001-abcd --json
+agentrun resume attempt-001-abcd --json
+```
+
+An ID starts with a letter or digit and contains at most 128 letters, digits, underscores, or hyphens.
+Starting an existing ID fails without overwriting its state. Use its exact ID to resume.
+Existing branch or worktree collisions also fail. Different IDs can share the same four-character branch suffix.
+A directory with missing or corrupt state requires inspection; the CLI does not replace it.
+The commands without an ID retain their current defaults. Automation must not guess its attempt from the latest run.
+
+## Restrict review tools
+
+Add `tools: read-only` in frontmatter or under a task heading:
+
+```markdown
+## review: Review the candidate
+agent: pi
+tools: read-only
+
+Inspect the supplied diff and report your findings.
+```
+
+Claude receives only Read, Glob, and Grep. Pi receives only read, grep, find, and ls.
+Unknown or unsupported profiles fail before provider work. Read-only tasks cannot use setup or load project settings.
+This limits model tools, not OS permissions. SDK internal writes are outside this restriction.
+A successful task can produce no changes. Its result text and immutable delivery commit remain in the report.
+An unchanged commit does not prove that no write occurred.
+
 ## Setup, cancellation, and recovery
 
 Optional frontmatter `setup` runs a shell command in each worktree before provider work. Automatic retries reuse the worktree and completed setup. Recreating a worktree clears setup completion. Treat setup commands and task files as trusted input.
