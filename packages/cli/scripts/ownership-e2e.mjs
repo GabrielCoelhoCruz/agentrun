@@ -665,6 +665,13 @@ if (packageTarget) {
     assert.equal(createHash("sha256").update(readFileSync(file)).digest("hex"), hash)
   }
   assert.equal(setup("git", ["status", "--porcelain"]), "", "Source changed during installed proof")
+  assert.equal(setup("git", ["rev-parse", "HEAD"]), packageProof.head, "Candidate commit changed")
+  assert.equal(setup("git", ["branch", "--show-current"]), packageProof.branch, "Candidate branch changed")
+  const finalCore = realpathSync(join(evidence, "consumer/node_modules/@agentrun/core"))
+  const finalCli = realpathSync(join(evidence, "consumer/node_modules/agentrun"))
+  assert.deepEqual({core: finalCore, cli: finalCli, cliCore: realpathSync(join(dirname(finalCli), "@agentrun/core")),
+    coreEffect: realpathSync(join(dirname(dirname(finalCore)), "effect")),
+    cliEffect: realpathSync(join(dirname(finalCli), "effect"))}, packageProof.bindings, "Installed bindings changed")
   writeFileSync(
     join(evidence, "final-proof.json"),
     JSON.stringify(
@@ -672,8 +679,7 @@ if (packageTarget) {
         head: packageProof.head,
         sourceClean: true,
         hashesUnchanged: true,
-        bindingsUnchanged:
-          realpathSync(join(dirname(packageProof.bindings.cli), "@agentrun/core")) === packageProof.bindings.core,
+        bindingsUnchanged: true,
         scope: selected ?? "all",
         declared,
         outcomes: outcomes.length,
