@@ -28,7 +28,7 @@ export const ClaudeCode = { ...real, adapter: { ...real.adapter, run(input) {
 export * from ${JSON.stringify(original)};
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const record = (value) => appendFileSync(process.env.FACTORY_FIXTURE_LOG, JSON.stringify(value) + '\\n');
 export function query({ prompt, options }) {
@@ -77,6 +77,10 @@ export function query({ prompt, options }) {
         const tree = git(['write-tree']);
         const commit = git(['-c','user.name=Fixture','-c','user.email=fixture@localhost','commit-tree',tree,'-m','unrelated root']);
         git(['reset','--hard',commit]);
+      }
+      if (mode === 'linked-checks') {
+        renameSync(join(options.cwd, 'checks'), join(options.cwd, 'old-checks'));
+        symlinkSync(process.env.FACTORY_FIXTURE_ORIGINAL_CHECKS, join(options.cwd, 'checks'), 'dir');
       }
       if (mode === 'changed-check') writeFileSync(join(options.cwd, 'checks/restart.mjs'), 'process.exit(0)\\n');
     }

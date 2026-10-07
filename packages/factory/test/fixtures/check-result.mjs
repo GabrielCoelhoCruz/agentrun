@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
-import { appendFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { appendFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 
 const mode = process.env.FACTORY_FIXTURE_CHECK
 appendFileSync(
@@ -18,6 +18,12 @@ if (mode === "cancel-check" || mode === "timeout") {
 if (mode === "missing-result") process.exit(0)
 const artifact = join(process.env.FACTORY_ARTIFACT_DIR, "observation.txt")
 writeFileSync(artifact, "The configured producer executed.\n")
+if (mode === "linked-artifact") {
+  const outside = join(dirname(process.env.FACTORY_ARTIFACT_DIR), "outside")
+  mkdirSync(outside)
+  writeFileSync(join(outside, "observation.txt"), "Outside the attempt artifact directory.\n")
+  symlinkSync(outside, join(process.env.FACTORY_ARTIFACT_DIR, "linked"), "dir")
+}
 writeFileSync(
   process.env.FACTORY_RESULT,
   JSON.stringify({
@@ -28,7 +34,13 @@ writeFileSync(
     criteria: mode === "omitted-criterion" ? [] : [{
       id: "persisted-note",
       outcome: "pass",
-      artifacts: [mode === "missing-artifact" ? "missing.txt" : "observation.txt"],
+      artifacts: [
+        mode === "missing-artifact"
+          ? "missing.txt"
+          : mode === "linked-artifact"
+          ? "linked/observation.txt"
+          : "observation.txt",
+      ],
     }],
   }),
 )

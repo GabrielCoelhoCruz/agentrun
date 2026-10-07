@@ -55,6 +55,7 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
     }`,
     FACTORY_FIXTURE_LOG: log,
     FACTORY_FIXTURE_MODE: mode,
+    FACTORY_FIXTURE_ORIGINAL_CHECKS: join(repo, "checks"),
     FACTORY_FIXTURE_DURABLE: join(fixture, "server-durable.ts"),
     FACTORY_FIXTURE_CRASH_MARKER: join(directory, "crashed"),
     FACTORY_FIXTURE_CHECK_LOG: join(directory, "checks.jsonl"),
@@ -391,6 +392,7 @@ try {
       "changed-review",
       "wrong-ancestry",
       "changed-check",
+      "linked-checks",
       "human-review",
     ]
   ) {
@@ -415,7 +417,16 @@ try {
       "review",
     ])
   })
-  for (const mode of ["missing-result", "wrong-candidate", "old-attempt", "omitted-criterion", "missing-artifact"]) {
+  for (
+    const mode of [
+      "missing-result",
+      "wrong-candidate",
+      "old-attempt",
+      "omitted-criterion",
+      "missing-artifact",
+      "linked-artifact",
+    ]
+  ) {
     await scenario(mode, async () => {
       const c = setup(mode, "happy", () => {}, mode)
       const expected = {
@@ -424,6 +435,7 @@ try {
         "old-attempt": /wrong candidate, check, or attempt/i,
         "omitted-criterion": /omitted or repeated an acceptance criterion/i,
         "missing-artifact": /artifact.*ENOENT|regular file/i,
+        "linked-artifact": /artifact.*outside/i,
       }
       assertBlocked(c.start(1), expected[mode])
       assert.equal(readFileSync(c.env.FACTORY_FIXTURE_CHECK_LOG, "utf8").trim().split("\n").length, 1)
