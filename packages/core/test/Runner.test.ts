@@ -83,6 +83,7 @@ const testLayer = (agents: Layer.Layer<Agents>, concurrency = 2) =>
 
 const clockWorktrees = Layer.succeed(Worktrees, {
   locate: (taskId) => ({ taskId, path: "/unused", branch: "test-branch" }),
+  assertAvailable: () => Effect.void,
   acquire: (task) => Effect.succeed({ taskId: task.id, path: "/unused", branch: "test-branch" }),
   commit: () => Effect.succeed(false),
   snapshot: () => Effect.succeed({ commit: "a".repeat(40), committed: false }),
