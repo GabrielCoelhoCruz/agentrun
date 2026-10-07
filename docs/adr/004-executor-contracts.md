@@ -71,8 +71,10 @@ Live provider enforcement requires separate provider integration evidence.
 A coordinator can validate a structured review encoded in `result` against its own schema.
 The executor does not interpret a review verdict as acceptance.
 No second result envelope or coordinator-specific outcome is added.
+Legacy reports can omit delivery fields. Missing identity or required result data blocks coordinator acceptance, without making the legacy report unreadable.
 
 A no-change task remains a successful executor result with an empty patch and an existing commit.
+Commit equality shows identity reuse. An empty patch shows no net file changes, even when the commit differs.
 A coordinator must not treat that success as proof that a correction repaired a failed check.
 It must decide whether to rerun acceptance or request an operator decision.
 
