@@ -669,9 +669,17 @@ if (packageTarget) {
   assert.equal(setup("git", ["branch", "--show-current"]), packageProof.branch, "Candidate branch changed")
   const finalCore = realpathSync(join(evidence, "consumer/node_modules/@agentrun/core"))
   const finalCli = realpathSync(join(evidence, "consumer/node_modules/agentrun"))
-  assert.deepEqual({core: finalCore, cli: finalCli, cliCore: realpathSync(join(dirname(finalCli), "@agentrun/core")),
-    coreEffect: realpathSync(join(dirname(dirname(finalCore)), "effect")),
-    cliEffect: realpathSync(join(dirname(finalCli), "effect"))}, packageProof.bindings, "Installed bindings changed")
+  assert.deepEqual(
+    {
+      core: finalCore,
+      cli: finalCli,
+      cliCore: realpathSync(join(dirname(finalCli), "@agentrun/core")),
+      coreEffect: realpathSync(join(dirname(dirname(finalCore)), "effect")),
+      cliEffect: realpathSync(join(dirname(finalCli), "effect")),
+    },
+    packageProof.bindings,
+    "Installed bindings changed",
+  )
   writeFileSync(
     join(evidence, "final-proof.json"),
     JSON.stringify(
