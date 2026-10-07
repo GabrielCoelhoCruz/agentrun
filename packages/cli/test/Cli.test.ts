@@ -1958,3 +1958,36 @@ test("ownership preserves creation interrupted before proof is saved", async () 
   expect(readFileSync(join(worktree.path, "keep"), "utf8")).toBe("unproved work")
   expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
 }, 30000)
+
+for (const record of ["reservation", "receipt"]) {
+  test(`bounded ${record} FIFO refusal exits naturally and releases repository lock`, async () => {
+    const f = fixture(1)
+    const id = "bounded-0042"
+    expect(await child(f, ["run", "TASKS.md", "--run-id", id, "--keep-worktrees", "--json"]).done).toBe(0)
+    const saved = state(f)
+    const directory = join(f.repo, ".git/agentrun/ownership/branches")
+    const file = record === "reservation"
+      ? join(f.repo, ".git/agentrun/ownership/runs", id, "owner.json")
+      : join(directory, readdirSync(directory)[0]!)
+    unlinkSync(file)
+    expect(spawnSync("mkfifo", [file]).status).toBe(0)
+    writeFileSync(join(f.root, "injection.txt"), `FIFO without writer at ${file}\n`)
+    const before = readFileSync(statePath(f))
+    const refs = git(f.repo, ["show-ref"])
+    const calls = starts(f)
+    const started = Date.now()
+    const resumed = child(f, ["resume", id, "--json"])
+    const deadline = new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error("Ownership refusal did not exit within10seconds")), 10000)
+      resumed.done.finally(() => clearTimeout(timer))
+    })
+    expect(await Promise.race([resumed.done, deadline])).toBe(1)
+    expect(Date.now() - started).toBeLessThanOrEqual(10000)
+    expect(resumed.stderr()).toMatch(/ownership/i)
+    expect(starts(f)).toBe(calls)
+    expect(readFileSync(statePath(f))).toEqual(before)
+    expect(git(f.repo, ["show-ref"])).toBe(refs)
+    expect(existsSync(saved.worktrees.task0!.path)).toBe(true)
+    expect(await child(f, ["run", "TASKS.md", "--run-id", "fresh-0099", "--json"]).done).toBe(0)
+  }, 30000)
+}

@@ -513,3 +513,33 @@ it.live("ownership refuses a replacement repository at the owned workspace path"
       assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", worktree.branch]), fixture.baseSha)
     })
   ))
+
+for (const malformed of ["directory", "oversized", "invalid-utf8"] as const) {
+  it.live(`bounded ownership refuses ${malformed} before staging, publication or removal`, () =>
+    withRepo((fixture) => Effect.gen(function*() {
+      const service = yield* Worktrees
+      const worktree = yield* Effect.scoped(service.acquire(task(), fixture.baseSha))
+      yield* Effect.scoped(Effect.gen(function*() {
+        const retained = yield* service.acquire(task(), fixture.baseSha)
+        yield* edit(fixture, retained)
+      }))
+      const receipts = fixture.path.join(fixture.repoRoot, ".git", "agentrun", "ownership", "branches")
+      const entries = yield* fixture.fs.readDirectory(receipts)
+      const file = fixture.path.join(receipts, entries[0]!)
+      if (malformed === "directory") {
+        yield* fixture.fs.rename(file, `${file}.original`)
+        yield* fixture.fs.makeDirectory(file)
+      } else yield* fixture.fs.writeFile(file, malformed === "oversized" ? Buffer.alloc(65537) : Buffer.from([0xc0, 0xaf]))
+      const before = yield* git(fixture.repoRoot, ["show-ref"])
+      const index = yield* fixture.fs.readFile(fixture.path.join(fixture.repoRoot, ".git", "worktrees", "fix-login", "index"))
+      for (const operation of [service.snapshot(worktree, "refuse"), service.publish(worktree, fixture.baseSha),
+        service.reconcile(state(fixture, worktree, { _tag: "succeeded", commit: fixture.baseSha }))]) {
+        const result = yield* Effect.exit(operation)
+        assert.strictEqual(Exit.isFailure(result), true)
+      }
+      assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+      assert.deepStrictEqual(yield* fixture.fs.readFile(fixture.path.join(fixture.repoRoot, ".git", "worktrees", "fix-login", "index")), index)
+      assert.strictEqual(yield* fixture.fs.readFileString(fixture.path.join(worktree.path, "tracked.txt")), "tracked edit\n")
+      assert.strictEqual(yield* fixture.fs.exists(worktree.path), true)
+    })))
+}

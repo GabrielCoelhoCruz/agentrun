@@ -3,6 +3,9 @@ import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
   existsSync,
+  lstatSync,
+  symlinkSync,
+  truncateSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -40,8 +43,10 @@ const fixture = (name) => {
     NODE_OPTIONS: `--import=${pathToFileURL(hook).href}`,
   }
   const exec = (executable, args, cwd = repo) => {
-    const result = spawnSync(executable, args, { cwd, env, encoding: "utf8", timeout: 60000 })
+    const started = Date.now()
+    const result = spawnSync(executable, args, { cwd, env, encoding: "utf8", timeout: env.AGENTRUN_REFUSAL ? 10000 : 60000 })
     commands.push({
+      elapsedMs: Date.now() - started,
       executable,
       args,
       cwd,
@@ -294,6 +299,103 @@ for (const missing of [false, true]) {
     assert.equal(f.records().length, 2)
     if (!missing) assert.equal(f.git("show", `${saved.worktrees.change.branch}:keep`), "preserve owned work")
   })
+}
+
+// Hash filesystem bytes and identities without following or reading special files.
+const snapshot = (directory, excluded = new Set()) => {
+  const files = {};
+  const visit = (file) => {
+    if (excluded.has(file)) return;
+    const stat = lstatSync(file);
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(file).sort()) visit(join(file, name));
+    } else files[file] = {
+      mode: stat.mode, size: stat.size, ino: stat.ino, dev: stat.dev,
+      bytes: stat.isFile() && stat.size <= 65536 ? createHash("sha256").update(readFileSync(file)).digest("hex") : null,
+    };
+  };
+  visit(directory);
+  return files;
+};
+const faults = ["fifo", "directory", "socket", "symlink", "empty", "malformed", "utf8", "oversized", "sparse",
+  "wrong-version", "wrong-type", "missing-field", "extra-field", "foreign-runId", "foreign-repoRoot", "serialized",
+  "replace-before-open", "device-before-open", "replace-after-open", "grow", "truncate", "same-size", "read-error", "premature-eof"];
+for (const record of ["reservation", "receipt"]) {
+  for (const fault of [...faults, ...(record === "receipt" ? ["foreign-taskId", "foreign-path", "foreign-branch"] : [])]) {
+    scenario(`bounded-${record}-${fault}`, (f) => {
+      const id = "bounded-0042";
+      f.command(["run", "TASKS.md", "--run-id", id, "--keep-worktrees", "--json"]);
+      const saved = f.state(id);
+      const file = record === "reservation"
+        ? join(f.repo, ".git/agentrun/ownership/runs", id, "owner.json")
+        : join(f.repo, ".git/agentrun/ownership/branches", readdirSync(join(f.repo, ".git/agentrun/ownership/branches"))[0]);
+      const original = readFileSync(file);
+      writeFileSync(join(f.directory, "original-record.json"), original);
+      writeFileSync(join(saved.worktrees.change.path, "preserve"), "dirty owned workspace\n");
+      const dynamic = ["replace-before-open", "device-before-open", "replace-after-open", "grow", "truncate", "same-size", "read-error", "premature-eof"].includes(fault);
+      const marker = join(f.directory, "injection.json");
+      if (!dynamic) {
+        if (["fifo", "directory", "socket", "symlink"].includes(fault)) {
+          renameSync(file, file + ".original");
+          if (fault === "fifo") assert.equal(f.exec("mkfifo", [file]).status, 0);
+          if (fault === "directory") mkdirSync(file);
+          if (fault === "symlink") symlinkSync(file + ".original", file);
+          if (fault === "socket") assert.equal(f.exec("python3", ["-c", "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()", file]).status, 0);
+        } else if (fault === "empty") writeFileSync(file, "");
+        else if (fault === "malformed") writeFileSync(file, "PRIVATE_RECORD_CONTENT {");
+        else if (fault === "utf8") writeFileSync(file, Buffer.from([0xc0, 0xaf]));
+        else if (fault === "oversized") writeFileSync(file, Buffer.alloc(65537, 32));
+        else if (fault === "sparse") truncateSync(file, 1024 * 1024 * 1024);
+        else if (fault === "serialized") writeFileSync(file, JSON.stringify(JSON.parse(original), null, 2));
+        else {
+          const value = JSON.parse(original);
+          if (fault === "wrong-version") value.version = 2;
+          if (fault === "wrong-type") value.runId = 42;
+          if (fault === "missing-field") delete value.repoRoot;
+          if (fault === "extra-field") value.extra = "PRIVATE_RECORD_CONTENT";
+          if (fault.startsWith("foreign-")) value[fault.slice(8)] = "foreign";
+          writeFileSync(file, JSON.stringify(value));
+        }
+        // Sparse records must never be read by the evidence collector either.
+        const stat = lstatSync(file);
+        writeFileSync(marker, JSON.stringify({fault, target: file, mode: stat.mode, size: stat.size}));
+      }
+      const excluded = new Set([file, file + ".original"]);
+      const before = { repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) };
+      const calls = f.records().length;
+      const originalOptions = f.env.NODE_OPTIONS;
+      if (dynamic) {
+        f.env.NODE_OPTIONS += ` --require=${fileURLToPath(new URL("../test/fixtures/ownership-faults.cjs", import.meta.url))}`;
+        Object.assign(f.env, { AGENTRUN_RECORD_TARGET: file, AGENTRUN_RECORD_FAULT: fault, AGENTRUN_RECORD_MARKER: marker });
+      }
+      f.env.AGENTRUN_REFUSAL = "1";
+      const start = Date.now();
+      const result = f.exec(process.execPath, [cli, "resume", id, "--json"]);
+      const elapsedMs = Date.now() - start;
+      assert.equal(result.error, undefined, "Refusal must exit naturally within10seconds");
+      assert.ok(elapsedMs <= 10000, `Refusal took ${elapsedMs}ms`);
+      assert.equal(result.signal, null);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /ownership/i);
+      assert.ok(!result.stderr.includes("PRIVATE_RECORD_CONTENT"));
+      assert.equal(f.records().length, calls);
+      assert.equal(existsSync(marker), true, "Injection must have happened");
+      assert.deepEqual({ repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) }, before);
+      const injected = JSON.parse(readFileSync(marker));
+      if (dynamic) {
+        const stat = lstatSync(file);
+        assert.deepEqual({mode: stat.mode, size: stat.size, ino: stat.ino, dev: stat.dev,
+          bytes: stat.isFile() && stat.size <= 65536 ? createHash("sha256").update(readFileSync(file)).digest("hex") : null}, injected.after);
+      }
+      writeFileSync(join(f.directory, "refusal.json"), JSON.stringify({record, fault, elapsedMs, additionalCalls: f.records().length - calls, preserved: true, injection: injected}, null, 2));
+      f.env.NODE_OPTIONS = originalOptions;
+      for (const key of ["AGENTRUN_REFUSAL", "AGENTRUN_RECORD_TARGET", "AGENTRUN_RECORD_FAULT", "AGENTRUN_RECORD_MARKER"]) delete f.env[key];
+      f.command(["run", "TASKS.md", "--run-id", "fresh-0099", "--json"]);
+      assert.equal(f.state("fresh-0099").status.change._tag, "succeeded");
+      assert.equal(f.records().length, calls + 1);
+      writeFileSync(join(f.directory, "lock-release.json"), JSON.stringify({runId: "fresh-0099", branch: "agentrun/change-0099", result: "passed"}));
+    });
+  }
 }
 
 assert.ok(outcomes.length > 0, "No scenario selected")
