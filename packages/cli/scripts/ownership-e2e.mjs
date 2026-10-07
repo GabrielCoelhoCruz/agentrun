@@ -67,7 +67,7 @@ if (packageTarget) {
   const bindings = {
     core: coreRoot, cli: cliRoot,
     cliCore: realpathSync(join(dirname(cliRoot), "@agentrun/core")),
-    coreEffect: realpathSync(join(dirname(coreRoot), "effect")),
+    coreEffect: realpathSync(join(dirname(dirname(coreRoot)), "effect")),
     cliEffect: realpathSync(join(dirname(cliRoot), "effect")),
   }
   assert.equal(bindings.core, bindings.cliCore, "Installed CLI must use candidate core")
@@ -98,6 +98,7 @@ const root = packageTarget ? join(evidence, "journeys") : evidence
 const hook = fileURLToPath(new URL("../test/fixtures/sdk-hooks.mjs", import.meta.url))
 mkdirSync(root, { recursive: false })
 const outcomes = []
+const declared = []
 const fixture = (name) => {
   const directory = join(root, name)
   const repo = join(directory, "repo")
@@ -166,6 +167,7 @@ const fixture = (name) => {
   return { directory, repo, env, git, exec, command, stateFile, state, records, tasks }
 }
 const scenario = (name, run) => {
+  declared.push(name)
   if (selected !== undefined && selected !== name) return
   const f = fixture(name)
   try {
@@ -622,12 +624,14 @@ for (const record of ["reservation", "receipt"]) {
   })
 }
 
+if (selected === undefined) assert.deepEqual(outcomes.map((outcome) => outcome.name), declared)
+assert.equal(new Set(declared).size, declared.length, "Scenario names must be unique")
 if (packageTarget) {
   for (const [file, hash] of Object.entries(packageProof.hashes)) assert.equal(createHash("sha256").update(readFileSync(file)).digest("hex"), hash)
   assert.equal(setup("git", ["status", "--porcelain"]), "", "Source changed during installed proof")
   writeFileSync(join(evidence, "final-proof.json"), JSON.stringify({head: packageProof.head, sourceClean: true,
     hashesUnchanged: true, bindingsUnchanged: realpathSync(join(dirname(packageProof.bindings.cli), "@agentrun/core")) === packageProof.bindings.core,
-    outcomes: outcomes.length, passed: outcomes.filter((outcome) => outcome.result === "passed").length}, null, 2))
+    scope: selected ?? "all", declared, outcomes: outcomes.length, passed: outcomes.filter((outcome) => outcome.result === "passed").length}, null, 2))
 }
 assert.ok(outcomes.length > 0, "No scenario selected")
 process.exitCode = outcomes.some((outcome) => outcome.result === "failed") ? 1 : 0
