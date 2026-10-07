@@ -10,6 +10,9 @@ import uuid
 
 from terminal_inspection import owned_ps
 
+LAUNCH_SECONDS = 5
+CLEANUP_SECONDS = 48
+
 
 def write(path, value):
     temporary = path.with_suffix('.tmp')
@@ -48,8 +51,8 @@ def close(root, nonce):
         return
     if json.loads(owner.read_text()) != nonce:
         raise RuntimeError('Fixture ownership changed; cleanup refused')
-    deadline = time.monotonic() + 48
-    phase_deadline = deadline - 24
+    deadline = time.monotonic() + CLEANUP_SECONDS
+    phase_deadline = deadline - CLEANUP_SECONDS / 2
     records = {}
     refused = []
     signals = []
@@ -256,10 +259,10 @@ class Fixture:
             )
             self.children.append(child)
             path = self.root / f'terminal-child-{child.pid}.json'
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + LAUNCH_SECONDS
             while not path.exists():
                 if child.poll() is not None or time.monotonic() > deadline:
-                    raise RuntimeError('Fixture launcher did not register within 5 seconds')
+                    raise RuntimeError(f'Fixture launcher did not register within {LAUNCH_SECONDS} seconds')
                 time.sleep(.01)
             os.write(release, b'1')
             return child

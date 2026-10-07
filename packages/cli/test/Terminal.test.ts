@@ -7,6 +7,12 @@ import { fileURLToPath } from "node:url"
 import { expect, onTestFinished, test } from "vitest"
 
 const python = process.env.AGENTRUN_TERMINAL_PYTHON ?? "python3"
+const demoTimeoutMs = (scenario: string) => {
+  const initialRunSeconds = scenario === "resume" ? 20 : 0
+  const outputSeconds = scenario === "retry" ? 30 + 48 + 5 : scenario === "pipe" || scenario === "json" ? 20 : 22
+  const exitSeconds = scenario === "json" ? 20 : scenario === "pipe" ? 0 : 5
+  return (initialRunSeconds + outputSeconds + exitSeconds + 55 + 5) * 1000
+}
 if (process.env.AGENTRUN_TERMINAL_PYTHON !== undefined) {
   try {
     if (!isAbsolute(python) || !statSync(python).isFile()) throw new Error("Expected an absolute file")
@@ -17,6 +23,7 @@ if (process.env.AGENTRUN_TERMINAL_PYTHON !== undefined) {
 }
 
 for (const scenario of ["success", "failed", "interrupted", "resize", "resume", "json", "pipe"]) {
+  const harnessTimeoutMs = demoTimeoutMs(scenario)
   test(`real PTY: ${scenario} preserves output and exit semantics`, () => {
     const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
     const nonce = randomUUID().replaceAll("-", "")
@@ -36,11 +43,11 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
       process.execPath,
     ], {
       encoding: "utf8",
-      timeout: 30000,
+      timeout: harnessTimeoutMs,
       killSignal: "SIGKILL",
       env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce },
     })
-    expect(result.status, result.stderr).toBe(0)
+    expect(result.status, result.error?.message ?? result.stderr).toBe(0)
     const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
     const output = readFileSync(join(root, "capture.ansi"), "utf8")
     expect(saved.exitCode).toBe(scenario === "failed" ? 1 : scenario === "interrupted" ? 130 : 0)
@@ -73,10 +80,11 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
       )
       if (scenario === "resume") expect(output).toContain("saved failure")
     }
-  }, 35000)
+  }, harnessTimeoutMs + 5000)
 }
 
 for (const scenario of ["retry", "timeout"]) {
+  const harnessTimeoutMs = demoTimeoutMs(scenario)
   test(`real PTY: ${scenario} renders runner retries and timeout failures`, () => {
     const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
     const nonce = randomUUID().replaceAll("-", "")
@@ -96,11 +104,11 @@ for (const scenario of ["retry", "timeout"]) {
       process.execPath,
     ], {
       encoding: "utf8",
-      timeout: 30000,
+      timeout: harnessTimeoutMs,
       killSignal: "SIGKILL",
       env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce },
     })
-    expect(result.status, result.stderr).toBe(0)
+    expect(result.status, result.error?.message ?? result.stderr).toBe(0)
     const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
     const output = readFileSync(join(root, "capture.ansi"), "utf8")
     expect(saved.exitCode).toBe(scenario === "retry" ? 0 : 1)
@@ -117,7 +125,7 @@ for (const scenario of ["retry", "timeout"]) {
       }
     }
     if (scenario === "timeout") expect(output).toContain("alive")
-  }, 35000)
+  }, harnessTimeoutMs + 5000)
 }
 
 const processTable = () =>

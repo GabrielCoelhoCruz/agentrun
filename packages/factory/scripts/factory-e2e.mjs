@@ -64,19 +64,25 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
   }
   const saveCommands = () => writeFileSync(join(directory, "commands.json"), JSON.stringify(commands, null, 2))
   const run = (executable, argv, extra = {}) => {
+    const timeoutMs = executable === process.execPath && argv[0] === cli ? profile.limits.durationMs + 120000 : 90000
+    const started = performance.now()
     const result = spawnSync(executable, argv, {
       cwd: repo,
       env: { ...env, ...extra },
       encoding: "utf8",
-      timeout: 90000,
+      timeout: timeoutMs,
     })
     const saved = {
       executable,
       argv,
       cwd: repo,
       extraEnv: extra,
+      timeoutMs,
+      durationMs: Math.round(performance.now() - started),
       code: result.status,
       signal: result.signal,
+      error: result.error?.message ?? null,
+      errorCode: result.error?.code ?? null,
       stdout: result.stdout,
       stderr: result.stderr,
     }

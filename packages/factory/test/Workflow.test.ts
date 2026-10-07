@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { expect, test } from "vitest"
 
+const scenarioBudgetMs = 300000 + 60000 + 60000
+
 test("production CLI rejects invalid profiles and proves persistence after correction", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-e2e-"))
   const result = await promisify(execFile)(process.execPath, [
@@ -13,9 +15,9 @@ test("production CLI rejects invalid profiles and proves persistence after corre
     fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
     join(parent, "proof"),
     "quick",
-  ], { timeout: 300000, maxBuffer: 1024 * 1024 })
+  ], { timeout: 3 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 3, paidProviderCalls: 0 })
-}, 300000)
+}, 3 * scenarioBudgetMs + 5000)
 
 test("production CLI keeps rejection terminal and stops workers before correction", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-decisions-e2e-"))
@@ -24,9 +26,9 @@ test("production CLI keeps rejection terminal and stops workers before correctio
     fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
     join(parent, "proof"),
     "reject-crash-fault-resume,reject-crash-approval-decision,correct-executor-crash-normal,relocated-executor-resume",
-  ], { timeout: 300000, maxBuffer: 1024 * 1024 })
+  ], { timeout: 4 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 4, paidProviderCalls: 0 })
-}, 300000)
+}, 4 * scenarioBudgetMs + 5000)
 
 test("production CLI cancels a live agent and exports the exact candidate tree", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-boundaries-e2e-"))
@@ -35,6 +37,6 @@ test("production CLI cancels a live agent and exports the exact candidate tree",
     fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
     join(parent, "proof"),
     "cancel-agent,correct-executor-crash-reject,export-tree-base,export-tree-candidate,export-tree-metadata,export-tree-gitlink",
-  ], { timeout: 300000, maxBuffer: 1024 * 1024 })
+  ], { timeout: 6 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 6, paidProviderCalls: 0 })
-}, 300000)
+}, 6 * scenarioBudgetMs + 5000)

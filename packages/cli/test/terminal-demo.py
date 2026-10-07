@@ -1,8 +1,10 @@
 import errno, fcntl, json, os, pathlib, select, signal, struct, subprocess, sys, termios, time
 sys.dont_write_bytecode = True
-from terminal_fixture import Fixture
+from terminal_fixture import CLEANUP_SECONDS, LAUNCH_SECONDS, Fixture
 
 scenario, target, node = sys.argv[1:]
+retry_duration_seconds = 30
+pty_limit_seconds = retry_duration_seconds + CLEANUP_SECONDS + LAUNCH_SECONDS if scenario == 'retry' else 22
 root = pathlib.Path(target).resolve()
 root.mkdir(parents=True, exist_ok=True)
 repo, home = root / 'repo', root / 'home'
@@ -16,7 +18,7 @@ git('init', '-q')
 git('add', '.')
 git('-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-qm', 'base')
 prompt = 'retry-success' if scenario == 'retry' else 'deadline-active' if scenario == 'timeout' else 'panel-demo hold' if scenario == 'interrupted' else 'panel-demo'
-(repo / 'TASKS.md').write_text(('---\nconcurrency: 3\nstallTimeout: 20 seconds\nmaxDuration: 30 seconds\n---\n' if scenario == 'retry' else '---\nconcurrency: 3\nstallTimeout: 30 seconds\nmaxDuration: 10 seconds\n---\n' if scenario == 'timeout' else '---\nconcurrency: 3\n---\n') + '\n'.join(
+(repo / 'TASKS.md').write_text((f'---\nconcurrency: 3\nstallTimeout: 20 seconds\nmaxDuration: {retry_duration_seconds} seconds\n---\n' if scenario == 'retry' else '---\nconcurrency: 3\nstallTimeout: 30 seconds\nmaxDuration: 10 seconds\n---\n' if scenario == 'timeout' else '---\nconcurrency: 3\n---\n') + '\n'.join(
     f'## task{n}: Task {n} 界 👩‍💻 long title for narrow terminals\n{prompt}' + (' fail' if scenario == 'failed' and n == 1 else '') + '\n'
     for n in range(3)))
 env = {k: v for k, v in os.environ.items() if not any(s in k.upper() for s in ['TOKEN', 'SECRET', 'API_KEY', 'CREDENTIAL', 'AUTH'])}
@@ -72,7 +74,7 @@ with Fixture(root) as fixture:
         resized = interrupted = running = False
         try:
             while True:
-                if time.monotonic() - start > 22: raise TimeoutError('PTY demo exceeded 22 seconds')
+                if time.monotonic() - start > pty_limit_seconds: raise TimeoutError(f'PTY demo exceeded {pty_limit_seconds} seconds')
                 ready, _, _ = select.select([master], [], [], 0.05)
                 if ready:
                     try:

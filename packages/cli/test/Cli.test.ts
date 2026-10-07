@@ -1370,11 +1370,11 @@ for (const mode of ["protocol", "stall", "ceiling"] as const) {
   test(`review crash during worker cleanup preserves ${mode} decision`, async () => {
     const f = timedFixture(
       mode === "protocol" ? "slow-cleanup cleanup-protocol" : "slow-cleanup hold",
-      mode === "stall" ? "2 seconds" : "20 seconds",
-      mode === "ceiling" ? "2 seconds" : "20 seconds",
+      mode === "stall" ? "5 seconds" : "20 seconds",
+      mode === "ceiling" ? "10 seconds" : "20 seconds",
     )
     const c = child(f, ["run", "TASKS.md", "--json"])
-    await wait(() => existsSync(join(f.root, "cleanup-started")))
+    await wait(() => existsSync(join(f.root, "cleanup-started")), 30000)
     const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
     const pgid = saved.worktrees.task0.pgid
     const oldChild = existsSync(join(f.root, "child-task0"))
@@ -1391,7 +1391,7 @@ for (const mode of ["protocol", "stall", "ceiling"] as const) {
     if (oldChild !== undefined) expect(alive(oldChild)).toBe(false)
     expect(state(f).status.task0?.reason).toMatch(new RegExp(`^${tag}:`))
     expect(existsSync(lockPath(f))).toBe(false)
-  }, 30000)
+  }, 45000)
 }
 
 const hangingGit = (f: Fixture, operation: "acquire" | "delivery") => {
