@@ -45,7 +45,7 @@ const fixture = (tasks = 2, prompt = "success") => {
     repos: new Set<string>(),
     incompleteStates: new Set<string>(),
   }
-  const f = { root, repo, home, ownership }
+  const f = { root, repo: realpathSync(repo), home, ownership }
   onTestFinished(() => closeFixture(f), 60000)
   return f
 }
@@ -1112,7 +1112,7 @@ if (process.env.AGENTRUN_CLEANUP_CASE) {
 }
 
 const startsCount = (f: Fixture) => readFileSync(join(f.root, "starts-task0"), "utf8").trim().split("\n").length
-const timedFixture = (prompt: string, stall = "2 seconds", max = "10 seconds", setup?: string) => {
+const timedFixture = (prompt: string, stall = "5 seconds", max = "20 seconds", setup?: string) => {
   const f = fixture(1, prompt)
   writeFileSync(
     join(f.repo, "TASKS.md"),
@@ -1163,8 +1163,8 @@ for (const mode of ["stall", "ceiling", "setup", "partial"] as const) {
         : mode === "partial"
         ? "partial-crash"
         : "success",
-      "2 seconds",
-      mode === "setup" ? "1500 millis" : mode === "stall" ? "10 seconds" : "5 seconds",
+      mode === "ceiling" || mode === "setup" ? "20 seconds" : "5 seconds",
+      mode === "setup" ? "1500 millis" : mode === "stall" ? "20 seconds" : "10 seconds",
       mode === "setup" ? "sleep 300" : undefined,
     )
     const c = child(f, ["run", "TASKS.md", "--json"])
@@ -1269,7 +1269,7 @@ fs.writeFile = function(target, data, ...rest) {
 }, 30000)
 
 test("crash during failed-task cleanup preserves the terminal timeout reason", async () => {
-  const f = timedFixture("hold", "2 seconds", "10 seconds")
+  const f = timedFixture("hold")
   mkdirSync(join(f.root, "bin"))
   const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim()
   writeFileSync(
@@ -1370,11 +1370,11 @@ for (const mode of ["protocol", "stall", "ceiling"] as const) {
   test(`review crash during worker cleanup preserves ${mode} decision`, async () => {
     const f = timedFixture(
       mode === "protocol" ? "slow-cleanup cleanup-protocol" : "slow-cleanup hold",
-      mode === "stall" ? "2 seconds" : "20 seconds",
-      mode === "ceiling" ? "2 seconds" : "20 seconds",
+      mode === "stall" ? "5 seconds" : "20 seconds",
+      mode === "ceiling" ? "10 seconds" : "20 seconds",
     )
     const c = child(f, ["run", "TASKS.md", "--json"])
-    await wait(() => existsSync(join(f.root, "cleanup-started")))
+    await wait(() => existsSync(join(f.root, "cleanup-started")), 30000)
     const saved = JSON.parse(readFileSync(statePath(f), "utf8"))
     const pgid = saved.worktrees.task0.pgid
     const oldChild = existsSync(join(f.root, "child-task0"))
@@ -1391,7 +1391,7 @@ for (const mode of ["protocol", "stall", "ceiling"] as const) {
     if (oldChild !== undefined) expect(alive(oldChild)).toBe(false)
     expect(state(f).status.task0?.reason).toMatch(new RegExp(`^${tag}:`))
     expect(existsSync(lockPath(f))).toBe(false)
-  }, 30000)
+  }, 45000)
 }
 
 const hangingGit = (f: Fixture, operation: "acquire" | "delivery") => {

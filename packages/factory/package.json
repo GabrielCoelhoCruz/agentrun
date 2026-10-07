@@ -1,0 +1,25 @@
+{
+  "name": "@agentrun/factory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "exports": {
+    ".": { "types": "./dist/index.d.mts", "import": "./dist/index.mjs" }
+  },
+  "bin": { "agentrun-factory": "./dist/bin.mjs" },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsdown src/index.ts src/bin.ts src/supervisor.ts --format esm --dts"
+  },
+  "dependencies": {
+    "@agentrun/core": "workspace:*",
+    "agentrun": "workspace:*",
+    "@effect/platform-node": "^4.0.0",
+    "effect": "^4.0.0",
+    "tar-stream": "^3.2.2"
+  },
+  "devDependencies": { "@types/node": "^24.19.1" },
+  "license": "MIT",
+  "os": ["darwin", "linux"]
+}

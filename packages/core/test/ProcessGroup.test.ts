@@ -1,10 +1,11 @@
 import { Effect } from "effect"
 import { spawn, spawnSync } from "node:child_process"
 import { once } from "node:events"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { expect, test } from "vitest"
+import { inspect } from "node:util"
+import { expect, test, vi } from "vitest"
 import { stopProcessGroup } from "../src/ProcessGroup.js"
 
 const token = "a".repeat(32)
@@ -13,6 +14,43 @@ const start = () =>
     detached: true,
     stdio: "ignore",
   })
+
+test.each(["exit", "timeout"])("native process-table failure (%s) retains a redacted cause", async (mode) => {
+  const directory = mkdtempSync(join(tmpdir(), "agentrun-ps-failure-"))
+  const original = process.env.PATH
+  const child = start()
+  const done = once(child, "close")
+  writeFileSync(
+    join(directory, "ps"),
+    `#!/bin/sh\nprintf 'Permission denied: /private/fixture TOKEN=private-token\\n' >&2\n${
+      mode === "exit" ? "exit 23" : "exec node -e 'setInterval(()=>{},1000)'"
+    }\n`,
+    { mode: 0o755 },
+  )
+  try {
+    process.env.PATH = `${directory}:${original}`
+    const failure = await Effect.runPromise(stopProcessGroup(child.pid!, token)).then(
+      () => { throw new Error("Expected process-table failure") },
+      (error: unknown) => error,
+    )
+    expect(failure).toMatchObject({ reason: { _tag: "Unknown", module: "ProcessGroup", method: "table" } })
+    const text = inspect(failure, { depth: 8 })
+    expect(text).toContain('"timeoutMs":5000')
+    expect(text).toContain(mode === "exit" ? '"code":23' : '"signal":"SIGTERM"')
+    if (mode === "timeout") expect(text).toContain('"killed":true')
+    expect(text).toContain("permission denied")
+    expect(text).not.toMatch(/private-token|\/private\/fixture|TOKEN=/)
+    expect(() => process.kill(child.pid!, 0)).not.toThrow()
+    if (process.env.AGENTRUN_TEST_EVIDENCE) {
+      writeFileSync(join(process.env.AGENTRUN_TEST_EVIDENCE, `process-table-${mode}.json`), JSON.stringify({ mode, error: text }))
+    }
+  } finally {
+    process.env.PATH = original
+    child.kill("SIGKILL")
+    await done
+    rmSync(directory, { recursive: true })
+  }
+}, 15000)
 
 test("owned cleanup accepts unrelated process-table rows with group zero", async () => {
   const realTable = spawnSync("/bin/ps", ["-axo", "pid=,ppid=,pgid=,stat="], { encoding: "utf8" })
@@ -310,3 +348,175 @@ process.stdin.on('end', () => child.kill('SIGKILL'))
     await sentinelDone
   }
 })
+
+const stubborn = async () => {
+  const child = spawn(process.execPath, [
+    "-e",
+    "process.on('SIGTERM',()=>{});process.on('message',()=>process.exit(0));process.send('ready');setInterval(()=>{},1000)",
+    `agentrun-worker-${token}`,
+  ], {
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  })
+  const done = once(child, "close")
+  await once(child, "message", { signal: AbortSignal.timeout(4000) })
+  return { child, done }
+}
+const dispose = async (child: ReturnType<typeof spawn>, done: Promise<unknown>) => {
+  const row = spawnSync("/bin/ps", ["-p", String(child.pid), "-o", "pgid=,command=", "-ww"], { encoding: "utf8" })
+  if (
+    row.status === 0 && row.stdout.trim().split(/\s+/)[0] === String(child.pid)
+    && row.stdout.trim().split(/\s+/).includes(`agentrun-worker-${token}`)
+  ) {
+    process.kill(-child.pid!, "SIGKILL")
+  }
+  await done
+}
+
+test("two concurrent cleaners settle the same real SIGTERM-ignoring group", async () => {
+  for (let iteration = 0; iteration < 10; iteration++) {
+    const { child, done } = await stubborn()
+    try {
+      const results = await Promise.allSettled([
+        Effect.runPromise(stopProcessGroup(child.pid!, token)),
+        Effect.runPromise(stopProcessGroup(child.pid!, token)),
+      ])
+      const diagnostics = {
+        platform: process.platform,
+        iteration,
+        pid: child.pid,
+        results: inspect(results, { depth: 8 }),
+      }
+      if (process.env.AGENTRUN_TEST_EVIDENCE) {
+        writeFileSync(
+          join(process.env.AGENTRUN_TEST_EVIDENCE, `concurrent-stop-${iteration}.json`),
+          JSON.stringify(diagnostics, null, 2),
+        )
+      }
+      expect(results.map((r) => r.status), diagnostics.results).toEqual(["fulfilled", "fulfilled"])
+      await done
+      expect(() => process.kill(child.pid!, 0)).toThrow()
+      console.info(JSON.stringify({ platform: process.platform, iteration, pid: child.pid, results }))
+    } finally {
+      await dispose(child, done)
+    }
+  }
+}, 60000)
+
+test.each(["live", "exits"])("permission denial with a %s group requires bounded exit proof", async (state) => {
+  const { child, done } = await stubborn()
+  const realKill = process.kill.bind(process)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const signals: Array<string> = []
+  const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid === -child.pid! && signal !== 0) {
+      signals.push(String(signal))
+      if (state === "exits" && timer === undefined) timer = setTimeout(() => child.send("exit"), 100)
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" })
+    }
+    return realKill(pid, signal)
+  })
+  try {
+    const started = performance.now()
+    const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
+    if (state === "live") {
+      expect(result._tag).toBe("Failure")
+      expect(performance.now() - started).toBeGreaterThanOrEqual(1500)
+      expect(() => realKill(child.pid!, 0)).not.toThrow()
+    } else {
+      expect(result._tag).toBe("Success")
+      await done
+      expect(() => realKill(child.pid!, 0)).toThrow()
+    }
+    expect(signals).toEqual(["SIGTERM"])
+  } finally {
+    spy.mockRestore()
+    clearTimeout(timer)
+    await dispose(child, done)
+  }
+}, 15000)
+
+test("changed leader evidence before escalation prevents another signal", async () => {
+  const { child, done } = await stubborn()
+  const directory = mkdtempSync(join(tmpdir(), "agentrun-ps-escalation-"))
+  const original = process.env.PATH
+  const realKill = process.kill.bind(process)
+  const signals: Array<string> = []
+  const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid === -child.pid! && signal !== 0) {
+      signals.push(String(signal))
+      writeFileSync(
+        join(directory, "ps"),
+        `#!/bin/sh\necho '${child.pid} ${process.pid} ${child.pid} S node changed-command'\n`,
+        { mode: 0o755 },
+      )
+      process.env.PATH = `${directory}:${original}`
+    }
+    return realKill(pid, signal)
+  })
+  try {
+    const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
+    expect(result._tag).toBe("Failure")
+    expect(signals).toEqual(["SIGTERM"])
+    expect(() => realKill(child.pid!, 0)).not.toThrow()
+  } finally {
+    spy.mockRestore()
+    process.env.PATH = original
+    await dispose(child, done)
+    rmSync(directory, { recursive: true })
+  }
+}, 15000)
+
+test("a group whose command disappears during exit needs no unproved escalation", async () => {
+  const { child, done } = await stubborn()
+  const directory = mkdtempSync(join(tmpdir(), "agentrun-exiting-command-"))
+  const original = process.env.PATH
+  const signalled = join(directory, "signalled")
+  const observed = join(directory, "observed")
+  const realKill = process.kill.bind(process)
+  const signals: Array<string> = []
+  const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid === -child.pid! && signal !== 0) {
+      signals.push(String(signal))
+      writeFileSync(signalled, "owned signal sent")
+    }
+    return realKill(pid, signal)
+  })
+  let released = false
+  const timer = setInterval(() => {
+    if (!released && existsSync(observed)) {
+      released = true
+      child.send("exit")
+    }
+  }, 20)
+  try {
+    writeFileSync(
+      join(directory, "ps"),
+      `#!/bin/sh
+case "$*" in
+  *command=*)
+    if [ -e '${signalled}' ]; then
+      echo '${child.pid} ${process.pid} ${child.pid} S (node)'
+      touch '${observed}'
+      exit 0
+    fi;;
+esac
+exec /bin/ps "$@"
+`,
+      { mode: 0o755 },
+    )
+    process.env.PATH = `${directory}:${original}`
+    const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
+    expect(result._tag, inspect(result, { depth: 8 })).toBe("Success")
+    expect(released).toBe(true)
+    expect(signals).toEqual(["SIGTERM"])
+    await done
+    expect(() => realKill(child.pid!, 0)).toThrow()
+  } finally {
+    clearInterval(timer)
+    spy.mockRestore()
+    process.env.PATH = original
+    await dispose(child, done)
+    rmSync(directory, { recursive: true })
+  }
+}, 15000)
