@@ -520,12 +520,22 @@ for (const record of ["reservation", "receipt"]) {
     f.command(["run", "TASKS.md", "--run-id", id, "--keep-worktrees", "--json"])
     const file = record === "reservation"
       ? join(f.repo, ".git/agentrun/ownership/runs", id, "owner.json")
-      : join(f.repo, ".git/agentrun/ownership/branches", readdirSync(join(f.repo, ".git/agentrun/ownership/branches"))[0])
+      : join(
+        f.repo,
+        ".git/agentrun/ownership/branches",
+        readdirSync(join(f.repo, ".git/agentrun/ownership/branches"))[0],
+      )
     const before = recordSnapshot(file)
     const marker = join(f.directory, "injection.json")
     const originalOptions = f.env.NODE_OPTIONS
-    f.env.NODE_OPTIONS += ` --require=${fileURLToPath(new URL("../test/fixtures/ownership-faults.cjs", import.meta.url))}`
-    Object.assign(f.env, {AGENTRUN_RECORD_TARGET: file, AGENTRUN_RECORD_FAULT: "short-read", AGENTRUN_RECORD_MARKER: marker})
+    f.env.NODE_OPTIONS += ` --require=${
+      fileURLToPath(new URL("../test/fixtures/ownership-faults.cjs", import.meta.url))
+    }`
+    Object.assign(f.env, {
+      AGENTRUN_RECORD_TARGET: file,
+      AGENTRUN_RECORD_FAULT: "short-read",
+      AGENTRUN_RECORD_MARKER: marker,
+    })
     f.command(["resume", id, "--json"])
     assert.equal(existsSync(marker), true)
     assert.deepEqual(recordSnapshot(file), before)

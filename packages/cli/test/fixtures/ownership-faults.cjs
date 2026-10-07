@@ -42,7 +42,16 @@ if (target && fault && marker) {
       const stat = fs.statSync(target)
       fs.utimesSync(target, stat.atime, new Date(stat.mtimeMs + 1000))
     }
-    fs.writeFileSync(marker, JSON.stringify({ fault, target, pid: process.pid, after: snapshot(), backup: fs.existsSync(target + ".original") ? snapshot(target + ".original") : undefined }))
+    fs.writeFileSync(
+      marker,
+      JSON.stringify({
+        fault,
+        target,
+        pid: process.pid,
+        after: snapshot(),
+        backup: fs.existsSync(target + ".original") ? snapshot(target + ".original") : undefined,
+      }),
+    )
   }
   const open = fs.promises.open
   fs.promises.open = async function(path, ...args) {
