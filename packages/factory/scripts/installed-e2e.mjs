@@ -30,8 +30,8 @@ export const verifyBindings = (consumer, modules, cores) => {
   assert.equal(new Set(cores).size, 1, "Installed modules use different core instances")
 }
 
-export const verifyJourneys = (outcomes, required, minimum = required.length) => {
-  assert.ok(outcomes.length >= minimum, "Incomplete installed journeys")
+export const verifyJourneys = (outcomes, required) => {
+  assert.equal(outcomes.length, required.length, "Incomplete or unexpected installed journeys")
   assert.equal(new Set(outcomes.map((entry) => entry.name)).size, outcomes.length, "Duplicate installed journeys")
   assert.ok(outcomes.every((entry) => entry.outcome === "pass"), "Failed installed journey")
   for (const name of required) {
@@ -72,14 +72,19 @@ const main = (directory, selected = "all") => {
   const git = (name, ...argv) => runCommand(evidence, name, "git", argv, source).trim()
   const head = git("source-head", "rev-parse", "HEAD")
   const branch = git("source-branch", "branch", "--show-current")
-  const base = git("source-parent", "rev-parse", "HEAD^")
+  const parents = git("source-parents", "show", "-s", "--format=%P", "HEAD").split(" ")
+  const candidate = {
+    head: process.env.AGENTRUN_CANDIDATE_HEAD ?? head,
+    base: process.env.AGENTRUN_CANDIDATE_BASE ?? null,
+  }
   assert.equal(git("source-status", "status", "--porcelain"), "", "Source checkout is dirty")
   const tracked = runCommand(evidence, "source-files", "git", ["ls-files", "-z"], source).split("\0").filter(Boolean)
   const sourceHashes = Object.fromEntries(tracked.map((file) => [join(source, file), hash(join(source, file))]))
   save(join(evidence, "source.json"), {
     head,
     branch,
-    base,
+    parents,
+    candidate,
     node: process.version,
     platform: process.platform,
     files: sourceHashes,
@@ -156,30 +161,35 @@ const main = (directory, selected = "all") => {
     return bindings
   }
   const bindings = resolveModules("module-bindings-before")
-  save(join(evidence, "installed-target.json"), { head, branch, base, node: process.version, files, bindings })
+  save(join(evidence, "installed-target.json"), {
+    head,
+    branch,
+    parents,
+    candidate,
+    node: process.version,
+    files,
+    bindings,
+  })
   verifyHashes(files)
   const cli = realpathSync(join(consumer, "node_modules/@agentrun/factory/dist/bin.mjs"))
   const driver = join(source, "packages/factory/scripts/factory-e2e.mjs")
   const journeys = join(evidence, "journeys")
+  const listed =
+    JSON.parse(
+      runCommand(evidence, "declared-journeys", process.execPath, [
+        driver,
+        cli,
+        join(evidence, "listed-journeys"),
+        "list",
+      ], source),
+    ).names
+  assert.equal(new Set(listed).size, listed.length, "Duplicate declared journeys")
+  const required = selected === "all" ? listed : selected.split(",")
+  assert.ok(required.length > 0 && required.every((name) => listed.includes(name)), "Unknown selected journey")
+  save(join(evidence, "expected-journeys.json"), required)
   runCommand(evidence, "installed-journeys", process.execPath, [driver, cli, journeys, selected], source, 7200000)
-  const required = selected === "all"
-    ? [
-      "happy",
-      "report-failure-exit",
-      "report-failure-timeout",
-      "cancel-agent",
-      "correct-executor-crash-unknown-token",
-      "correct-executor-crash-foreign-token",
-      "reject-crash-fault-resume",
-      "correct-executor-crash-lock-held",
-      "export-tree-base",
-      "export-tree-candidate",
-      "export-tree-metadata",
-      "export-tree-gitlink",
-    ]
-    : selected.split(",")
   const results = read(join(journeys, "results.json"))
-  verifyJourneys(results.outcomes, required, selected === "all" ? 80 : required.length)
+  verifyJourneys(results.outcomes, required)
   for (let repeat = 1; repeat <= 10; repeat++) {
     const output = join(evidence, `cancellation-${repeat}`)
     runCommand(evidence, `cancellation-${repeat}`, process.execPath, [driver, cli, output, "cancel-agent"], source)
@@ -193,7 +203,8 @@ const main = (directory, selected = "all") => {
     result: "passed",
     head,
     branch,
-    base,
+    parents,
+    candidate,
     scenarios: results.outcomes.length,
     cancellationRepeats: 10,
     paidProviderCalls: 0,

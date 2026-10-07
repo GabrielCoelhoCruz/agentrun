@@ -24,6 +24,9 @@ jobs:
       - run: pnpm check
       - run: pnpm build
       - name: Prove installed factory
+        env:
+          AGENTRUN_CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          AGENTRUN_CANDIDATE_BASE: ${{ github.event.pull_request.base.sha }}
         run: node packages/factory/scripts/installed-e2e.mjs "$RUNNER_TEMP/factory-installed-proof"
       - name: Save installed proof
         if: ${{ always() }}

@@ -24,6 +24,7 @@ const example = fileURLToPath(new URL("../../../examples/factory/notes-ts/", imp
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex")
 mkdirSync(root, { recursive: false })
 const outcomes = []
+const names = []
 const active = new Set()
 const waitFor = async (read, description, timeout = 30000) => {
   const deadline = performance.now() + timeout
@@ -295,6 +296,8 @@ const copyRuntime = (c, name) => {
   return runtime
 }
 const scenario = async (name, run) => {
+  names.push(name)
+  if (selected === "list") return
   if (
     selected !== "all" && !selected.split(",").includes(name)
     && !(selected === "quick" && ["invalid", "happy", "correct"].includes(name))
@@ -1202,16 +1205,19 @@ ${boundary.endsWith("exit") ? "exit 23" : "exec node -e 'setInterval(()=>{},1000
       await ended
     }
   })
-  assert.ok(outcomes.length > 0, `Unknown scenario: ${selected}`)
-  console.log(
-    JSON.stringify({
-      result: "passed",
-      scenarios: outcomes.length,
-      cli: realpathSync(cli),
-      root,
-      paidProviderCalls: 0,
-    }),
-  )
+  if (selected === "list") console.log(JSON.stringify({ names }))
+  else {
+    assert.ok(outcomes.length > 0, `Unknown scenario: ${selected}`)
+    console.log(
+      JSON.stringify({
+        result: "passed",
+        scenarios: outcomes.length,
+        cli: realpathSync(cli),
+        root,
+        paidProviderCalls: 0,
+      }),
+    )
+  }
 } finally {
   for (const child of active) {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGINT")
