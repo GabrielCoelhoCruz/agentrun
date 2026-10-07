@@ -139,14 +139,14 @@ export const statusOf = (state: Projection) => {
     ? "Inspect the local export. Publication remains a separate human action."
     : stage === "approved"
     ? `agentrun-factory export ${state.run.id}`
+    : state.cancelled
+    ? "Inspect the interrupted attempt. Start a new workflow only after resolving its effects."
     : state.fault?.recoverable
     ? `Inspect the exact attempt, then run agentrun-factory resume ${state.run.id}`
     : request !== null && decision === null
     ? `agentrun-factory decide ${state.run.id} --request ${request.id} --candidate ${request.candidate} --evidence ${request.evidenceDigest} --expected-version ${request.expectedVersion} --action ${
       request.allowedActions[0]
     }`
-    : state.cancelled
-    ? "Inspect the interrupted attempt. Start a new workflow only after resolving its effects."
     : `agentrun-factory resume ${state.run.id}`
   return {
     version: state.version,
@@ -270,7 +270,10 @@ const drive = (store: Store) => {
 const decide = (store: Store, decision: HumanDecision) =>
   Effect.gen(function*() {
     const state = yield* store.verify()
-    if (state.decision !== undefined && JSON.stringify(state.decision) === JSON.stringify(decision)) return
+    if (state.decision !== undefined && JSON.stringify(state.decision) === JSON.stringify(decision)) {
+      if (decision.action === "reject") yield* cancelOwned(store)
+      return
+    }
     const request = state.request
     if (
       request === undefined || state.cancelRequested || state.cancelled || state.exported !== undefined
@@ -291,6 +294,12 @@ const decide = (store: Store, decision: HumanDecision) =>
       && (state.review?.verdict !== "accepted" || state.evidence.length !== state.run.profile.checks.length
         || state.evidence.some((evidence) => evidence.outcome !== "pass"))
     ) return yield* failure("decision", "Executed acceptance and an accepted review are required before local export")
+    const current = state.current
+    if (
+      decision.action === "correct" && current !== undefined && !current.completed && current.attempt.kind !== "check"
+    ) {
+      yield* cleanupExecutor(store, state.run, current.attempt)
+    }
     yield* store.append({ _tag: "HumanDecided", decision }, [], decision.expectedVersion)
     if (decision.action === "reject") yield* cancelOwned(store)
   })
@@ -419,8 +428,11 @@ export const handle = (command: WorkflowCommand, cwd = process.cwd()) =>
           const store = yield* Store.open(directory, !exists)
           if (!exists) yield* store.append({ _tag: "WorkflowStarted", run: preparation.run }, preparation.blobs)
           const state = yield* store.verify()
-          if (state.run.executor.digest !== preparation.run.executor.digest) {
-            return yield* failure("executor", "Installed executor differs from this workflow's pinned runtime")
+          if (
+            state.run.executor.digest !== preparation.run.executor.digest
+            || state.run.executor.bin !== preparation.run.executor.bin
+          ) {
+            return yield* failure("executor", "Executor path or runtime differs from this workflow's pinned executor")
           }
           if (
             state.run.profileHash !== preparation.run.profileHash || state.run.goal !== command.goal
@@ -461,8 +473,9 @@ export const handle = (command: WorkflowCommand, cwd = process.cwd()) =>
       repo.repoRoot,
       repo.commonDir,
       Effect.gen(function*() {
-        if ((yield* executorIdentity()).digest !== state.run.executor.digest) {
-          return yield* failure("executor", "Installed executor differs from this workflow's pinned runtime")
+        const executor = yield* executorIdentity()
+        if (executor.digest !== state.run.executor.digest || executor.bin !== state.run.executor.bin) {
+          return yield* failure("executor", "Executor path or runtime differs from this workflow's pinned executor")
         }
         if (command._tag === "Decide") {
           yield* decide(store, {
@@ -483,7 +496,7 @@ export const handle = (command: WorkflowCommand, cwd = process.cwd()) =>
               },
             }
           }
-          if (state.fault !== undefined) {
+          if (state.fault !== undefined && !state.cancelRequested) {
             yield* store.append({ _tag: "RecoveryStarted" })
           }
           yield* drive(store)

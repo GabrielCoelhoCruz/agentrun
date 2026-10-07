@@ -104,6 +104,9 @@ agentrun-factory export notes-001
 The available actions are in the persisted request. Depending on the state, the request permits approval, one explicit correction, or rejection.
 A repeated identical decision returns its saved result. A stale request, candidate, evidence digest, or version is refused.
 A new candidate invalidates prior checks, review, and approval.
+Rejection is terminal when the decision is saved. After a crash, resume, repeated start, or the same reject decision finishes owned cleanup without dispatching work.
+Before manual correction replaces an incomplete agent attempt, the factory stops its recorded workers with current ownership proof. Unproved ownership refuses the decision.
+Cleanup does not change the request version. An interrupted decision can be retried with the same evidence and version.
 
 Approval confirms a reversible local action. It does not authenticate a human against another process with the same OS user.
 A same-user process can alter control records. The factory grants no publication privilege and performs no push, PR creation, merge, or deployment.
@@ -116,7 +119,8 @@ agentrun-factory cancel notes-001 --expected-version VERSION
 agentrun-factory events notes-001 --after 0 --json
 ```
 
-Resume uses the saved executor identity. It does not select the latest run or blindly repeat interrupted provider work.
+Resume and repeated start require the saved executor path and runtime hash. A moved installation is refused, even if its runtime bytes match.
+Restore the pinned installation to continue that workflow. Resume does not select the latest run or blindly repeat interrupted provider work.
 A complete delivery is validated and reused. A proved completion checkpoint can finish delivery through the executor's existing recovery path.
 A reservation with missing state, missing creation proof, corrupt data, or an unknown tool outcome blocks automatic progress.
 Preserve those records and follow the status guidance. Do not remove corrupt state to make a workflow appear successful.
@@ -144,7 +148,7 @@ Neither the store nor the executor promises exactly-once external effects. An ou
 ## Reproduce the deterministic proof
 
 Run the required project checks with `pnpm check` and `pnpm build`.
-The factory test calls the production binaries and checks invalid profiles, the accepted journey, and a correction.
+The factory tests call the production binaries and check invalid profiles, accepted delivery, correction, decision crashes, worker cleanup, and runtime relocation.
 The complete driver accepts an installed factory binary and a new evidence directory:
 
 ```sh

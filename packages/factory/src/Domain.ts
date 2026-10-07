@@ -461,6 +461,7 @@ export const project = (events: ReadonlyArray<Event>): Projection => {
         state.fault = fact
         break
       case "RecoveryStarted":
+        if (state.cancelRequested) break
         delete state.fault
         delete state.request
         delete state.decision
@@ -489,6 +490,7 @@ export const project = (events: ReadonlyArray<Event>): Projection => {
           || !request.allowedActions.includes(fact.decision.action) || state.decision !== undefined
         ) throw failure("state", "Human decision is stale or conflicts with its request")
         state.decision = fact.decision
+        if (fact.decision.action === "reject") state.cancelRequested = true
         state.manualCorrection = fact.decision.action === "correct"
         if (state.manualCorrection) {
           if (state.current !== undefined && !state.current.completed) {
