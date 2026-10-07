@@ -883,7 +883,17 @@ try {
       })
     }
   }
-  for (const boundary of ["normal", "unknown-token", "foreign-token", "HumanDeciding", "HumanDecided", "reject"]) {
+  for (
+    const boundary of [
+      "normal",
+      "lock-held",
+      "unknown-token",
+      "foreign-token",
+      "HumanDeciding",
+      "HumanDecided",
+      "reject",
+    ]
+  ) {
     await scenario(`correct-executor-crash-${boundary}`, async () => {
       const c = setup(`correct-executor-crash-${boundary}`, "hang-correct")
       const running = c.startAsync()
@@ -919,6 +929,23 @@ try {
         await waitFor(() => beats() > atBlock, "worker survives terminal supervisor receipt")
         const args = decisionArgs(c, blocked, boundary === "reject" ? "reject" : "correct")
         const facts = c.events().length
+        if (boundary === "lock-held") {
+          const release = await holdGitLock(c)
+          try {
+            const refused = c.run(process.execPath, [cli, ...args, "--json"])
+            note(c, "locked-correction-refusal", {
+              ...refused,
+              worker: processRow(worker.pid),
+              version: c.status().version,
+            })
+            assert.equal(refused.code, 1, "locked executor permitted replacement")
+            assert.equal(c.events().length, facts)
+            assert.equal(c.status().version, blocked.version)
+            assert.ok(processRow(worker.pid), "locked correction stopped the worker")
+          } finally {
+            await release()
+          }
+        }
         if (boundary.endsWith("token")) {
           if (boundary === "unknown-token") delete owned.processToken
           else owned.processToken = "0".repeat(32)
