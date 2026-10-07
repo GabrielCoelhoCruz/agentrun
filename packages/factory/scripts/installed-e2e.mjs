@@ -174,15 +174,14 @@ const main = (directory, selected = "all") => {
   const cli = realpathSync(join(consumer, "node_modules/@agentrun/factory/dist/bin.mjs"))
   const driver = join(source, "packages/factory/scripts/factory-e2e.mjs")
   const journeys = join(evidence, "journeys")
-  const listed =
-    JSON.parse(
-      runCommand(evidence, "declared-journeys", process.execPath, [
-        driver,
-        cli,
-        join(evidence, "listed-journeys"),
-        "list",
-      ], source),
-    ).names
+  const listed = JSON.parse(
+    runCommand(evidence, "declared-journeys", process.execPath, [
+      driver,
+      cli,
+      join(evidence, "listed-journeys"),
+      "list",
+    ], source),
+  ).names
   assert.equal(new Set(listed).size, listed.length, "Duplicate declared journeys")
   const required = selected === "all" ? listed : selected.split(",")
   assert.ok(required.length > 0 && required.every((name) => listed.includes(name)), "Unknown selected journey")
