@@ -48,6 +48,7 @@ test("installed proof refuses failed, empty and incomplete journeys", () => {
     assert.throws(() => verifyJourneys(outcomes.slice(0, 1), required), /journey/i);
     assert.throws(() => verifyJourneys([{ name: 'happy', outcome: 'fail' }, outcomes[1]], required), /journey/i);
     assert.throws(() => verifyJourneys([outcomes[0], outcomes[0]], required), /journey/i);
+    assert.throws(() => verifyJourneys([...outcomes, { name: 'invented', outcome: 'pass' }], required), /journey/i);
   `)).toBe("")
 })
 

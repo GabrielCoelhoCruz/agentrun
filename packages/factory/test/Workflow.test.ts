@@ -8,16 +8,20 @@ import { expect, test } from "vitest"
 
 const scenarioBudgetMs = 300000 + 60000 + 60000
 
-test("production CLI retains process-table diagnostics during correction", async () => {
-  const parent = await mkdtemp(join(tmpdir(), "factory-correction-cause-e2e-"))
-  const result = await promisify(execFile)(process.execPath, [
-    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
-    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
-    join(parent, "proof"),
-    "correct-executor-crash-process-table-exit,correct-executor-crash-process-table-timeout",
-  ], { timeout: 2 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
-  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 2, paidProviderCalls: 0 })
-}, 2 * scenarioBudgetMs + 5000)
+test.each(["exit", "timeout"])(
+  "production CLI retains process-table diagnostics during correction (%s)",
+  async (mode) => {
+    const parent = await mkdtemp(join(tmpdir(), "factory-correction-cause-e2e-"))
+    const result = await promisify(execFile)(process.execPath, [
+      fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+      fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+      join(parent, "proof"),
+      `correct-executor-crash-process-table-${mode}`,
+    ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+  },
+  scenarioBudgetMs + 5000,
+)
 
 test("factory driver lists the complete installed matrix without running journeys", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-journey-list-"))
