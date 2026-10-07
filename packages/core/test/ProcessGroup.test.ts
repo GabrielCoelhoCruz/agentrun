@@ -385,3 +385,34 @@ test.each(["live", "exits"])("permission denial with a %s group requires bounded
     await dispose(child, done)
   }
 }, 15000)
+
+test("changed leader evidence before escalation prevents another signal", async () => {
+  const { child, done } = await stubborn()
+  const directory = mkdtempSync(join(tmpdir(), "agentrun-ps-escalation-"))
+  const original = process.env.PATH
+  const realKill = process.kill.bind(process)
+  const signals: Array<string> = []
+  const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid === -child.pid! && signal !== 0) {
+      signals.push(String(signal))
+      writeFileSync(
+        join(directory, "ps"),
+        `#!/bin/sh\necho '${child.pid} ${process.pid} ${child.pid} S node changed-command'\n`,
+        { mode: 0o755 },
+      )
+      process.env.PATH = `${directory}:${original}`
+    }
+    return realKill(pid, signal)
+  })
+  try {
+    const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
+    expect(result._tag).toBe("Failure")
+    expect(signals).toEqual(["SIGTERM"])
+    expect(() => realKill(child.pid!, 0)).not.toThrow()
+  } finally {
+    spy.mockRestore()
+    process.env.PATH = original
+    await dispose(child, done)
+    rmSync(directory, { recursive: true })
+  }
+}, 15000)

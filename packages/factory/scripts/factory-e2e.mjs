@@ -855,7 +855,7 @@ try {
       })
     }
   }
-  for (const boundary of ["normal", "unknown-token", "foreign-token", "HumanDeciding", "HumanDecided"]) {
+  for (const boundary of ["normal", "unknown-token", "foreign-token", "HumanDeciding", "HumanDecided", "reject"]) {
     await scenario(`correct-executor-crash-${boundary}`, async () => {
       const c = setup(`correct-executor-crash-${boundary}`, "hang-correct")
       const running = c.startAsync()
@@ -889,7 +889,7 @@ try {
         const beats = () => c.records().filter((r) => r.kind === "heartbeat").length
         const atBlock = beats()
         await waitFor(() => beats() > atBlock, "worker survives terminal supervisor receipt")
-        const args = decisionArgs(c, blocked, "correct")
+        const args = decisionArgs(c, blocked, boundary === "reject" ? "reject" : "correct")
         const facts = c.events().length
         if (boundary.endsWith("token")) {
           if (boundary === "unknown-token") delete owned.processToken
@@ -915,6 +915,16 @@ try {
         assertExited(worker.pid)
         assert.equal(decided.version, blocked.version + 1)
         assert.deepEqual(c.command(args), decided)
+        if (boundary === "reject") {
+          assert.equal(decided.stage, "cancelled")
+          const stoppedBeats = beats()
+          c.command(["resume", c.id], 1)
+          c.command(["export", c.id], 1)
+          assert.equal(beats(), stoppedBeats)
+          assert.equal(c.records().filter((r) => r.kind === "provider" && r.stage === "correct").length, 1)
+          note(c, "rejected-live-worker", { worker, token, decided, stoppedBeats, facts: c.events() })
+          return
+        }
         const bad = [...args]
         bad[bad.indexOf("--evidence") + 1] = "0".repeat(64)
         c.command(bad, 1)

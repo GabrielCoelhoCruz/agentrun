@@ -34,7 +34,7 @@ test("production CLI cancels a live agent and exports the exact candidate tree",
     fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
     fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
     join(parent, "proof"),
-    "cancel-agent,export-tree-base,export-tree-candidate,export-tree-metadata,export-tree-gitlink",
+    "cancel-agent,correct-executor-crash-reject,export-tree-base,export-tree-candidate,export-tree-metadata,export-tree-gitlink",
   ], { timeout: 300000, maxBuffer: 1024 * 1024 })
-  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 5, paidProviderCalls: 0 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 6, paidProviderCalls: 0 })
 }, 300000)
