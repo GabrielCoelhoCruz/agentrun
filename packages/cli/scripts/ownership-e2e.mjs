@@ -44,7 +44,7 @@ const fixture = (name) => {
   }
   const exec = (executable, args, cwd = repo) => {
     const started = Date.now()
-    const result = spawnSync(executable, args, { cwd, env, encoding: "utf8", timeout: env.AGENTRUN_REFUSAL ? 10000 : 60000 })
+    const result = spawnSync(executable, args, { cwd, env, encoding: "utf8", timeout: env.AGENTRUN_REFUSAL ? 10000 : 60000, killSignal: "SIGKILL" })
     commands.push({
       elapsedMs: Date.now() - started,
       executable,
