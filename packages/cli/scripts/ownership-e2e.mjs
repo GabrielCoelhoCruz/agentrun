@@ -514,5 +514,28 @@ for (const record of ["reservation", "receipt"]) {
   }
 }
 
+for (const record of ["reservation", "receipt"]) {
+  scenario(`bounded-${record}-short-read`, (f) => {
+    const id = "short-0042"
+    f.command(["run", "TASKS.md", "--run-id", id, "--keep-worktrees", "--json"])
+    const file = record === "reservation"
+      ? join(f.repo, ".git/agentrun/ownership/runs", id, "owner.json")
+      : join(f.repo, ".git/agentrun/ownership/branches", readdirSync(join(f.repo, ".git/agentrun/ownership/branches"))[0])
+    const before = recordSnapshot(file)
+    const marker = join(f.directory, "injection.json")
+    const originalOptions = f.env.NODE_OPTIONS
+    f.env.NODE_OPTIONS += ` --require=${fileURLToPath(new URL("../test/fixtures/ownership-faults.cjs", import.meta.url))}`
+    Object.assign(f.env, {AGENTRUN_RECORD_TARGET: file, AGENTRUN_RECORD_FAULT: "short-read", AGENTRUN_RECORD_MARKER: marker})
+    f.command(["resume", id, "--json"])
+    assert.equal(existsSync(marker), true)
+    assert.deepEqual(recordSnapshot(file), before)
+    assert.equal(f.records().length, 1)
+    assert.equal(f.state(id).status.change._tag, "succeeded")
+    f.env.NODE_OPTIONS = originalOptions
+    for (const key of ["AGENTRUN_RECORD_TARGET", "AGENTRUN_RECORD_FAULT", "AGENTRUN_RECORD_MARKER"]) delete f.env[key]
+    f.command(["run", "TASKS.md", "--run-id", "fresh-0099", "--json"])
+  })
+}
+
 assert.ok(outcomes.length > 0, "No scenario selected")
 process.exitCode = outcomes.some((outcome) => outcome.result === "failed") ? 1 : 0

@@ -202,6 +202,7 @@ for (
     await refused()
     expect(injected).toBe(true)
     expect(closed).toBe(fault === "device-before-open" ? 0 : 1)
+    console.log(JSON.stringify({ marker: "ownership-reader-injection", fault, injected, closed }))
   })
 }
 for (const phase of ["acquisition", "read"]) {
@@ -243,5 +244,6 @@ for (const phase of ["acquisition", "read"]) {
     await interrupted
     expect(Exit.hasInterrupts(await Effect.runPromise(Fiber.await(fiber)))).toBe(true)
     expect(closed).toBe(1)
+    console.log(JSON.stringify({ marker: "ownership-reader-interruption", phase, closed }))
   })
 }
