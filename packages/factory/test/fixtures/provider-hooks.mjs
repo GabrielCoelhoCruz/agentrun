@@ -2,6 +2,9 @@ import { registerHooks } from "node:module"
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier === "agentrun" && process.env.FACTORY_FIXTURE_EXECUTOR_INDEX !== undefined) {
+      return nextResolve(process.env.FACTORY_FIXTURE_EXECUTOR_INDEX, context)
+    }
     if (
       specifier === "@agentrun/core" && process.env.FACTORY_FIXTURE_MODE === "unknown-cost"
       && process.argv.some((arg) => arg.startsWith("agentrun-worker-"))

@@ -9,9 +9,10 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
@@ -605,6 +606,52 @@ try {
     assert.deepEqual(results.map((r) => r.code).sort(), [0, 1])
     assertHuman(c.status())
     assert.equal(c.records().filter((r) => r.kind === "provider").length, 2)
+  })
+  await scenario("changed-executor", async () => {
+    const c = setup("changed-executor")
+    const argv = ["--input-type=module", "-e", "console.log(import.meta.resolve('agentrun'))"]
+    const cwd = dirname(realpathSync(cli))
+    const resolved = spawnSync(process.execPath, argv, { cwd, encoding: "utf8" })
+    writeFileSync(
+      join(c.directory, "runtime-resolution.json"),
+      JSON.stringify(
+        {
+          executable: process.execPath,
+          argv,
+          cwd,
+          code: resolved.status,
+          stdout: resolved.stdout,
+          stderr: resolved.stderr,
+        },
+        null,
+        2,
+      ),
+    )
+    assert.equal(resolved.status, 0, resolved.stderr)
+    const original = dirname(dirname(fileURLToPath(resolved.stdout.trim())))
+    const runtime = join(c.directory, "runtime")
+    mkdirSync(runtime)
+    cpSync(join(original, "dist"), join(runtime, "dist"), { recursive: true })
+    cpSync(join(original, "package.json"), join(runtime, "package.json"))
+    const dependencies = existsSync(join(original, "node_modules/@agentrun/core"))
+      ? join(original, "node_modules")
+      : dirname(original)
+    symlinkSync(dependencies, join(runtime, "node_modules"), "dir")
+    const index = join(runtime, "dist/index.mjs")
+    c.env.FACTORY_FIXTURE_EXECUTOR_INDEX = pathToFileURL(index).href
+    const running = c.startAsync({ FACTORY_FIXTURE_CRASH: "AttemptPrepared" })
+    assert.equal((await running.completed).signal, "SIGKILL")
+    const originalBytes = readFileSync(index)
+    writeFileSync(index, Buffer.concat([originalBytes, Buffer.from("\n// fixture runtime revision\n")]))
+    writeFileSync(
+      join(c.directory, "runtime-change.json"),
+      JSON.stringify({ file: index, before: hash(originalBytes), after: hash(readFileSync(index)) }, null, 2),
+    )
+    const before = c.events().length
+    c.command(["resume", c.id], 1)
+    c.start(1)
+    assert.equal(c.records().length, 0)
+    assert.equal(c.events().length, before)
   })
   await scenario("unknown-cost", async () => {
     const c = setup("unknown-cost", "unknown-cost")
