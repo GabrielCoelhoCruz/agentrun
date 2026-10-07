@@ -135,10 +135,12 @@ const outcomes = []
 const declared = []
 const fixture = (name) => {
   const directory = join(root, name)
-  const repo = join(directory, "repo")
-  const home = join(directory, "home")
+  let repo = join(directory, "repo")
+  let home = join(directory, "home")
   mkdirSync(repo, { recursive: true })
   mkdirSync(home)
+  repo = realpathSync(repo)
+  home = realpathSync(home)
   const log = join(directory, "sdk.jsonl")
   const commands = []
   const env = {
