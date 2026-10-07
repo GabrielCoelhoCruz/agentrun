@@ -5,16 +5,20 @@ const target = process.env.AGENTRUN_RECORD_TARGET
 const fault = process.env.AGENTRUN_RECORD_FAULT
 const marker = process.env.AGENTRUN_RECORD_MARKER
 if (target && fault && marker) {
-  const snapshot = () => {
-    const stat = fs.lstatSync(target)
+  const snapshot = (file = target) => {
+    const stat = fs.lstatSync(file)
     return {
       mode: stat.mode,
       size: stat.size,
       ino: stat.ino,
       dev: stat.dev,
+      mtimeMs: stat.mtimeMs,
+      ctimeMs: stat.ctimeMs,
       bytes: stat.isFile()
-        ? require("node:crypto").createHash("sha256").update(fs.readFileSync(target)).digest("hex")
+        ? require("node:crypto").createHash("sha256").update(fs.readFileSync(file)).digest("hex")
         : null,
+      link: stat.isSymbolicLink() ? fs.readlinkSync(file) : null,
+      entries: stat.isDirectory() ? fs.readdirSync(file).sort() : null,
     }
   }
   let injected = false
@@ -38,7 +42,7 @@ if (target && fault && marker) {
       const stat = fs.statSync(target)
       fs.utimesSync(target, stat.atime, new Date(stat.mtimeMs + 1000))
     }
-    fs.writeFileSync(marker, JSON.stringify({ fault, target, pid: process.pid, after: snapshot() }))
+    fs.writeFileSync(marker, JSON.stringify({ fault, target, pid: process.pid, after: snapshot(), backup: fs.existsSync(target + ".original") ? snapshot(target + ".original") : undefined }))
   }
   const open = fs.promises.open
   fs.promises.open = async function(path, ...args) {

@@ -322,14 +322,16 @@ const snapshot = (directory, excluded = new Set()) => {
         entries: readdirSync(file).filter((name) => !excluded.has(join(file, name))).sort(),
       }
       for (const name of readdirSync(file).sort()) visit(join(file, name))
-    } else {files[file] = {
+    } else {
+      files[file] = {
         mode: stat.mode,
         size: stat.size,
         ino: stat.ino,
         dev: stat.dev,
         bytes: stat.isFile() ? createHash("sha256").update(readFileSync(file)).digest("hex") : null,
         link: stat.isSymbolicLink() ? readlinkSync(file) : null,
-      }}
+      }
+    }
   }
   visit(directory)
   return files
@@ -394,6 +396,7 @@ for (const record of ["reservation", "receipt"]) {
       const original = readFileSync(file)
       writeFileSync(join(f.directory, "original-record.json"), original)
       writeFileSync(join(saved.worktrees.change.path, "preserve"), "dirty owned workspace\n")
+      writeFileSync(join(saved.worktrees.change.path, "large-preserve"), Buffer.alloc(70000, 42))
       const dynamic = [
         "replace-before-open",
         "device-before-open",
@@ -415,7 +418,7 @@ for (const record of ["reservation", "receipt"]) {
             assert.equal(
               f.exec("python3", [
                 "-c",
-                "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()",
+                "import os,socket,sys; os.chdir(os.path.dirname(sys.argv[1])); s=socket.socket(socket.AF_UNIX); s.bind(os.path.basename(sys.argv[1])); s.close()",
                 file,
               ]).status,
               0,
@@ -478,14 +481,8 @@ for (const record of ["reservation", "receipt"]) {
         assert.deepEqual(readFileSync(file + ".original"), original)
       }
       if (dynamic) {
-        const stat = lstatSync(file)
-        assert.deepEqual({
-          mode: stat.mode,
-          size: stat.size,
-          ino: stat.ino,
-          dev: stat.dev,
-          bytes: stat.isFile() ? createHash("sha256").update(readFileSync(file)).digest("hex") : null,
-        }, injected.after)
+        assert.deepEqual(recordSnapshot(file), injected.after)
+        if (injected.backup !== undefined) assert.deepEqual(recordSnapshot(file + ".original"), injected.backup)
       }
       writeFileSync(
         join(f.directory, "refusal.json"),
