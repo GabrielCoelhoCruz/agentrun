@@ -2,6 +2,26 @@ import { registerHooks } from "node:module"
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (
+      specifier === "@agentrun/core" && process.env.FACTORY_FIXTURE_MODE === "unknown-cost"
+      && process.argv.some((arg) => arg.startsWith("agentrun-worker-"))
+    ) {
+      const original = nextResolve(specifier, context).url
+      const effect = nextResolve("effect", context).url
+      const source = `
+export * from ${JSON.stringify(original)};
+import { ClaudeCode as real } from ${JSON.stringify(original)};
+import { Stream } from ${JSON.stringify(effect)};
+export const ClaudeCode = { ...real, adapter: { ...real.adapter, run(input) {
+  return real.adapter.run(input).pipe(Stream.map(event => {
+    if (event._tag !== 'Completed' && event._tag !== 'Usage') return event;
+    const { costUsd, ...unknownCost } = event;
+    return unknownCost;
+  }));
+} } };
+`
+      return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true }
+    }
     if (specifier !== "@anthropic-ai/claude-agent-sdk") return nextResolve(specifier, context)
     const original = nextResolve(specifier, context).url
     const source = `
@@ -26,7 +46,7 @@ export function query({ prompt, options }) {
   assert.equal(options.permissionMode, 'dontAsk');
   const prior = existsSync(process.env.FACTORY_FIXTURE_LOG)
     ? readFileSync(process.env.FACTORY_FIXTURE_LOG, 'utf8').trim().split('\\n').filter(Boolean).map(JSON.parse) : [];
-  record({ kind: 'provider', stage: task.stage, attemptId: task.attemptId, inputSha: task.inputSha, pid: process.pid, cwd: options.cwd, review });
+  record({ kind: 'provider', stage: task.stage, attemptId: task.attemptId, inputSha: task.inputSha, pid: process.pid, cwd: options.cwd, review, maxBudgetUsd: options.maxBudgetUsd });
   return Object.assign((async function* () {
     yield { type: 'system', subtype: 'init', session_id: 'local-fixture' };
     if (!review) {
@@ -77,7 +97,7 @@ export function query({ prompt, options }) {
       result = JSON.stringify({ version: 1, candidate: mode === 'wrong-review-candidate' ? '0'.repeat(40) : task.inputSha, profileHash: task.profileHash, verdict, findings });
       if (mode === 'malformed-review') result = 'accepted';
     }
-    yield { type: 'result', subtype: 'success', is_error: false, result, ...(mode === 'unknown-cost' ? {} : { total_cost_usd: 0 }), num_turns: 1 };
+    yield { type: 'result', subtype: 'success', is_error: false, result, total_cost_usd: 0, num_turns: 1 };
   })(), { close() {} });
 }
 `

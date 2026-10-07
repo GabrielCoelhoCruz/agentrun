@@ -1,7 +1,16 @@
 import assert from "node:assert/strict"
 import { spawn, spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs"
 import { join, resolve } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -48,6 +57,7 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
     FACTORY_FIXTURE_MODE: mode,
     FACTORY_FIXTURE_DURABLE: join(fixture, "server-durable.ts"),
     FACTORY_FIXTURE_CRASH_MARKER: join(directory, "crashed"),
+    FACTORY_FIXTURE_CHECK_LOG: join(directory, "checks.jsonl"),
     ...(checkMode === undefined ? {} : { FACTORY_FIXTURE_CHECK: checkMode }),
   }
   const saveCommands = () => writeFileSync(join(directory, "commands.json"), JSON.stringify(commands, null, 2))
@@ -120,9 +130,9 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
   profile.limits.durationMs = 300000
   if (checkMode !== undefined) {
     cpSync(join(fixture, "check-result.mjs"), join(repo, "checks/restart.mjs"))
-    profile.checks[0].requiredEnv = ["FACTORY_FIXTURE_CHECK"]
+    profile.checks[0].requiredEnv = ["FACTORY_FIXTURE_CHECK", "FACTORY_FIXTURE_CHECK_LOG"]
   }
-  changeProfile(profile)
+  changeProfile(profile, repo)
   writeFileSync(join(repo, "factory.json"), JSON.stringify(profile, null, 2))
   writeFileSync(join(repo, ".gitignore"), ".agentrun/\n")
   git("init", "-q")
@@ -198,9 +208,23 @@ const mutateDatabase = (context, operation) => {
     db.close()
   }
 }
+const activeCheck = (context) => {
+  const directory = join(context.stateDirectory, "checks")
+  if (!existsSync(directory)) return undefined
+  for (const attempt of readdirSync(directory)) {
+    const file = join(directory, attempt, "active.json")
+    if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8"))
+  }
+  return undefined
+}
+const assertExited = (pid) => {
+  const probe = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" })
+  assert.ok(probe.status === 1 || probe.stdout.trim().startsWith("Z"), `owned process ${pid} remains`)
+}
 const scenario = async (name, run) => {
   if (
-    selected !== "all" && selected !== name && !(selected === "quick" && ["invalid", "happy", "correct"].includes(name))
+    selected !== "all" && !selected.split(",").includes(name)
+    && !(selected === "quick" && ["invalid", "happy", "correct"].includes(name))
   ) return
   const started = new Date().toISOString()
   try {
@@ -336,6 +360,15 @@ try {
     assert.ok(journey.some((entry) => entry.event === "migration-verified"))
     assert.equal(c.git("status", "--porcelain"), "")
   })
+  await scenario("relative-command", async () => {
+    const c = setup("relative-command", "happy", (profile, repo) => {
+      profile.checks[0].argv = ["checks/run"]
+      profile.checks[0].files.push("checks/run")
+      writeFileSync(join(repo, "checks/run"), "#!/bin/sh\ncd \"$(dirname \"$0\")/..\"\nexec node checks/restart.mjs\n")
+      chmodSync(join(repo, "checks/run"), 0o755)
+    })
+    assertHuman(c.start())
+  })
   await scenario("correct", async () => {
     const c = setup("correct", "correct")
     const state = c.start()
@@ -385,7 +418,15 @@ try {
   for (const mode of ["missing-result", "wrong-candidate", "old-attempt", "omitted-criterion", "missing-artifact"]) {
     await scenario(mode, async () => {
       const c = setup(mode, "happy", () => {}, mode)
-      assertBlocked(c.start(1), /result|criterion|artifact|candidate|attempt|check/i)
+      const expected = {
+        "missing-result": /result is missing/i,
+        "wrong-candidate": /wrong candidate/i,
+        "old-attempt": /wrong candidate, check, or attempt/i,
+        "omitted-criterion": /omitted or repeated an acceptance criterion/i,
+        "missing-artifact": /artifact.*ENOENT|regular file/i,
+      }
+      assertBlocked(c.start(1), expected[mode])
+      assert.equal(readFileSync(c.env.FACTORY_FIXTURE_CHECK_LOG, "utf8").trim().split("\n").length, 1)
       assert.equal(c.records().filter((r) => r.stage === "review").length, 0)
     })
   }
@@ -415,6 +456,7 @@ try {
       "ProcessRegistered",
       "DispatchReleased",
       "ProcessCompleted",
+      "OutputCaptured",
       "AgentRecorded",
       "CheckRecorded",
       "ReviewRecorded",
@@ -520,16 +562,9 @@ try {
       const running = c.startAsync()
       await waitFor(() => {
         if (mode === "cancel-agent") return c.records().some((r) => r.kind === "child")
-        if (!existsSync(join(c.stateDirectory, "workflow.sqlite"))) return false
-        const db = new DatabaseSync(join(c.stateDirectory, "workflow.sqlite"), { readOnly: true })
-        try {
-          return db.prepare("SELECT body FROM facts ORDER BY seq DESC").all().map((r) => JSON.parse(r.body)).some((f) =>
-            f._tag === "DispatchReleased" && f.kind === "check"
-          )
-        } finally {
-          db.close()
-        }
+        return activeCheck(c)
       }, mode)
+      const check = activeCheck(c)
       const current = c.status()
       c.command(["cancel", c.id, "--expected-version", String(current.version)])
       const result = await running.completed
@@ -540,8 +575,11 @@ try {
       assert.equal(c.records().filter((r) => r.kind === "provider").length, count)
       for (const record of c.records()) {
         if (record.kind !== "child") continue
-        const probe = spawnSync("ps", ["-p", String(record.pid), "-o", "stat="], { encoding: "utf8" })
-        assert.ok(probe.status === 1 || probe.stdout.trim().startsWith("Z"), `child ${record.pid} remains`)
+        assertExited(record.pid)
+      }
+      if (check !== undefined) {
+        assertExited(check.pid)
+        assertExited(check.child)
       }
     })
   }
@@ -575,6 +613,7 @@ try {
     })
     assertBlocked(c.start(1), /budget|cost/i)
     assert.equal(c.records().filter((r) => r.kind === "provider").length, 1)
+    assert.equal(c.records().find((r) => r.kind === "provider").maxBudgetUsd, 1)
   })
   await scenario("crash-tools", async () => {
     const c = setup("crash-tools", "crash-tools")
@@ -621,6 +660,98 @@ try {
     writeFileSync(file, "changed export\n")
     c.command(["export", c.id], 1)
     assert.equal(readFileSync(file, "utf8"), "changed export\n")
+  })
+  await scenario("executor-crash-completed", async () => {
+    const c = setup("executor-crash-completed")
+    assertHuman(c.start(0, { FACTORY_FIXTURE_CRASH: "executor-completed" }))
+    assert.ok(existsSync(c.env.FACTORY_FIXTURE_CRASH_MARKER))
+    assert.deepEqual(c.records().filter((r) => r.kind === "provider").map((r) => r.stage), ["implement", "review"])
+    for (const record of c.records()) assertExited(record.pid)
+  })
+  await scenario("crash-check-completed", async () => {
+    const c = setup("crash-check-completed", "happy", () => {}, "record")
+    const running = c.startAsync({ FACTORY_FIXTURE_CRASH: "ProcessCompleted", FACTORY_FIXTURE_CRASH_KIND: "check" })
+    assert.equal((await running.completed).signal, "SIGKILL")
+    assertHuman(c.command(["resume", c.id]))
+    assert.equal(readFileSync(c.env.FACTORY_FIXTURE_CHECK_LOG, "utf8").trim().split("\n").length, 1)
+  })
+  await scenario("crash-check", async () => {
+    const c = setup("crash-check", "happy", () => {}, "cancel-check")
+    const running = c.startAsync()
+    const check = await waitFor(() => activeCheck(c), "executed check and its child")
+    running.child.kill("SIGKILL")
+    assert.equal((await running.completed).signal, "SIGKILL")
+    assertBlocked(c.command(["resume", c.id], 1), /check.*active|unknown outcome/i)
+    assert.equal(readFileSync(c.env.FACTORY_FIXTURE_CHECK_LOG, "utf8").trim().split("\n").length, 1)
+    c.command(["cancel", c.id, "--expected-version", String(c.status().version)])
+    assertExited(check.pid)
+    assertExited(check.child)
+  })
+  await scenario("check-timeout", async () => {
+    const c = setup("check-timeout", "happy", (p) => {
+      p.checks[0].timeoutMs = 500
+    }, "timeout")
+    assertBlocked(c.start(1), /result is missing|unknown outcome/i)
+    const check = activeCheck(c)
+    assert.ok(check, "The timed-out check must have actually started")
+    assertExited(check.pid)
+    assertExited(check.child)
+  })
+  await scenario("fabricated-result", async () => {
+    const c = setup("fabricated-result", "happy", () => {}, "record")
+    const running = c.startAsync({ FACTORY_FIXTURE_CRASH: "AttemptPrepared", FACTORY_FIXTURE_CRASH_KIND: "check" })
+    assert.equal((await running.completed).signal, "SIGKILL")
+    const attempt = c.events().filter((event) => event.fact._tag === "AttemptPrepared").at(-1).fact.attempt
+    const directory = join(c.stateDirectory, "checks", attempt.id)
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(
+      join(directory, "result.json"),
+      JSON.stringify({
+        version: 1,
+        attemptId: attempt.id,
+        candidate: attempt.inputSha,
+        checkId: "restart",
+        criteria: [{ id: "persisted-note", outcome: "pass", artifacts: ["fake.txt"] }],
+      }),
+    )
+    writeFileSync(join(directory, "fake.txt"), "unexecuted evidence\n")
+    assertBlocked(c.command(["resume", c.id], 1), /existed before execution/i)
+    assert.equal(existsSync(c.env.FACTORY_FIXTURE_CHECK_LOG), false)
+    assert.equal(c.records().filter((r) => r.stage === "review").length, 0)
+  })
+  await scenario("foreign-process", async () => {
+    const c = setup("foreign-process")
+    const running = c.startAsync({ FACTORY_FIXTURE_CRASH: "ProcessRegistered" })
+    assert.equal((await running.completed).signal, "SIGKILL")
+    const sentinel = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)", "unrelated-fixture"], {
+      detached: true,
+      stdio: "ignore",
+    })
+    const ended = new Promise((done) => sentinel.once("exit", done))
+    try {
+      mutateDatabase(c, (db) => {
+        let previous = ""
+        for (const row of db.prepare("SELECT * FROM facts ORDER BY seq").all()) {
+          const fact = JSON.parse(row.body)
+          if (fact._tag === "ProcessRegistered") fact.process.pid = sentinel.pid
+          const body = JSON.stringify(fact)
+          const digest = hash(Buffer.from(`${row.seq}\n${row.at}\n${previous}\n${body}`))
+          db.prepare("UPDATE facts SET body = ?, digest = ?, previous = ? WHERE seq = ?").run(
+            body,
+            digest,
+            previous,
+            row.seq,
+          )
+          previous = digest
+        }
+      })
+      assertBlocked(c.command(["resume", c.id], 1), /ownership/i)
+      assert.equal(sentinel.exitCode, null)
+      assert.equal(sentinel.signalCode, null)
+    } finally {
+      sentinel.kill("SIGTERM")
+      await ended
+    }
   })
   assert.ok(outcomes.length > 0, `Unknown scenario: ${selected}`)
   console.log(

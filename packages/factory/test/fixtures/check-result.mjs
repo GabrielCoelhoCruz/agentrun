@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process"
-import { writeFileSync } from "node:fs"
+import { appendFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 const mode = process.env.FACTORY_FIXTURE_CHECK
-if (mode === "cancel-check") {
+appendFileSync(
+  process.env.FACTORY_FIXTURE_CHECK_LOG,
+  `${JSON.stringify({ pid: process.pid, attemptId: process.env.FACTORY_ATTEMPT_ID })}\n`,
+)
+if (mode === "cancel-check" || mode === "timeout") {
   const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" })
   writeFileSync(
     join(process.env.FACTORY_ARTIFACT_DIR, "active.json"),
