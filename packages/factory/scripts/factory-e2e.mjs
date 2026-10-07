@@ -612,6 +612,26 @@ try {
       }
     })
   }
+  for (const mode of ["exit", "timeout"]) {
+    await scenario(`report-failure-${mode}`, async () => {
+      const c = setup(`report-failure-${mode}`)
+      const state = c.start(1, {
+        FACTORY_FIXTURE_REPORT_FAILURE: mode,
+        NODE_OPTIONS: `${c.env.NODE_OPTIONS} --import=${pathToFileURL(join(fixture, "subprocess-errors.mjs")).href}`,
+      })
+      assertBlocked(state, /Executor report command failed/)
+      const fault = c.events().filter((e) => e.fact._tag === "FaultRecorded").at(-1).fact
+      assert.equal(fault.code, "executor-report")
+      assert.match(fault.message, /"timeoutMs":30000/)
+      assert.match(fault.message, mode === "exit" ? /"code":23/ : /"signal":"SIGTERM"/)
+      if (mode === "timeout") assert.match(fault.message, /"killed":true/)
+      assert.match(fault.message, /permission denied/)
+      assert.doesNotMatch(fault.message, /private-token|\/private\/fixture|TOKEN=/)
+      assert.ok(fault.message.length < 1000)
+      assert.equal(c.records().filter((r) => r.kind === "provider").length, 1)
+      note(c, "subprocess-failure", { mode, fault, status: state })
+    })
+  }
   await scenario("corrupt-report", async () => {
     const c = setup("corrupt-report")
     const running = c.startAsync({ FACTORY_FIXTURE_CRASH: "ProcessCompleted" })

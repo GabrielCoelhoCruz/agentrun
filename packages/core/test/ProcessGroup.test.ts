@@ -15,6 +15,43 @@ const start = () =>
     stdio: "ignore",
   })
 
+test.each(["exit", "timeout"])("native process-table failure (%s) retains a redacted cause", async (mode) => {
+  const directory = mkdtempSync(join(tmpdir(), "agentrun-ps-failure-"))
+  const original = process.env.PATH
+  const child = start()
+  const done = once(child, "close")
+  writeFileSync(
+    join(directory, "ps"),
+    `#!/bin/sh\nprintf 'Permission denied: /private/fixture TOKEN=private-token\\n' >&2\n${
+      mode === "exit" ? "exit 23" : "exec node -e 'setInterval(()=>{},1000)'"
+    }\n`,
+    { mode: 0o755 },
+  )
+  try {
+    process.env.PATH = `${directory}:${original}`
+    const failure = await Effect.runPromise(stopProcessGroup(child.pid!, token)).then(
+      () => { throw new Error("Expected process-table failure") },
+      (error: unknown) => error,
+    )
+    expect(failure).toMatchObject({ reason: { _tag: "Unknown", module: "ProcessGroup", method: "table" } })
+    const text = inspect(failure, { depth: 8 })
+    expect(text).toContain('"timeoutMs":5000')
+    expect(text).toContain(mode === "exit" ? '"code":23' : '"signal":"SIGTERM"')
+    if (mode === "timeout") expect(text).toContain('"killed":true')
+    expect(text).toContain("permission denied")
+    expect(text).not.toMatch(/private-token|\/private\/fixture|TOKEN=/)
+    expect(() => process.kill(child.pid!, 0)).not.toThrow()
+    if (process.env.AGENTRUN_TEST_EVIDENCE) {
+      writeFileSync(join(process.env.AGENTRUN_TEST_EVIDENCE, `process-table-${mode}.json`), JSON.stringify({ mode, error: text }))
+    }
+  } finally {
+    process.env.PATH = original
+    child.kill("SIGKILL")
+    await done
+    rmSync(directory, { recursive: true })
+  }
+}, 15000)
+
 test("owned cleanup accepts unrelated process-table rows with group zero", async () => {
   const realTable = spawnSync("/bin/ps", ["-axo", "pid=,ppid=,pgid=,stat="], { encoding: "utf8" })
   expect(realTable.status).toBe(0)
