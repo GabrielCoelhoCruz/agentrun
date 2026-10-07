@@ -68,8 +68,11 @@ for (
   })
 }
 test("refuses invalid UTF8 even when replacement decoding would match", async () => {
-  await fs.writeFile(file, Buffer.from([0x7b, 0xc0, 0xaf, 0x7d]))
-  await refused()
+  const content = JSON.stringify({ ...identity, runId: "run-\ufffd" })
+  const bytes = Buffer.from(content)
+  const position = bytes.indexOf(Buffer.from("\ufffd"))
+  await fs.writeFile(file, Buffer.concat([bytes.subarray(0, position), Buffer.from([0xff]), bytes.subarray(position + 3)]))
+  await expect(read(content)).rejects.toThrow()
 })
 for (const field of ["version", "runId", "repoRoot"]) {
   test(`refuses foreign reservation ${field}`, async () => {
