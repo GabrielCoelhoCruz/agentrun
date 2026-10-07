@@ -467,8 +467,10 @@ try {
       }
       if (kind === "event-gap") mutateDatabase(c, (db) => db.exec("DELETE FROM facts WHERE seq = 2"))
       if (kind === "artifact") {
-        mutateDatabase(c, (db) =>
-          db.exec("UPDATE artifacts SET bytes = X'00' WHERE digest = (SELECT digest FROM artifacts LIMIT 1)"))
+        mutateDatabase(
+          c,
+          (db) => db.exec("UPDATE artifacts SET bytes = X'00' WHERE digest = (SELECT digest FROM artifacts LIMIT 1)"),
+        )
       }
       c.command(["resume", c.id], 1)
       c.command(["export", c.id], 1)
