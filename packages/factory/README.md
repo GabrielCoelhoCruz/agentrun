@@ -45,6 +45,7 @@ Each check runs in a separate owned checkout of the exact candidate. Checks must
 A project script owns its services, readiness probes, migrations, credentials, and background work. It must keep child processes within the owned process tree.
 Checks cannot rely on another check's uncommitted build output. Use one script when steps must share runtime state.
 Declared producer files are pinned from the initial base. A candidate that changes those files cannot pass the check.
+Producer paths cannot traverse symbolic links to another location. Returned artifacts must resolve inside their attempt directory.
 List the producer's dependencies in `files`; the factory does not discover an arbitrary program's transitive inputs.
 
 The factory supplies these environment variables:

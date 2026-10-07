@@ -17,7 +17,7 @@ import { execFile } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { promisify } from "node:util"
 import { CheckResult, FactoryError, failure, Review } from "./Domain.js"
 import type {
@@ -553,7 +553,13 @@ export const executeCheck = (store: Store, state: Projection, current: AttemptSt
       yield* checkClean(workspace.path, attempt.inputSha)
       for (const name of check.files) {
         const expected = run.inputs.find((input) => input.name === name)
-        const actual = yield* io("check-producer", () => readBytes(inside(workspace.path, name)))
+        const actual = yield* io("check-producer", () => {
+          const file = inside(workspace.path, name)
+          if (relative(realpathSync(workspace.path), realpathSync(file)) !== name) {
+            throw failure("check-producer", "Approved check producer leaves its declared candidate path")
+          }
+          return readBytes(file)
+        })
         if (expected === undefined || sha256(actual) !== expected.digest) {
           return yield* failure("check-producer", "Candidate changed an approved check producer")
         }
@@ -645,7 +651,13 @@ export const executeCheck = (store: Store, state: Projection, current: AttemptSt
       ) return yield* failure("check-result", "Check omitted or repeated an acceptance criterion")
       const artifacts = [{ name: `${attempt.id}/result.json`, value: blob(raw) }]
       for (const name of [...new Set(result.criteria.flatMap((criterion) => criterion.artifacts))]) {
-        const bytes = yield* io("check-artifact", () => readBytes(inside(artifactDirectory, name)))
+        const bytes = yield* io("check-artifact", () => {
+          const file = inside(artifactDirectory, name)
+          if (!realpathSync(file).startsWith(`${realpathSync(artifactDirectory)}/`)) {
+            throw failure("check-artifact", "Check artifact resolves outside its attempt directory")
+          }
+          return readBytes(file)
+        })
         artifacts.push({ name: `${attempt.id}/${name}`, value: blob(bytes) })
       }
       for (const name of ["stdout.log", "stderr.log"]) {
