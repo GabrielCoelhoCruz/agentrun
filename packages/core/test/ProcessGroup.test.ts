@@ -30,19 +30,24 @@ test.each(["exit", "timeout"])("native process-table failure (%s) retains a reda
   try {
     process.env.PATH = `${directory}:${original}`
     const failure = await Effect.runPromise(stopProcessGroup(child.pid!, token)).then(
-      () => { throw new Error("Expected process-table failure") },
+      () => {
+        throw new Error("Expected process-table failure")
+      },
       (error: unknown) => error,
     )
     expect(failure).toMatchObject({ reason: { _tag: "Unknown", module: "ProcessGroup", method: "table" } })
     const text = inspect(failure, { depth: 8 })
-    expect(text).toContain('"timeoutMs":5000')
-    expect(text).toContain(mode === "exit" ? '"code":23' : '"signal":"SIGTERM"')
-    if (mode === "timeout") expect(text).toContain('"killed":true')
+    expect(text).toContain("\"timeoutMs\":5000")
+    expect(text).toContain(mode === "exit" ? "\"code\":23" : "\"signal\":\"SIGTERM\"")
+    if (mode === "timeout") expect(text).toContain("\"killed\":true")
     expect(text).toContain("permission denied")
     expect(text).not.toMatch(/private-token|\/private\/fixture|TOKEN=/)
     expect(() => process.kill(child.pid!, 0)).not.toThrow()
     if (process.env.AGENTRUN_TEST_EVIDENCE) {
-      writeFileSync(join(process.env.AGENTRUN_TEST_EVIDENCE, `process-table-${mode}.json`), JSON.stringify({ mode, error: text }))
+      writeFileSync(
+        join(process.env.AGENTRUN_TEST_EVIDENCE, `process-table-${mode}.json`),
+        JSON.stringify({ mode, error: text }),
+      )
     }
   } finally {
     process.env.PATH = original

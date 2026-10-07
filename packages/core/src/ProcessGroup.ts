@@ -3,6 +3,7 @@ import { systemError } from "effect/PlatformError"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import { isAlive } from "./RunLock.js"
+import { subprocessFailure } from "./SubprocessFailure.js"
 
 const exec = promisify(execFile)
 
@@ -17,7 +18,7 @@ const processTable = Effect.fn("ProcessGroup.table")(function*(includeCommand = 
           : ["-axo", "pid=,ppid=,pgid=,stat="],
         { timeout: 5000 },
       ),
-    catch: () => error("Could not read process table"),
+    catch: (cause) => error(`Could not read process table: ${subprocessFailure(cause, 5000)}`),
   })
   const rows = yield* Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({
     pid: Schema.Int.check(Schema.isGreaterThan(0)),

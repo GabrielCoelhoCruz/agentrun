@@ -7,6 +7,7 @@ import {
   RunReport,
   StateStore,
   stopProcessGroup,
+  subprocessFailure,
   Task,
   TaskFile,
   TaskId,
@@ -325,10 +326,12 @@ const recordAgent = (store: Store, run: WorkflowRun, attempt: AgentAttempt) =>
             timeout: 30000,
             maxBuffer: 16 * 1024 * 1024,
           }),
-        catch: () =>
+        catch: (cause) =>
           failure(
             "executor-report",
-            "Executor report, state, or patch is inconsistent. Preserve the exact run for inspection.",
+            `Executor report command failed: ${
+              subprocessFailure(cause, 30000)
+            }. Preserve the exact run for inspection.`,
           ),
       })
       const reportBlob = blob(raw.stdout)
@@ -337,8 +340,10 @@ const recordAgent = (store: Store, run: WorkflowRun, attempt: AgentAttempt) =>
         attemptId: attempt.id,
         artifacts: [{ name: `${attempt.id}/report.json`, digest: reportBlob.digest }],
       }, [reportBlob])
-      const report = yield* io("executor-report", () =>
-        Schema.decodeUnknownSync(Schema.toCodecJson(RunReport))(JSON.parse(raw.stdout)))
+      const report = yield* io(
+        "executor-report",
+        () => Schema.decodeUnknownSync(Schema.toCodecJson(RunReport))(JSON.parse(raw.stdout)),
+      )
       const task = report.tasks[0]
       const delivery = task === undefined ? undefined : report.taskReports?.[task.id]
       if (
@@ -350,9 +355,7 @@ const recordAgent = (store: Store, run: WorkflowRun, attempt: AgentAttempt) =>
         return yield* failure("executor-report", "Executor report does not prove the prepared delivery")
       }
       yield* git(run.repoRoot, ["merge-base", "--is-ancestor", attempt.inputSha, delivery.deliveryCommit]).pipe(
-        Effect.mapError(() =>
-          failure("candidate", "Delivered candidate does not descend from its input")
-        ),
+        Effect.mapError(() => failure("candidate", "Delivered candidate does not descend from its input")),
       )
       yield* git(run.repoRoot, ["merge-base", "--is-ancestor", run.baseSha, delivery.deliveryCommit]).pipe(
         Effect.mapError(() => failure("candidate", "Delivered candidate does not descend from the project base")),
