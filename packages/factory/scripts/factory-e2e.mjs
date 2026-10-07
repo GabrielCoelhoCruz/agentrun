@@ -248,7 +248,9 @@ const holdGitLock = async (c) => {
     stdio: ["pipe", "pipe", "pipe"],
   })
   let output = ""
-  child.stdout.on("data", (data) => { output += String(data) })
+  child.stdout.on("data", (data) => {
+    output += String(data)
+  })
   const ended = new Promise((done) => child.once("exit", done))
   try {
     await waitFor(() => output.includes("locked"), "executor Git lock")
@@ -257,11 +259,19 @@ const holdGitLock = async (c) => {
     throw error
   }
   note(c, "lock-owner", { pid: child.pid, argv, guard })
-  return async () => { child.stdin.end(); await ended }
+  return async () => {
+    child.stdin.end()
+    await ended
+  }
 }
 const copyRuntime = (c, name) => {
-  const resolved = spawnSync(process.execPath, ["--input-type=module", "-e", "console.log(import.meta.resolve('agentrun'))"], {
-    cwd: dirname(realpathSync(cli)), encoding: "utf8",
+  const resolved = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    "console.log(import.meta.resolve('agentrun'))",
+  ], {
+    cwd: dirname(realpathSync(cli)),
+    encoding: "utf8",
   })
   assert.equal(resolved.status, 0, resolved.stderr)
   const original = dirname(dirname(fileURLToPath(resolved.stdout.trim())))
@@ -269,8 +279,13 @@ const copyRuntime = (c, name) => {
   mkdirSync(runtime)
   cpSync(join(original, "dist"), join(runtime, "dist"), { recursive: true })
   cpSync(join(original, "package.json"), join(runtime, "package.json"))
-  symlinkSync(existsSync(join(original, "node_modules/@agentrun/core"))
-    ? join(original, "node_modules") : dirname(original), join(runtime, "node_modules"), "dir")
+  symlinkSync(
+    existsSync(join(original, "node_modules/@agentrun/core"))
+      ? join(original, "node_modules")
+      : dirname(original),
+    join(runtime, "node_modules"),
+    "dir",
+  )
   return runtime
 }
 const scenario = async (name, run) => {
@@ -713,17 +728,35 @@ try {
       const bin = join(original, "dist/bin.mjs")
       const marker = join(c.directory, "changed-executor-ran")
       const bytes = readFileSync(bin)
-      writeFileSync(bin, Buffer.concat([bytes, Buffer.from(
-        `\nimport { writeFileSync as markRelocation } from 'node:fs'; markRelocation(${JSON.stringify(marker)}, 'executed');\n`,
-      )]))
+      writeFileSync(
+        bin,
+        Buffer.concat([
+          bytes,
+          Buffer.from(
+            `\nimport { writeFileSync as markRelocation } from 'node:fs'; markRelocation(${
+              JSON.stringify(marker)
+            }, 'executed');\n`,
+          ),
+        ]),
+      )
       c.env.FACTORY_FIXTURE_EXECUTOR_INDEX = pathToFileURL(join(relocated, "dist/index.mjs")).href
-      note(c, "runtime-binding", { savedBin: bin, currentBin: join(relocated, "dist/bin.mjs"),
-        original: hash(bytes), current: hash(readFileSync(join(relocated, "dist/bin.mjs"))), changed: hash(readFileSync(bin)) })
+      note(c, "runtime-binding", {
+        savedBin: bin,
+        currentBin: join(relocated, "dist/bin.mjs"),
+        original: hash(bytes),
+        current: hash(readFileSync(join(relocated, "dist/bin.mjs"))),
+        changed: hash(readFileSync(bin)),
+      })
       const before = c.events().length
       const result = entry === "resume"
         ? c.run(process.execPath, [cli, "resume", c.id, "--json"])
         : await c.startAsync().completed
-      note(c, "relocation-result", { code: result.code, marker: existsSync(marker), providers: c.records(), events: c.events() })
+      note(c, "relocation-result", {
+        code: result.code,
+        marker: existsSync(marker),
+        providers: c.records(),
+        events: c.events(),
+      })
       assert.equal(existsSync(marker), false, "changed saved executor ran despite unchanged current pin")
       assert.equal(result.code, 1, result.stderr)
       assert.equal(c.events().length, before)
@@ -744,7 +777,8 @@ try {
             assert.match(request.blocker, /resources are active/i)
           } else request = c.start()
           const result = c.run(process.execPath, [cli, ...decisionArgs(c, request, "reject"), "--json"], {
-            FACTORY_FIXTURE_CRASH: "HumanDecided", FACTORY_FIXTURE_CRASH_MARKER: join(c.directory, "reject-crashed"),
+            FACTORY_FIXTURE_CRASH: "HumanDecided",
+            FACTORY_FIXTURE_CRASH_MARKER: join(c.directory, "reject-crashed"),
           })
           assert.equal(result.signal, "SIGKILL", result.stderr)
         } finally {
@@ -769,7 +803,12 @@ try {
         }
         assert.equal(c.status().decision.action, "reject")
         assert.equal(c.records().length, providers)
-        assert.equal(c.events().slice(facts).some((e) => ["AttemptPrepared", "DispatchReleased", "RecoveryStarted"].includes(e.fact._tag)), false)
+        assert.equal(
+          c.events().slice(facts).some((e) =>
+            ["AttemptPrepared", "DispatchReleased", "RecoveryStarted"].includes(e.fact._tag)
+          ),
+          false,
+        )
       })
     }
   }
@@ -780,7 +819,11 @@ try {
       let worker
       let token
       try {
-        worker = await waitFor(() => c.records().find((r) => r.kind === "heartbeat"), "first correction heartbeat", 90000)
+        worker = await waitFor(
+          () => c.records().find((r) => r.kind === "heartbeat"),
+          "first correction heartbeat",
+          90000,
+        )
         const attempt = c.events().filter((e) => e.fact._tag === "AttemptPrepared").at(-1).fact.attempt
         assert.equal(attempt.kind, "correct")
         const file = join(c.repo, ".agentrun/runs", attempt.executorRunId, "state.json")
@@ -815,7 +858,9 @@ try {
             assert.equal(refused.code, 1, "unproved worker permitted replacement")
             assert.equal(c.events().length, facts)
             assert.ok(processRow(worker.pid))
-          } finally { writeFileSync(file, bytes) }
+          } finally {
+            writeFileSync(file, bytes)
+          }
         }
         if (boundary.startsWith("HumanDecid")) {
           const crashed = c.run(process.execPath, [cli, ...args, "--json"], { FACTORY_FIXTURE_CRASH: boundary })
@@ -836,7 +881,15 @@ try {
         assert.equal(beats(), stoppedBeats)
         assert.equal(c.records().filter((r) => r.kind === "provider" && r.stage === "correct").length, 2)
         c.command(args, 1)
-        note(c, "replacement-proof", { worker, token, atBlock, stoppedBeats, finalBeats: beats(), facts: c.events(), providers: c.records() })
+        note(c, "replacement-proof", {
+          worker,
+          token,
+          atBlock,
+          stoppedBeats,
+          finalBeats: beats(),
+          facts: c.events(),
+          providers: c.records(),
+        })
       } finally {
         if (worker !== undefined && processRow(worker.pid) !== undefined) {
           const row = processRow(worker.pid)
