@@ -52,7 +52,7 @@ Recovery has these boundaries:
 The initial run reservation precedes state storage. A crash can leave only that reservation.
 The creation receipt follows Git creation. A missing or partially written receipt cannot authorize resource use.
 No migration infers ownership from a saved name. Current-build owned clean, dirty, and interrupted worktrees keep their lifecycle.
-The existing v1 hanging-acquisition test now expects retention and refusal of unproved partial workspaces, instead of clean partial cleanup.
+Incomplete workspaces without creation proof are now preserved and refused on retry. Earlier builds cleaned up some clean partial workspaces.
 Transient post-creation failures therefore require manual inspection, not guaranteed automatic retry.
 
 Before upgrading, finish in-flight runs with the old build. Retain the old build, backups, and work.

@@ -64,7 +64,7 @@ Records bind names and workspace identity, not branch commits.
 External deletion, recreation, or rewriting of a branch, Git data, or receipt invalidates the provenance assumptions.
 A foreign branch recreated under an owned name can enter delivery. These checks do not provide OS isolation.
 
-Follow the repository README's [inspection procedure](../../README.md#inspect-incomplete-creation) before manual recovery.
+Follow the repository README's [inspection procedure](https://github.com/GabrielCoelhoCruz/agentrun#inspect-incomplete-creation) before manual recovery.
 Verify the exact common directory, run, workspace, ref, and dirtiness before cleanup. Preserve backups and uncertain resources.
 Do not fabricate receipts or use destructive force commands.
 

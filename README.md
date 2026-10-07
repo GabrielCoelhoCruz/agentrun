@@ -79,7 +79,7 @@ Resume requires a matching reservation and proof that the run created its resour
 
 An empty reservation, missing creation proof, or legacy run without ownership records requires inspection. Automatic resume refuses these cases and preserves the files.
 This includes Git failures after resource creation, before the CLI saves its creation receipt. Existing reports remain readable.
-Use a different run ID for new work. Do not remove a reservation or reuse its branch until you have inspected the original run.
+Use a different run ID for new work. Keep the reservation and state while you inspect the original run.
 A directory with missing or corrupt state requires inspection; the CLI does not replace it.
 The commands without an ID retain their current defaults. Automation must not guess its attempt from the latest run.
 
@@ -102,7 +102,7 @@ A creation receipt is the record that binds a run to its workspace and branch na
 Triggers include a failed `post-checkout` hook, checkout or Git LFS errors, the sixty-second Git limit, and the task deadline.
 A crash, interruption, or failed receipt write can also leave resources without valid proof.
 The CLI preserves those resources. `resume --retry-failed` refuses reuse or cleanup while ownership is unproved, even after the original error is fixed.
-A transient Git failure does not guarantee an automatic retry.
+A Git failure after resource creation can block automatic retry.
 
 Inspect the saved run and Git state before recovery:
 
@@ -111,11 +111,18 @@ Inspect the saved run and Git state before recovery:
 3. Identify the exact run ID, originating checkout, task, workspace path, and full branch ref from the saved state.
 4. Resolve the originating checkout's exact Git common directory with `git rev-parse --path-format=absolute --git-common-dir`.
 5. Inspect `git worktree list --porcelain` and the exact ref with `git show-ref --verify refs/heads/<branch>`.
-6. Inspect the workspace's Git common directory, branch, and `git status --porcelain=v1 --untracked-files=all`.
+6. Inspect the workspace's Git common directory, branch, and `git status --porcelain=v1 --untracked-files=all --ignored`.
 7. Compare the saved identities with the reservation and receipt in the resolved common directory.
 
 Reservations are at `agentrun/ownership/runs/<lowercase-run-id>/owner.json` under that common directory.
-Receipts are at `agentrun/ownership/<sha256-of-lowercase-branch>.json`. The hash uses the branch name without `refs/heads/`.
+Receipts are at `agentrun/ownership/branches/<sha256-of-lowercase-branch>.json`. The hash uses the branch name without `refs/heads/`.
+On macOS, calculate the hash with the exact branch name:
+
+```sh
+printf '%s' 'agentrun/<task-id>-<suffix>' | tr '[:upper:]' '[:lower:]' | shasum -a 256
+```
+
+On Linux, replace `shasum -a 256` with `sha256sum`. Do not use `echo`; its newline changes the hash.
 A branch or workspace without its receipt has incomplete ownership. Missing, unreadable, mismatched, or partial records also require inspection.
 Check file type and size before reading a record. Do not read a pipe or device as JSON.
 A matching name alone does not prove creation. Do not create, rewrite, or copy receipts to bypass refusal. Do not delete an invalid receipt to make a retry pass.
@@ -123,10 +130,12 @@ A matching name alone does not prove creation. Do not create, rewrite, or copy r
 If any identity or dirtiness check is uncertain, retain the resources.
 For new work, use a different run ID and unused branch suffix.
 Manual cleanup requires verified common directory, run, workspace, ref, and dirtiness, plus preserved backups and evidence of creation.
+Compare the saved acquisition output with the branch history and registered workspace. These records help inspection but do not replace a creation receipt.
+If the records do not establish who created each resource, preserve it.
 Remove only confirmed disposable partial resources through ordinary Git operations. Do not use force removal, reset, or forced branch deletion.
 If normal Git refuses cleanup, stop and preserve the resources.
-For a current-build run with a valid reservation, removing verified unproved partial resources can permit `resume <id> --retry-failed`.
-Keep the run reservation and state. Remaining invalid records still block resume. Cleanup does not make a legacy run compatible.
+Manual cleanup does not guarantee that resume will work. Keep the run reservation and state.
+Remaining invalid records still block resume. Cleanup does not make a legacy run compatible.
 
 ## Restrict review tools
 
