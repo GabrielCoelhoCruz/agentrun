@@ -16,6 +16,15 @@ export default defineConfig({
       },
       {
         test: {
+          name: "factory",
+          globalSetup: ["./test/build.ts"],
+          root: "./packages/factory",
+          include: ["test/**/*.test.ts"],
+          passWithNoTests: false,
+        },
+      },
+      {
+        test: {
           name: "cli",
           globalSetup: ["./test/build.ts"],
           root: "./packages/cli",

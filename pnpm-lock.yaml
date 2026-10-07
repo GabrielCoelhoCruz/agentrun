@@ -77,6 +77,25 @@ importers:
         specifier: ^5.0.3
         version: 5.0.3(@types/node@24.19.1)(vite@8.3.2(@types/node@24.19.1)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))
 
+  packages/factory:
+    dependencies:
+      '@agentrun/core':
+        specifier: workspace:*
+        version: link:../core
+      '@effect/platform-node':
+        specifier: ^4.0.0
+        version: 4.0.0(effect@4.0.0)(redis@6.3.0)
+      agentrun:
+        specifier: workspace:*
+        version: link:../cli
+      effect:
+        specifier: ^4.0.0
+        version: 4.0.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.1
+        version: 24.19.1
+
 packages:
 
   '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.288':

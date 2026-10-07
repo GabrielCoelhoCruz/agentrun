@@ -42,7 +42,7 @@ const processTable = Effect.fn("ProcessGroup.table")(function*(includeCommand = 
 const running = (state: string) => !state.startsWith("Z")
 
 export const stopProcessGroup = Effect.fn("stopProcessGroup")(
-  function*(pgid: number, token?: string, kind: "worker" | "git" = "worker") {
+  function*(pgid: number, token?: string, kind: "worker" | "git" | "factory" = "worker") {
     const error = (cause: unknown) => systemError({ _tag: "Unknown", module: "ProcessGroup", method: "stop", cause })
     if (!Number.isSafeInteger(pgid) || pgid <= 1) return yield* error("Invalid process group")
     if (!(yield* isAlive(-pgid))) return
