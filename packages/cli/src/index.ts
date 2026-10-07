@@ -1,6 +1,7 @@
 import {
   Agents,
   diagnostics,
+  GitError,
   markdown,
   Report,
   RunLock,
@@ -28,8 +29,14 @@ export class CliFailure extends Schema.TaggedError<CliFailure>()("CliFailure", {
   message: Schema.String,
   code: Schema.Int,
 }) {}
-const bad = (cause: unknown) => new CliFailure({ message: String(cause), code: 2 })
-const failed = (cause: unknown) => new CliFailure({ message: String(cause), code: 1 })
+const errorMessage = (cause: unknown) =>
+  cause instanceof GitError && (cause.command === "worktree ownership" || cause.command === "resume identity")
+    ? cause.stderr
+    : String(cause)
+const bad = (cause: unknown) => new CliFailure({ message: errorMessage(cause), code: 2 })
+const failed = (cause: unknown) => new CliFailure({ message: errorMessage(cause), code: 1 })
+const reserved = (id: string) =>
+  `Run ID already exists: ${id}. Preserve the reservation and inspect it. Resume requires valid state and ownership proof. Use a different run ID for new work.`
 const git = (args: string[], cwd = process.cwd()) =>
   Effect.tryPromise({
     try: () => exec("git", args, { cwd }),
@@ -100,26 +107,41 @@ export const execute = Effect.fn("cli.execute")(
         }),
       )
       const program = Effect.gen(function*() {
+        const commonDir = yield* git(["rev-parse", "--path-format=absolute", "--git-common-dir"], state.repoRoot)
+        const reservations = `${commonDir}/agentrun/ownership/runs`
+        const reservation = `${reservations}/${state.runId.toLowerCase()}`
+        const owner = JSON.stringify({ version: 1, runId: state.runId, repoRoot: state.repoRoot })
+        if (resumeExisting) {
+          const recorded = yield* fs.readFileString(`${reservation}/owner.json`).pipe(
+            Effect.catch(() => Effect.succeed("")),
+          )
+          if (recorded !== owner) {
+            return yield* failed(
+              "Run ownership is unproved. Legacy runs and invalid ownership records cannot resume automatically. Preserve the files and inspect the run and repository.",
+            )
+          }
+        }
         if (!resumeExisting) {
-          const directory = `${state.repoRoot}/.agentrun/runs/${state.runId}`
-          if (yield* fs.exists(directory)) {
-            return yield* bad(`Run ID already exists: ${state.runId}; use resume with this exact ID`)
+          const runs = `${state.repoRoot}/.agentrun/runs`
+          const directory = `${runs}/${state.runId}`
+          const local = yield* fs.readDirectory(runs).pipe(
+            Effect.catch((error) => error.reason._tag === "NotFound" ? Effect.succeed([]) : Effect.fail(error)),
+          )
+          if (local.some((id) => id.toLowerCase() === state.runId.toLowerCase()) || (yield* fs.exists(reservation))) {
+            return yield* bad(reserved(state.runId))
           }
           const worktrees = yield* Worktrees
-          const branches = new Set(
-            (yield* git(["for-each-ref", "--format=%(refname)", "refs/heads"], state.repoRoot)).split("\n"),
-          )
           for (const task of candidate.tasks) {
-            const located = worktrees.locate(task.id)
-            if (branches.has(`refs/heads/${located.branch}`) || (yield* fs.exists(located.path))) {
-              return yield* bad(`Worktree collision: ${located.branch}; choose a different run ID`)
-            }
+            yield* worktrees.assertAvailable(task.id).pipe(Effect.mapError(bad))
           }
-          yield* fs.makeDirectory(`${state.repoRoot}/.agentrun/runs`, { recursive: true })
+          yield* fs.makeDirectory(reservations, { recursive: true, mode: 0o700 })
+          yield* fs.makeDirectory(reservation, { mode: 0o700 }).pipe(
+            Effect.mapError((error) => error.reason._tag === "AlreadyExists" ? bad(reserved(state.runId)) : error),
+          )
+          yield* fs.writeFileString(`${reservation}/owner.json`, owner, { flag: "wx", mode: 0o600 })
+          yield* fs.makeDirectory(runs, { recursive: true })
           yield* fs.makeDirectory(directory).pipe(
-            Effect.mapError((error) =>
-              error.reason._tag === "AlreadyExists" ? bad(`Run ID already exists: ${state.runId}`) : error
-            ),
+            Effect.mapError((error) => error.reason._tag === "AlreadyExists" ? bad(reserved(state.runId)) : error),
           )
           yield* store.save(candidate)
         }
@@ -235,7 +257,26 @@ export const resume = Effect.fn("cli.resume")(
       const id = Option.isSome(options.runId) ? options.runId : yield* store.latest
       if (Option.isNone(id)) return yield* bad("No saved run found")
       yield* Schema.decodeUnknownEffect(RunId)(id.value).pipe(Effect.mapError(bad))
-      const state = yield* store.load(id.value).pipe(Effect.mapError(bad))
+      const state = yield* store.load(id.value).pipe(
+        Effect.catchTag("RunNotFound", () =>
+          Effect.gen(function*() {
+            const commonDir = yield* git(["rev-parse", "--path-format=absolute", "--git-common-dir"], repoRoot)
+            if (
+              (yield* fs.exists(`${repoRoot}/.agentrun/runs/${id.value}`))
+              || (yield* fs.exists(`${commonDir}/agentrun/ownership/runs/${id.value.toLowerCase()}`))
+            ) {
+              return yield* bad(
+                `Run reservation has no saved state in this checkout: ${id.value}. Preserve the reservation and inspect the originating checkout. Resume cannot recover missing state automatically.`,
+              )
+            }
+            return yield* bad(`Run not found: ${id.value}`)
+          })),
+        Effect.catchTag("StateCorrupted", () =>
+          Effect.fail(bad(
+            `Run reservation has invalid state: ${id.value}. Preserve the reservation and inspect the run and repository.`,
+          ))),
+        Effect.mapError((error) => error instanceof CliFailure ? error : bad(error)),
+      )
       if (state.runId !== id.value || state.repoRoot !== repoRoot) {
         return yield* bad("Saved run identity differs from repository")
       }

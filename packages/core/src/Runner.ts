@@ -386,7 +386,6 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
           const start = yield* Clock.currentTimeMillis
           const previous = (yield* SynchronizedRef.get(current)).status[task.id]
           const attempt = previous?._tag === "interrupted" || previous?._tag === "failed" ? previous.attempt + 1 : 1
-          const reuseExisting = (yield* SynchronizedRef.get(current)).worktrees[task.id] !== undefined
           const priorData = (yield* SynchronizedRef.get(current)).taskReports?.[task.id]
           let toolsStarted = priorData?.toolsStarted === true
           let setupDone = priorData?.setupCompleted === true
@@ -427,7 +426,7 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                       exitCode: -1,
                       stderr: error.message,
                     })
-                  )), reuseExisting)
+                  )))
               })
               if (state.setup !== undefined && !options.setupInAgent && !setupDone) {
                 yield* setup(task.id, state.setup, worktree.path)

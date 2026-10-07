@@ -12,16 +12,23 @@ Without the flag, the CLI retains its generated ID format.
 A dry run validates the ID but does not reserve it or check resource availability.
 
 The CLI acquires the existing repository lock before reserving a run.
-It checks for an existing run directory, branch, or worktree before saving initial state.
-Exclusive directory creation refuses an existing entry, including an empty or corrupt reservation.
+It checks for an existing run directory, branch, worktree, or ownership record before saving initial state.
+Run reservations and branch creation receipts share `agentrun/ownership` under the real Git common directory.
+Linked checkouts share that namespace. Run IDs and branch names compare without letter case on both supported hosts.
+Exclusive directory creation refuses an existing run reservation, including an empty or corrupt entry.
+The reservation records the exact run ID and originating checkout. State and reports retain their existing paths under that checkout.
 A duplicate ID exits with code 2. A live repository owner still causes `RunLocked` and code 1.
 Neither refusal starts a provider or overwrites the existing run.
 
 Branch names retain the last four ID characters for compatibility.
 Those characters do not guarantee uniqueness, including when randomly generated.
 A branch or worktree collision exits with code 2 before a new run is saved.
-New task acquisition also refuses existing resources. Resume can reuse recorded resources.
-Reconciliation refuses resources without recorded ownership before cleanup.
+Saving a planned branch name does not establish ownership.
+After successful Git creation, Worktrees writes an exclusive receipt with the run, checkout, task, branch, and workspace identity.
+That receipt reserves the branch name for its owner, even after worktree cleanup.
+Acquisition, reconciliation, snapshot, publication, and cleanup validate the receipt before using existing resources.
+An existing workspace must also have the expected Git common directory and branch.
+Missing, invalid, foreign, or case-conflicting proof causes refusal. The CLI shows that reason without printing receipt contents.
 
 The caller reconciles `report <id> --json` and `resume <id> --json` using its persisted ID.
 The CLI checks the reloaded state identity while it holds the repository lock.
@@ -30,14 +37,21 @@ A coordinator must not use those defaults to infer which attempt it dispatched.
 
 Recovery has these boundaries:
 
-- An absent run directory permits a new dispatch with that ID. Lock and collision checks still apply.
-- An existing valid state belongs to `resume <id>`, even if every task is pending.
+- An absent run directory and absent common reservation permit a new dispatch. Lock and collision checks still apply.
+- An existing valid state and matching reservation belong to `resume <id>`, even if every task is pending.
 - A live owner blocks another execution. A report can still describe completed work.
-- A directory without valid state blocks automatic dispatch and resume. Preserve it for inspection.
+- A reservation without valid state blocks automatic dispatch and resume. Preserve it for inspection and use a different ID for new work.
+- A crash after Git creation but before receipt storage leaves the branch and workspace intact. Resume refuses automatic adoption or cleanup.
+- Legacy runs without a common reservation cannot resume automatically. Legacy resources without creation receipts cannot be reused or cleaned up automatically.
+- Legacy reports remain readable. These refusals do not delete, move, reset, or rewrite the existing resources.
 - A saved completion or delivery uses existing recovery checkpoints without repeating completed provider work.
 - Interrupted provider work can restart a conversation under the existing v1 resume rules. This is not exactly-once provider execution.
 
-Exclusive reservation and atomic state replacement prevent concurrent overwrite and partial replacement.
+The initial run reservation precedes state storage. A crash can leave only that reservation.
+The creation receipt follows Git creation. A missing or partially written receipt cannot authorize resource use.
+No migration infers ownership from a saved name. Existing owned clean, dirty, and interrupted worktrees keep the v1 lifecycle.
+The receipts prevent accidental reuse between cooperating runs. They do not protect against an OS user who rewrites Git data or ownership records.
+Exclusive reservation and atomic state replacement prevent concurrent overwrite and partial replacement of state.
 They retain the existing lack of an fsync guarantee after power loss.
 A separate reservation API would add another lifecycle without a current requirement, so it is not introduced.
 `StateStore.save` remains an update operation. Callers using core services directly must own their state and repository lock.

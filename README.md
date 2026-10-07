@@ -74,6 +74,12 @@ agentrun resume attempt-001-abcd --json
 An ID starts with a letter or digit and contains at most 128 letters, digits, underscores, or hyphens.
 Starting an existing ID fails without overwriting its state. Use its exact ID to resume.
 Existing branch or worktree collisions also fail. Different IDs can share the same four-character branch suffix.
+Collision checks ignore letter case on macOS and Linux. Linked checkouts share run reservations and branch ownership records in Git's common directory.
+Resume requires a matching reservation and proof that the run created its resources. A saved branch name is only a plan.
+
+An empty reservation, missing creation proof, or legacy run without ownership records requires inspection. Automatic resume refuses these cases and preserves the files.
+This includes a crash after Git creates a worktree but before the CLI saves its creation receipt. Existing reports remain readable.
+Use a different run ID for new work. Do not remove a reservation or reuse its branch until you have inspected the original run.
 A directory with missing or corrupt state requires inspection; the CLI does not replace it.
 The commands without an ID retain their current defaults. Automation must not guess its attempt from the latest run.
 
