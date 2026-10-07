@@ -887,6 +887,8 @@ try {
     const boundary of [
       "normal",
       "lock-held",
+      "process-table-exit",
+      "process-table-timeout",
       "unknown-token",
       "foreign-token",
       "HumanDeciding",
@@ -929,6 +931,29 @@ try {
         await waitFor(() => beats() > atBlock, "worker survives terminal supervisor receipt")
         const args = decisionArgs(c, blocked, boundary === "reject" ? "reject" : "correct")
         const facts = c.events().length
+        if (boundary.startsWith("process-table-")) {
+          const directory = join(c.directory, "failing-process-table")
+          mkdirSync(directory)
+          writeFileSync(
+            join(directory, "ps"),
+            `#!/bin/sh
+printf 'Permission denied: /private/fixture TOKEN=private-token\\n' >&2
+${boundary.endsWith("exit") ? "exit 23" : "exec node -e 'setInterval(()=>{},1000)'"}
+`,
+            { mode: 0o755 },
+          )
+          const refused = c.run(process.execPath, [cli, ...args, "--json"], { PATH: `${directory}:${c.env.PATH}` })
+          note(c, "process-table-refusal", { ...refused, worker: processRow(worker.pid), version: c.status().version })
+          assert.equal(refused.code, 1)
+          assert.match(refused.stderr, /process-ownership/)
+          assert.match(refused.stderr, /"timeoutMs":5000/)
+          assert.match(refused.stderr, boundary.endsWith("exit") ? /"code":23/ : /"signal":"SIGTERM"/)
+          assert.match(refused.stderr, /permission denied/)
+          assert.doesNotMatch(refused.stderr, /private-token|\/private\/fixture|TOKEN=/)
+          assert.equal(c.events().length, facts)
+          assert.equal(c.status().version, blocked.version)
+          assert.ok(processRow(worker.pid), "failed process proof stopped the worker")
+        }
         if (boundary === "lock-held") {
           const release = await holdGitLock(c)
           try {
