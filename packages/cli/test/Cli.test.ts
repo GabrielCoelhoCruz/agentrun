@@ -45,7 +45,7 @@ const fixture = (tasks = 2, prompt = "success") => {
     repos: new Set<string>(),
     incompleteStates: new Set<string>(),
   }
-  const f = { root, repo, home, ownership }
+  const f = { root, repo: realpathSync(repo), home, ownership }
   onTestFinished(() => closeFixture(f), 60000)
   return f
 }
