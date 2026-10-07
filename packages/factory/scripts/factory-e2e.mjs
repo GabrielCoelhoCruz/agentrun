@@ -844,6 +844,14 @@ try {
           assert.ok(row.command.split(/\s+/).includes(`agentrun-worker-${token}`))
           note(c, "owned-cleanup", row)
           process.kill(-row.group, "SIGTERM")
+          await new Promise((done) => setTimeout(done, 500))
+          const remaining = processRow(worker.pid)
+          if (remaining !== undefined) {
+            assert.equal(remaining.group, worker.pid)
+            assert.ok(remaining.command.split(/\s+/).includes(`agentrun-worker-${token}`))
+            note(c, "owned-cleanup-escalation", remaining)
+            process.kill(-remaining.group, "SIGKILL")
+          }
           await waitFor(() => processRow(worker.pid) === undefined, "owned fixture worker exit")
         }
       }
