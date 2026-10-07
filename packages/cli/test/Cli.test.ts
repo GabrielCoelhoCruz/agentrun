@@ -1643,7 +1643,7 @@ test("review partial acquisition clears setup before a failed retry can reuse th
 for (const id of ["../escape", "bad/id", "bad\\id", ".", "-bad", "a".repeat(129)]) {
   test(`explicit run identity rejects invalid ID ${id}`, async () => {
     const f = fixture(1)
-    const c = child(f, ["run", "TASKS.md", "--run-id", id, "--json"], true)
+    const c = child(f, ["run", "TASKS.md", `--run-id=${id}`, "--json"], true)
     expect(await c.done).toBe(2)
     expect(c.stderr()).toContain("Invalid run ID")
     expect(existsSync(join(f.repo, ".agentrun"))).toBe(false)
@@ -1733,22 +1733,30 @@ for (const window of ["reservation", "initial", "completed"] as const) {
     writeFileSync(
       join(f.root, "crash.cjs"),
       `
-const fs = require('node:fs'); const p = fs.promises;
+const fs = require('node:fs');
+const { syncBuiltinESMExports } = require('node:module');
 const marker = ${JSON.stringify(join(f.root, "crashed"))};
-const original = p.${window === "reservation" ? "writeFile" : "rename"};
-p.${window === "reservation" ? "writeFile" : "rename"} = async function(...args) {
-  ${window === "reservation" ? "" : "const result = await original.apply(this, args);"}
-  const target = String(args[${window === "reservation" ? 0 : 1}]);
-  if (!fs.existsSync(marker) && target.endsWith('/${id}/state.json${window === "reservation" ? ".tmp" : ""}')) {
+const original = fs.${window === "reservation" ? "writeFile" : "rename"};
+const crash = (target) => {
+  if (!fs.existsSync(marker) && String(target).endsWith('/${id}/state.json${window === "reservation" ? ".tmp" : ""}')) {
     ${
         window === "completed"
-          ? "if (JSON.parse(fs.readFileSync(target, 'utf8')).taskReports?.task0?.phase !== 'completed') return result;"
+          ? "if (JSON.parse(fs.readFileSync(target, 'utf8')).taskReports?.task0?.phase !== 'completed') return;"
           : ""
       }
-    fs.writeFileSync(marker, target); process.kill(process.pid, 'SIGKILL');
+    fs.writeFileSync(marker, String(target)); process.kill(process.pid, 'SIGKILL');
   }
-  ${window === "reservation" ? "return original.apply(this, args);" : "return result;"}
 };
+fs.${window === "reservation" ? "writeFile" : "rename"} = function(...args) {
+  ${
+        window === "reservation"
+          ? "crash(args[0]); return original.apply(this, args);"
+          : `const callback = args.pop(); return original.call(this, ...args, (error) => {
+    if (!error) crash(args[1]); callback(error);
+  });`
+      }
+};
+syncBuiltinESMExports();
 `,
     )
     expect(await child(f, ["run", "TASKS.md", "--run-id", id, "--json"]).done).toBe(null)
@@ -1780,15 +1788,19 @@ test("resume verifies the identity reloaded under the owner lock", async () => {
   writeFileSync(
     join(f.root, "crash.cjs"),
     `
-const fs = require('node:fs'); const p = fs.promises; const original = p.readFile; let reads = 0;
-p.readFile = async function(...args) {
-  const value = await original.apply(this, args);
-  if (String(args[0]).endsWith('/${id}/state.json') && ++reads === 2) {
-    const saved = JSON.parse(value); saved.runId = 'different-c3d4';
-    const text = JSON.stringify(saved); return Buffer.isBuffer(value) ? Buffer.from(text) : text;
-  }
-  return value;
+const fs = require('node:fs'); const original = fs.readFile; let reads = 0;
+const { syncBuiltinESMExports } = require('node:module');
+fs.readFile = function(...args) {
+  const callback = args.pop();
+  return original.call(this, ...args, (error, value) => {
+    if (!error && String(args[0]).endsWith('/${id}/state.json') && ++reads === 2) {
+      const saved = JSON.parse(value); saved.runId = 'different-c3d4';
+      const text = JSON.stringify(saved); value = Buffer.isBuffer(value) ? Buffer.from(text) : text;
+    }
+    callback(error, value);
+  });
 };
+syncBuiltinESMExports();
 `,
   )
   const c = child(f, ["resume", id, "--json"])
