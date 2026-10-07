@@ -32,6 +32,7 @@ NodeRuntime.runMain(
             writeFileSync(join(root, "old-child-at-start"), status)
           }
           appendFileSync(starts, `${process.pid}\n`)
+          writeFileSync(join(root, `tools-${id}`), input.tools ?? "default")
           writeFileSync(join(root, `settings-${id}`), String(input.loadProjectSettings === true))
           yield { _tag: "Started" as const }
           if (input.prompt.includes("slow-cleanup")) {

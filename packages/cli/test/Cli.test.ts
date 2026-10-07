@@ -38,7 +38,12 @@ const fixture = (tasks = 2, prompt = "success") => {
     join(repo, "TASKS.md"),
     Array.from({ length: tasks }, (_, n) => `## task${n}: Task ${n}\n${prompt}\n`).join("\n"),
   )
-  const ownership = { closed: false, children: new Set<ChildProcessWithoutNullStreams>(), repos: new Set<string>() }
+  const ownership = {
+    closed: false,
+    children: new Set<ChildProcessWithoutNullStreams>(),
+    repos: new Set<string>(),
+    incompleteStates: new Set<string>(),
+  }
   const f = { root, repo, home, ownership }
   onTestFinished(() => closeFixture(f), 60000)
   return f
@@ -149,7 +154,7 @@ const closeFixture = async (f: Fixture) => {
     if (!existsSync(runs)) continue
     for (const run of readdirSync(runs)) {
       const file = join(runs, run, "state.json")
-      if (!existsSync(file)) continue
+      if (!existsSync(file) || f.ownership.incompleteStates.has(file)) continue
       try {
         const saved: Saved = JSON.parse(readFileSync(file, "utf8"))
         for (const worker of Object.values(saved.worktrees)) {
@@ -1634,3 +1639,191 @@ test("review partial acquisition clears setup before a failed retry can reuse th
   writeFileSync(join(f.root, "delivered-partial-user-work"), contents.stdout)
   expect(contents.stdout).toEqual(Buffer.from("preserve this\n"))
 }, 120000)
+
+for (const id of ["../escape", "bad/id", "bad\\id", ".", "-bad", "a".repeat(129)]) {
+  test(`explicit run identity rejects invalid ID ${id}`, async () => {
+    const f = fixture(1)
+    const c = child(f, ["run", "TASKS.md", "--run-id", id, "--json"], true)
+    expect(await c.done).toBe(2)
+    expect(c.stderr()).toContain("Invalid run ID")
+    expect(existsSync(join(f.repo, ".agentrun"))).toBe(false)
+    expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
+  }, 30000)
+}
+
+test("explicit run identity preserves completed artifacts on repeated dispatch", async () => {
+  const f = fixture(1, "report-bytes")
+  const id = "caller-attempt-a1b2"
+  const args = ["run", "TASKS.md", "--run-id", id, "--json"]
+  expect(await child(f, args).done).toBe(0)
+  expect(state(f).runId).toBe(id)
+  const files = ["state.json", "report.json", "report.md", "tasks/task0/events.jsonl", "tasks/task0/diff.patch"]
+  const before = files.map((file) => readFileSync(join(artifacts(f), file)))
+  const refs = git(f.repo, ["show-ref"])
+  const duplicate = child(f, args)
+  expect(await duplicate.done).toBe(2)
+  expect(duplicate.stderr()).toContain("already exists")
+  expect(files.map((file) => readFileSync(join(artifacts(f), file)))).toEqual(before)
+  expect(git(f.repo, ["show-ref"])).toBe(refs)
+  expect(starts(f)).toBe(1)
+  expect(await child(f, ["resume", id, "--json"]).done).toBe(0)
+  expect(starts(f)).toBe(1)
+}, 30000)
+
+for (const leftover of ["empty", "temporary", "corrupt"] as const) {
+  test(`explicit run identity preserves ${leftover} reservation`, async () => {
+    const f = fixture(1)
+    const id = "reserved-a1b2"
+    const dir = join(f.repo, ".agentrun/runs", id)
+    mkdirSync(dir, { recursive: true })
+    const file = leftover === "temporary" ? "state.json.tmp" : "state.json"
+    f.ownership.incompleteStates.add(join(dir, "state.json"))
+    if (leftover !== "empty") writeFileSync(join(dir, file), "incomplete original bytes")
+    const c = child(f, ["run", "TASKS.md", "--run-id", id, "--json"])
+    expect(await c.done).toBe(2)
+    expect(c.stderr()).toContain("already exists")
+    expect(readdirSync(dir)).toEqual(leftover === "empty" ? [] : [file])
+    if (leftover !== "empty") expect(readFileSync(join(dir, file), "utf8")).toBe("incomplete original bytes")
+    expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
+    expect(git(f.repo, ["branch", "--list", "agentrun/*"])).toBe("")
+  }, 30000)
+}
+
+test("concurrent explicit dispatch has one owner and preserves its pending work", async () => {
+  const f = fixture(1, "hold")
+  const id = "concurrent-a1b2"
+  const args = ["run", "TASKS.md", "--run-id", id, "--json"]
+  const first = child(f, args)
+  const second = child(f, args)
+  await wait(() => existsSync(join(f.root, "child-task0")))
+  const ownerPid = Number(readFileSync(lockPath(f), "utf8"))
+  const owner = first.p.pid === ownerPid ? first : second
+  const rejected = owner === first ? second : first
+  expect(owner.p.pid).toBe(ownerPid)
+  expect(await rejected.done).toBe(1)
+  expect(rejected.stderr()).toContain("RunLocked")
+  expect(state(f).runId).toBe(id)
+  expect(starts(f)).toBe(1)
+  expect(readdirSync(join(f.repo, ".agentrun/runs"))).toEqual([id])
+  owner.p.kill("SIGINT")
+  expect(await owner.done).toBe(130)
+  const before = readFileSync(statePath(f))
+  expect(await child(f, args).done).toBe(2)
+  expect(readFileSync(statePath(f))).toEqual(before)
+}, 30000)
+
+test("a suffix collision preserves the prior delivery without reserving a new run", async () => {
+  const f = fixture(1)
+  expect(await child(f, ["run", "TASKS.md", "--run-id", "first-a1b2", "--json"]).done).toBe(0)
+  const before = readFileSync(statePath(f))
+  const refs = git(f.repo, ["show-ref"])
+  const c = child(f, ["run", "TASKS.md", "--run-id", "second-a1b2", "--json"])
+  expect(await c.done).toBe(2)
+  expect(c.stderr()).toMatch(/[Cc]ollision/)
+  expect(readFileSync(statePath(f))).toEqual(before)
+  expect(git(f.repo, ["show-ref"])).toBe(refs)
+  expect(starts(f)).toBe(1)
+  expect(existsSync(join(f.repo, ".agentrun/runs/second-a1b2"))).toBe(false)
+}, 30000)
+
+for (const window of ["reservation", "initial", "completed"] as const) {
+  test(`explicit identity recovers the ${window} crash window without guessing latest`, async () => {
+    const f = fixture(1)
+    const id = "crash-a1b2"
+    writeFileSync(
+      join(f.root, "crash.cjs"),
+      `
+const fs = require('node:fs'); const p = fs.promises;
+const marker = ${JSON.stringify(join(f.root, "crashed"))};
+const original = p.${window === "reservation" ? "writeFile" : "rename"};
+p.${window === "reservation" ? "writeFile" : "rename"} = async function(...args) {
+  ${window === "reservation" ? "" : "const result = await original.apply(this, args);"}
+  const target = String(args[${window === "reservation" ? 0 : 1}]);
+  if (!fs.existsSync(marker) && target.endsWith('/${id}/state.json${window === "reservation" ? ".tmp" : ""}')) {
+    ${
+        window === "completed"
+          ? "if (JSON.parse(fs.readFileSync(target, 'utf8')).taskReports?.task0?.phase !== 'completed') return result;"
+          : ""
+      }
+    fs.writeFileSync(marker, target); process.kill(process.pid, 'SIGKILL');
+  }
+  ${window === "reservation" ? "return original.apply(this, args);" : "return result;"}
+};
+`,
+    )
+    expect(await child(f, ["run", "TASKS.md", "--run-id", id, "--json"]).done).toBe(null)
+    expect(existsSync(join(f.root, "crashed"))).toBe(true)
+    expect(await child(f, ["run", "TASKS.md", "--run-id", id, "--json"]).done).toBe(2)
+    if (window === "reservation") {
+      expect(await child(f, ["resume", id, "--json"]).done).toBe(2)
+      expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
+      expect(readdirSync(join(f.repo, ".agentrun/runs", id))).toEqual([])
+    } else {
+      f.ownership.incompleteStates.add(join(f.repo, ".agentrun/runs/zz-later/state.json"))
+      mkdirSync(join(f.repo, ".agentrun/runs/zz-later"))
+      writeFileSync(join(f.repo, ".agentrun/runs/zz-later/state.json"), "foreign incomplete state")
+      expect(await child(f, ["resume", id, "--json"]).done).toBe(0)
+      expect(JSON.parse(readFileSync(join(f.repo, ".agentrun/runs", id, "state.json"), "utf8")).status.task0._tag).toBe(
+        "succeeded",
+      )
+      expect(starts(f)).toBe(1)
+      expect(readFileSync(join(f.repo, ".agentrun/runs/zz-later/state.json"), "utf8")).toBe("foreign incomplete state")
+    }
+  }, 30000)
+}
+
+test("resume verifies the identity reloaded under the owner lock", async () => {
+  const f = fixture(1)
+  const id = "locked-a1b2"
+  expect(await child(f, ["run", "TASKS.md", "--run-id", id, "--json"]).done).toBe(0)
+  const before = readFileSync(statePath(f))
+  writeFileSync(
+    join(f.root, "crash.cjs"),
+    `
+const fs = require('node:fs'); const p = fs.promises; const original = p.readFile; let reads = 0;
+p.readFile = async function(...args) {
+  const value = await original.apply(this, args);
+  if (String(args[0]).endsWith('/${id}/state.json') && ++reads === 2) {
+    const saved = JSON.parse(value); saved.runId = 'different-c3d4';
+    const text = JSON.stringify(saved); return Buffer.isBuffer(value) ? Buffer.from(text) : text;
+  }
+  return value;
+};
+`,
+  )
+  const c = child(f, ["resume", id, "--json"])
+  expect(await c.done).toBe(2)
+  expect(c.stderr()).toContain("identity differs")
+  expect(readFileSync(statePath(f))).toEqual(before)
+  expect(starts(f)).toBe(1)
+}, 30000)
+
+for (const agent of ["claude-code", "pi"] as const) {
+  test(`read-only ${agent} profile crosses the production worker protocol`, async () => {
+    const f = fixture(1, "report-nochange")
+    writeFileSync(
+      join(f.repo, "TASKS.md"),
+      `---\nagent: ${agent}\ntools: read-only\n---\n## task0: Review\nreport-nochange\n`,
+    )
+    expect(await child(f, ["run", "TASKS.md", "--run-id", "review-a1b2", "--json"]).done).toBe(0)
+    expect(readFileSync(join(f.root, "tools-task0"), "utf8")).toBe("read-only")
+    expect(reportJson(f).tasks[0].tools).toBe("read-only")
+    expect(reportJson(f).taskReports.task0.deliveryCommit).toBe(state(f).baseSha)
+    expect(readFileSync(join(artifacts(f), "tasks/task0/diff.patch"))).toEqual(Buffer.alloc(0))
+  }, 30000)
+}
+
+test("restricted settings and setup fail preflight without run or worker effects", async () => {
+  for (const settings of [false, true]) {
+    const f = fixture(1)
+    writeFileSync(
+      join(f.repo, "TASKS.md"),
+      `---\ntools: read-only\n${settings ? "" : "setup: touch forbidden\n"}---\n## task0: Review\nInspect.\n`,
+    )
+    const c = child(f, ["run", "TASKS.md", "--json", ...(settings ? ["--load-project-settings"] : [])], true)
+    expect(await c.done).toBe(2)
+    expect(c.stderr()).toContain("read-only")
+    expect(existsSync(join(f.repo, ".agentrun"))).toBe(false)
+    expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
+  }
+}, 30000)

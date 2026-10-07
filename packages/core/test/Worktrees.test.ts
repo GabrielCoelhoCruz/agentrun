@@ -401,3 +401,46 @@ describe("Worktrees", () => {
       })
     ))
 })
+
+for (const resource of ["branch", "directory", "worktree"] as const) {
+  it.live(`refuses unrecorded pending ${resource} without cleanup`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const service = yield* Worktrees
+        const worktree = service.locate(task().id)
+        if (resource === "branch") yield* git(fixture.repoRoot, ["branch", worktree.branch, fixture.baseSha])
+        else {
+          yield* fixture.fs.makeDirectory(fixture.path.dirname(worktree.path), { recursive: true })
+          if (resource === "worktree") {
+            yield* git(fixture.repoRoot, ["worktree", "add", "-b", worktree.branch, worktree.path, fixture.baseSha])
+          } else yield* fixture.fs.makeDirectory(worktree.path)
+          yield* fixture.fs.writeFileString(fixture.path.join(worktree.path, "owner-file"), "preserve")
+        }
+        const before = yield* git(fixture.repoRoot, ["show-ref"])
+        const unowned = new RunState({ ...state(fixture, worktree, { _tag: "pending" }), worktrees: {} })
+        const error = yield* Effect.flip(service.reconcile(unowned))
+        assert.strictEqual(error._tag, "GitError")
+        assert.match(error.stderr, /[Cc]ollision|[Oo]wnership/)
+        assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+        if (resource !== "branch") {
+          assert.strictEqual(
+            yield* fixture.fs.readFileString(fixture.path.join(worktree.path, "owner-file")),
+            "preserve",
+          )
+        }
+      })
+    ))
+}
+
+it.live("new acquisition refuses an existing branch instead of adopting it", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const service = yield* Worktrees
+      const worktree = service.locate(task().id)
+      yield* git(fixture.repoRoot, ["branch", worktree.branch, fixture.baseSha])
+      const error = yield* Effect.flip(service.acquire(task(), fixture.baseSha, undefined, undefined, false))
+      assert.strictEqual(error._tag, "GitError")
+      assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", worktree.branch]), fixture.baseSha)
+      assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
+    })
+  ))

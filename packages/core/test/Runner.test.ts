@@ -1088,3 +1088,19 @@ for (const mode of ["protocol", "stall", "ceiling"] as const) {
     }).pipe(Effect.scoped)
   })
 }
+
+it.effect("refuses an unsupported saved tool profile before worktree or provider work", () => {
+  let calls = 0
+  const agents = fakeAgents(() => {
+    calls++
+    return success
+  })
+  const restricted = new Task({ ...task(), tools: "read-only" })
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const error = yield* Effect.flip(runner.run(runState([restricted])))
+    assert.strictEqual(error._tag, "AgentSpawnError")
+    assert.strictEqual(calls, 0)
+    assert.deepStrictEqual(yield* (yield* StateStore).latest, Option.none())
+  }).pipe(Effect.provide(deadlineLayer(agents)), Effect.scoped)
+})
