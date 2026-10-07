@@ -1,4 +1,3 @@
-"""Inspect an archive without extraction and compare it with the candidate tree."""
 import hashlib
 import json
 import subprocess

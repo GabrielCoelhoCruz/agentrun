@@ -2,6 +2,7 @@ import { RunLock } from "@agentrun/core"
 import { Effect, Schema } from "effect"
 import { existsSync, mkdirSync, readdirSync } from "node:fs"
 import { join } from "node:path"
+import { sourceArchive } from "./Archive.js"
 import { Candidate, FactoryError, failure, HumanAction, Id } from "./Domain.js"
 import type { Artifact, HumanDecision, HumanRequest, Projection } from "./Domain.js"
 import { gitBytes, inside, io, readBytes, sha256, syncDirectory, writeExclusive } from "./Files.js"
@@ -314,7 +315,7 @@ const exportLocal = (store: Store) =>
     if (state.exportPrepared === undefined) {
       const candidate = state.candidate
       const source = blob(
-        yield* withGitLock(state.run, gitBytes(state.run.repoRoot, ["archive", "--format=tar", candidate.commit])),
+        yield* withGitLock(state.run, sourceArchive(state.run.repoRoot, candidate.commit)),
       )
       const patch = blob(
         yield* gitBytes(state.run.repoRoot, ["diff", "--binary", `${state.run.baseSha}..${candidate.commit}`]),

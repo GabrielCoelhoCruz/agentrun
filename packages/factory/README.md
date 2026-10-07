@@ -139,6 +139,9 @@ The sequenced facts are the source of workflow state. `events` exposes the same 
 No browser server is included.
 
 Export contains the exact source archive, binary patch, pinned profile, workflow evidence, and a digest manifest.
+`source.tar` is built from the approved Git tree and blob bytes. Git export attributes cannot omit files or substitute content.
+It preserves tracked paths, executable modes, and symbolic link targets. Tracked submodules and non-UTF-8 paths or link targets are refused.
+Source archives are limited to 64 MiB. Directory modes are 0755; archive timestamps are fixed at the Unix epoch.
 Export retries verify the existing bytes. Conflicting files are preserved and refused.
 These local artifacts can contain prompts, source, logs, and local paths. Inspect them before sharing.
 
@@ -148,7 +151,7 @@ Neither the store nor the executor promises exactly-once external effects. An ou
 ## Reproduce the deterministic proof
 
 Run the required project checks with `pnpm check` and `pnpm build`.
-The factory tests call the production binaries and check invalid profiles, accepted delivery, correction, decision crashes, worker cleanup, and runtime relocation.
+The factory tests call the production binaries and check invalid profiles, accepted delivery, correction, decision crashes, worker cleanup, and runtime relocation, concurrent cancellation, and exact source export.
 The complete driver accepts an installed factory binary and a new evidence directory:
 
 ```sh
