@@ -8,6 +8,17 @@ import { expect, test } from "vitest"
 
 const scenarioBudgetMs = 300000 + 60000 + 60000
 
+test("production CLI refuses correction while its executor lock is held", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-locked-correction-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    "reject-crash-fault-resume,correct-executor-crash-lock-held",
+  ], { timeout: 2 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 2, paidProviderCalls: 0 })
+}, 2 * scenarioBudgetMs + 5000)
+
 test("production CLI retains bounded redacted report subprocess failures", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-report-errors-e2e-"))
   const result = await promisify(execFile)(process.execPath, [
