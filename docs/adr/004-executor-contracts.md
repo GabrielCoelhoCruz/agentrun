@@ -41,7 +41,9 @@ Recovery has these boundaries:
 - An existing valid state and matching reservation belong to `resume <id>`, even if every task is pending.
 - A live owner blocks another execution. A report can still describe completed work.
 - A reservation without valid state blocks automatic dispatch and resume. Preserve it for inspection and use a different ID for new work.
-- A crash after Git creation but before receipt storage leaves the branch and workspace intact. Resume refuses automatic adoption or cleanup.
+- Git can create a branch or workspace before a failed `post-checkout` hook, checkout or LFS error, Git timeout, or task deadline.
+  A crash, interruption, or receipt write failure can also leave resources without valid proof.
+  The CLI preserves unproved resources and refuses reuse or cleanup on later retries. Fixing the original failure does not remove this refusal.
 - Legacy runs without a common reservation cannot resume automatically. Legacy resources without creation receipts cannot be reused or cleaned up automatically.
 - Legacy reports remain readable. These refusals do not delete, move, reset, or rewrite the existing resources.
 - A saved completion or delivery uses existing recovery checkpoints without repeating completed provider work.
@@ -49,8 +51,24 @@ Recovery has these boundaries:
 
 The initial run reservation precedes state storage. A crash can leave only that reservation.
 The creation receipt follows Git creation. A missing or partially written receipt cannot authorize resource use.
-No migration infers ownership from a saved name. Existing owned clean, dirty, and interrupted worktrees keep the v1 lifecycle.
-The receipts prevent accidental reuse between cooperating runs. They do not protect against an OS user who rewrites Git data or ownership records.
+No migration infers ownership from a saved name. Current-build owned clean, dirty, and interrupted worktrees keep their lifecycle.
+The existing v1 hanging-acquisition test now expects retention and refusal of unproved partial workspaces, instead of clean partial cleanup.
+Transient post-creation failures therefore require manual inspection, not guaranteed automatic retry.
+
+Before upgrading, finish in-flight runs with the old build. Retain the old build, backups, and work.
+Both explicit and latest resume refuse legacy runs without ownership records. Reports remain readable.
+Do not mix old and new builds on one repository or its linked checkouts. Older builds ignore the ownership records.
+The state schema remains version 1. That version alone does not establish compatibility.
+There is no automatic migration or downgrade procedure after both versions have touched the repository.
+
+The README's [inspection procedure](../../README.md#inspect-incomplete-creation) identifies incomplete ownership and safe manual recovery.
+Cleanup requires the exact common directory, run, workspace, ref, and dirtiness checks, preserved backups, and evidence of creation.
+Uncertain resources remain intact. Recovery must not fabricate receipts or use destructive force commands.
+
+The receipts prevent accidental reuse between cooperating runs. They bind names and workspace identity, not branch commits.
+External deletion, recreation, or rewriting of a branch, Git data, or receipt invalidates the provenance assumptions.
+A foreign branch recreated under an owned name can be accepted and contribute unrelated commits to delivery.
+The receipt mechanism is not OS isolation and does not protect against another process with the same permissions.
 Exclusive reservation and atomic state replacement prevent concurrent overwrite and partial replacement of state.
 They retain the existing lack of an fsync guarantee after power loss.
 A separate reservation API would add another lifecycle without a current requirement, so it is not introduced.

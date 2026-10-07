@@ -48,4 +48,24 @@ Compose services with `Layer.mergeAll` and `Layer.provide`. `Runner.layer` requi
 
 `Worktrees.snapshot` creates an immutable commit object. Save its identity before `publish`; publication refuses to overwrite an unexpected branch change. `diff` returns `Uint8Array` and preserves binary patches. Successful duration ends before delivery writes. Atomic replacement does not promise power-loss durability through fsync.
 
+## Ownership and upgrade limits
+
+Direct core callers must hold `RunLock` across state and worktree operations. Use the CLI for initial run reservation.
+A saved branch name is not creation authority. Existing resources require a matching creation receipt and current Git identity.
+Git can create resources before a hook, checkout, LFS, timeout, or task deadline failure.
+Crashes, interruptions, and receipt write failures can also leave unproved resources. Later retries preserve and refuse those resources.
+
+Finish in-flight runs with the old build before upgrading. Retain that build, backups, and work.
+Explicit and latest CLI resume refuse legacy runs without ownership records. Their reports remain readable.
+Do not mix builds on the same repository or linked checkouts. Older builds ignore ownership records.
+State schema version 1 alone does not establish compatibility. There is no automatic migration from saved names.
+
+Records bind names and workspace identity, not branch commits.
+External deletion, recreation, or rewriting of a branch, Git data, or receipt invalidates the provenance assumptions.
+A foreign branch recreated under an owned name can enter delivery. These checks do not provide OS isolation.
+
+Follow the repository README's [inspection procedure](../../README.md#inspect-incomplete-creation) before manual recovery.
+Verify the exact common directory, run, workspace, ref, and dirtiness before cleanup. Preserve backups and uncertain resources.
+Do not fabricate receipts or use destructive force commands.
+
 See the repository README for setup, retry, cancellation, provider limits, and security limits. MIT license.

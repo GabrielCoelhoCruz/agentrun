@@ -74,8 +74,59 @@ agentrun resume attempt-001-abcd --json
 An ID starts with a letter or digit and contains at most 128 letters, digits, underscores, or hyphens.
 Starting an existing ID fails without overwriting its state. Use its exact ID to resume.
 Existing branch or worktree collisions also fail. Different IDs can share the same four-character branch suffix.
+Collision checks ignore letter case on macOS and Linux. Linked checkouts share run reservations and branch ownership records in Git's common directory.
+Resume requires a matching reservation and proof that the run created its resources. A saved branch name is only a plan.
+
+An empty reservation, missing creation proof, or legacy run without ownership records requires inspection. Automatic resume refuses these cases and preserves the files.
+This includes Git failures after resource creation, before the CLI saves its creation receipt. Existing reports remain readable.
+Use a different run ID for new work. Do not remove a reservation or reuse its branch until you have inspected the original run.
 A directory with missing or corrupt state requires inspection; the CLI does not replace it.
 The commands without an ID retain their current defaults. Automation must not guess its attempt from the latest run.
+
+## Upgrade with in-flight runs
+
+Finish in-flight runs with the old build before upgrading. Keep that build and backups of run data, Git data, and workspaces.
+Old runs without ownership records cannot safely migrate from saved names. Both explicit `resume <id>` and latest-run `resume` refuse them.
+Their reports remain readable. This change does not preserve automatic resume for old in-flight runs.
+
+Do not mix old and new builds on the same repository, including linked checkouts.
+Older builds ignore the new ownership records. The state schema remains version 1, which does not establish runtime compatibility.
+If you already upgraded, preserve the work and backups before using the retained old build to finish an old run.
+Use the old build only when the repository has not acquired new-build runs or ownership records.
+If both versions have touched the repository, inspect the histories before further execution. There is no automatic migration or downgrade procedure.
+
+## Inspect incomplete creation
+
+A creation receipt is the record that binds a run to its workspace and branch name.
+`git worktree add -b` can create a branch or workspace and then fail.
+Triggers include a failed `post-checkout` hook, checkout or Git LFS errors, the sixty-second Git limit, and the task deadline.
+A crash, interruption, or failed receipt write can also leave resources without valid proof.
+The CLI preserves those resources. `resume --retry-failed` refuses reuse or cleanup while ownership is unproved, even after the original error is fixed.
+A transient Git failure does not guarantee an automatic retry.
+
+Inspect the saved run and Git state before recovery:
+
+1. Stop execution against this repository and its linked checkouts.
+2. Back up the run data, Git data, and workspace, including untracked files.
+3. Identify the exact run ID, originating checkout, task, workspace path, and full branch ref from the saved state.
+4. Resolve the originating checkout's exact Git common directory with `git rev-parse --path-format=absolute --git-common-dir`.
+5. Inspect `git worktree list --porcelain` and the exact ref with `git show-ref --verify refs/heads/<branch>`.
+6. Inspect the workspace's Git common directory, branch, and `git status --porcelain=v1 --untracked-files=all`.
+7. Compare the saved identities with the reservation and receipt in the resolved common directory.
+
+Reservations are at `agentrun/ownership/runs/<lowercase-run-id>/owner.json` under that common directory.
+Receipts are at `agentrun/ownership/<sha256-of-lowercase-branch>.json`. The hash uses the branch name without `refs/heads/`.
+A branch or workspace without its receipt has incomplete ownership. Missing, unreadable, mismatched, or partial records also require inspection.
+Check file type and size before reading a record. Do not read a pipe or device as JSON.
+A matching name alone does not prove creation. Do not create, rewrite, or copy receipts to bypass refusal. Do not delete an invalid receipt to make a retry pass.
+
+If any identity or dirtiness check is uncertain, retain the resources.
+For new work, use a different run ID and unused branch suffix.
+Manual cleanup requires verified common directory, run, workspace, ref, and dirtiness, plus preserved backups and evidence of creation.
+Remove only confirmed disposable partial resources through ordinary Git operations. Do not use force removal, reset, or forced branch deletion.
+If normal Git refuses cleanup, stop and preserve the resources.
+For a current-build run with a valid reservation, removing verified unproved partial resources can permit `resume <id> --retry-failed`.
+Keep the run reservation and state. Remaining invalid records still block resume. Cleanup does not make a legacy run compatible.
 
 ## Restrict review tools
 
@@ -97,7 +148,7 @@ An unchanged commit does not prove that no write occurred.
 
 ## Setup, cancellation, and recovery
 
-Optional frontmatter `setup` runs a shell command in each worktree before provider work. Automatic retries reuse the worktree and completed setup. Recreating a worktree clears setup completion. Treat setup commands and task files as trusted input.
+Optional frontmatter `setup` runs a shell command in each worktree before provider work. Automatic provider retries reuse the owned worktree and completed setup. Recreating a worktree clears setup completion. Treat setup commands and task files as trusted input.
 
 Provider project settings are disabled by default. `--load-project-settings` enables Claude project/local settings and Pi `.pi/settings.json`. Pi extensions, skills, templates, and context files remain disabled. This flag can enable hooks and shell configuration.
 
@@ -113,6 +164,10 @@ Inspect `.agentrun/runs/<run-id>/report.md`, `report.json`, and `tasks/<task-id>
 
 Worktrees are removed without force on ordinary completion. Dirty or interrupted worktrees remain. `--keep-worktrees` retains worktrees. Costs are provider reports, not invoice checks. Successful duration ends at provider completion; failure duration ends at the saved failure transition.
 
+Ownership records bind names and workspace identity, not branch commits.
+External deletion, recreation, or rewriting of a branch, Git data, or a receipt invalidates the provenance assumptions.
+A branch recreated outside agentrun under an owned name can be reused and include unrelated commits in delivery.
+The records prevent accidental reuse between cooperating runs, not external replacement.
 Worktrees and tool restrictions are not a security sandbox. Do not run untrusted prompts. Windows and deliberately escaped daemons are unsupported. State uses atomic replacement without an fsync guarantee for power loss. Run data includes private events and prompts. Do not commit raw captures.
 
 Exit codes: 0 for success, 1 for failed or unfinished tasks, 2 for configuration errors, and 130 for interruption.
