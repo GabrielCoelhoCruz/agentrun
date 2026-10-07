@@ -578,8 +578,9 @@ for (const code of ["ESRCH", "EPERM", "live", "invalid"]) {
     withRepo((fixture) =>
       Effect.gen(function*() {
         const located = (yield* Worktrees).locate(task().id)
-        yield* fixture.fs.makeDirectory(fixture.path.dirname(located.path), { recursive: true })
-        yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+        yield* Effect.scoped(Effect.gen(function*() {
+          yield* (yield* Worktrees).acquire(task(), fixture.baseSha)
+        })).pipe(Effect.provide(Worktrees.layer({ ...fixture, keepWorktrees: true })))
         const initial = runState([task()], {
           ...fixture,
           status: { [task().id]: { _tag: "running", attempt: 1, startedAt: yield* DateTime.now } },
@@ -600,7 +601,7 @@ for (const code of ["ESRCH", "EPERM", "live", "invalid"]) {
           yield* store.save(initial)
           const result = yield* Effect.result(runner.run(initial))
           if (code === "ESRCH") {
-            assert.ok(result._tag === "Success")
+            assert.ok(result._tag === "Success", JSON.stringify(result))
             assert.strictEqual(calls, 1)
           } else {
             assert.ok(result._tag === "Failure")
