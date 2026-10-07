@@ -26,10 +26,13 @@ const same = (left: BigIntStats, right: BigIntStats) =>
 const attempt = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: refused })
 
 // lstat also reserves dangling links; following them would hide a collision.
-export const exists = (file: string) => attempt(() => fs.lstat(file).then(() => true).catch((error: unknown) => {
-  if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false
-  throw error
-}))
+export const exists = (file: string) =>
+  attempt(() =>
+    fs.lstat(file).then(() => true).catch((error: unknown) => {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false
+      throw error
+    })
+  )
 
 export const validateGenerated = (content: string): Effect.Effect<void, OwnershipRecordError> =>
   Buffer.byteLength(content, "utf8") <= limit ? Effect.void : Effect.fail(refused())
@@ -40,7 +43,9 @@ export const read = Effect.fn("OwnershipRecords.read")(
     if (!valid(before)) return yield* refused()
     // Acquisition is uninterruptible so a late open cannot leak its handle.
     const handle = yield* Effect.acquireRelease(
-      attempt(() => fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | constants.O_NOCTTY)),
+      attempt(() =>
+        fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | constants.O_NOCTTY)
+      ),
       (handle) => attempt(() => handle.close()).pipe(Effect.orDie),
     )
     if (!same(before, yield* attempt(() => handle.stat({ bigint: true })))) return yield* refused()

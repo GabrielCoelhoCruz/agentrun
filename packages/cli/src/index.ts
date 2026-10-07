@@ -112,9 +112,10 @@ export const execute = Effect.fn("cli.execute")(
         const reservations = `${commonDir}/agentrun/ownership/runs`
         const reservation = `${reservations}/${state.runId.toLowerCase()}`
         const owner = JSON.stringify({ version: 1, runId: state.runId, repoRoot: state.repoRoot })
-        const ownershipFailure = () => failed(
-          "Run ownership is unproved. Legacy runs and invalid ownership records cannot resume automatically. Preserve the files and inspect the run and repository.",
-        )
+        const ownershipFailure = () =>
+          failed(
+            "Run ownership is unproved. Legacy runs and invalid ownership records cannot resume automatically. Preserve the files and inspect the run and repository.",
+          )
         yield* OwnershipRecords.validateGenerated(owner).pipe(Effect.mapError(ownershipFailure))
         if (resumeExisting) {
           yield* OwnershipRecords.read(`${reservation}/owner.json`, OwnershipRecords.RunReservation, owner).pipe(

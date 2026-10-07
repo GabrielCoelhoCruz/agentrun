@@ -516,56 +516,83 @@ it.live("ownership refuses a replacement repository at the owned workspace path"
 
 for (const malformed of ["directory", "oversized", "invalid-utf8"] as const) {
   it.live(`bounded ownership refuses ${malformed} before staging, publication or removal`, () =>
-    withRepo((fixture) => Effect.gen(function*() {
-      const service = yield* Worktrees
-      const worktree = yield* Effect.scoped(service.acquire(task(), fixture.baseSha))
-      yield* Effect.scoped(Effect.gen(function*() {
-        const retained = yield* service.acquire(task(), fixture.baseSha)
-        yield* edit(fixture, retained)
-      }))
-      const receipts = fixture.path.join(fixture.repoRoot, ".git", "agentrun", "ownership", "branches")
-      const entries = yield* fixture.fs.readDirectory(receipts)
-      const file = fixture.path.join(receipts, entries[0]!)
-      if (malformed === "directory") {
-        yield* fixture.fs.rename(file, `${file}.original`)
-        yield* fixture.fs.makeDirectory(file)
-      } else yield* fixture.fs.writeFile(file, malformed === "oversized" ? Buffer.alloc(65537) : Buffer.from([0xc0, 0xaf]))
-      const before = yield* git(fixture.repoRoot, ["show-ref"])
-      const index = yield* fixture.fs.readFile(fixture.path.join(fixture.repoRoot, ".git", "worktrees", "fix-login", "index"))
-      for (const operation of [service.snapshot(worktree, "refuse"), service.publish(worktree, fixture.baseSha),
-        service.reconcile(state(fixture, worktree, { _tag: "succeeded", durationMs: 1 }))]) {
-        const result = yield* Effect.exit(operation)
-        assert.strictEqual(Exit.isFailure(result), true)
-      }
-      assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
-      assert.deepStrictEqual(yield* fixture.fs.readFile(fixture.path.join(fixture.repoRoot, ".git", "worktrees", "fix-login", "index")), index)
-      assert.strictEqual(yield* fixture.fs.readFileString(fixture.path.join(worktree.path, "tracked.txt")), "tracked edit\n")
-      assert.strictEqual(yield* fixture.fs.exists(worktree.path), true)
-    })))
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const service = yield* Worktrees
+        const worktree = yield* Effect.scoped(service.acquire(task(), fixture.baseSha))
+        yield* Effect.scoped(Effect.gen(function*() {
+          const retained = yield* service.acquire(task(), fixture.baseSha)
+          yield* edit(fixture, retained)
+        }))
+        const receipts = fixture.path.join(fixture.repoRoot, ".git", "agentrun", "ownership", "branches")
+        const entries = yield* fixture.fs.readDirectory(receipts)
+        const file = fixture.path.join(receipts, entries[0]!)
+        if (malformed === "directory") {
+          yield* fixture.fs.rename(file, `${file}.original`)
+          yield* fixture.fs.makeDirectory(file)
+        } else {yield* fixture.fs.writeFile(
+            file,
+            malformed === "oversized" ? Buffer.alloc(65537) : Buffer.from([0xc0, 0xaf]),
+          )}
+        const before = yield* git(fixture.repoRoot, ["show-ref"])
+        const index = yield* fixture.fs.readFile(
+          fixture.path.join(fixture.repoRoot, ".git", "worktrees", "fix-login", "index"),
+        )
+        for (
+          const operation of [
+            service.snapshot(worktree, "refuse"),
+            service.publish(worktree, fixture.baseSha),
+            service.reconcile(state(fixture, worktree, { _tag: "succeeded", durationMs: 1 })),
+          ]
+        ) {
+          const result = yield* Effect.exit(operation)
+          assert.strictEqual(Exit.isFailure(result), true)
+        }
+        assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+        assert.deepStrictEqual(
+          yield* fixture.fs.readFile(fixture.path.join(fixture.repoRoot, ".git", "worktrees", "fix-login", "index")),
+          index,
+        )
+        assert.strictEqual(
+          yield* fixture.fs.readFileString(fixture.path.join(worktree.path, "tracked.txt")),
+          "tracked edit\n",
+        )
+        assert.strictEqual(yield* fixture.fs.exists(worktree.path), true)
+      })
+    ))
 }
 
 it.live("rejects oversized generated ownership before resource creation", () =>
-  withRepo((fixture) => Effect.gen(function*() {
-    const result = yield* Effect.exit(Effect.gen(function*() {
-      const service = yield* Worktrees
-      yield* service.assertAvailable(task().id)
-      yield* service.acquire(task(), fixture.baseSha)
-    }).pipe(Effect.provide(Worktrees.layer({ ...fixture, runId: "x".repeat(65536) })), Effect.scoped))
-    assert.strictEqual(Exit.isFailure(result), true)
-    assert.strictEqual(yield* fixture.fs.exists(fixture.path.join(fixture.home, ".agentrun", "worktrees")), false)
-    assert.strictEqual(yield* git(fixture.repoRoot, ["branch", "--list", "agentrun/*"]), "")
-  })))
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const result = yield* Effect.exit(
+        Effect.gen(function*() {
+          const service = yield* Worktrees
+          yield* service.assertAvailable(task().id)
+          yield* service.acquire(task(), fixture.baseSha)
+        }).pipe(Effect.provide(Worktrees.layer({ ...fixture, runId: "x".repeat(65536) })), Effect.scoped),
+      )
+      assert.strictEqual(Exit.isFailure(result), true)
+      assert.strictEqual(yield* fixture.fs.exists(fixture.path.join(fixture.home, ".agentrun", "worktrees")), false)
+      assert.strictEqual(yield* git(fixture.repoRoot, ["branch", "--list", "agentrun/*"]), "")
+    })
+  ))
 
 it.live("refuses dangling receipt symlink before creating a branch or workspace", () =>
-  withRepo((fixture) => Effect.gen(function*() {
-    const service = yield* Worktrees
-    const worktree = service.locate(task().id)
-    const receipts = fixture.path.join(fixture.repoRoot, ".git", "agentrun", "ownership", "branches")
-    yield* fixture.fs.makeDirectory(receipts, { recursive: true })
-    const file = fixture.path.join(receipts, `${createHash("sha256").update(worktree.branch.toLowerCase()).digest("hex")}.json`)
-    yield* fixture.fs.symlink(fixture.path.join(fixture.home, "missing"), file)
-    const result = yield* Effect.exit(Effect.scoped(service.acquire(task(), fixture.baseSha)))
-    assert.strictEqual(Exit.isFailure(result), true)
-    assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
-    assert.strictEqual(yield* git(fixture.repoRoot, ["branch", "--list", worktree.branch]), "")
-  })))
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const service = yield* Worktrees
+      const worktree = service.locate(task().id)
+      const receipts = fixture.path.join(fixture.repoRoot, ".git", "agentrun", "ownership", "branches")
+      yield* fixture.fs.makeDirectory(receipts, { recursive: true })
+      const file = fixture.path.join(
+        receipts,
+        `${createHash("sha256").update(worktree.branch.toLowerCase()).digest("hex")}.json`,
+      )
+      yield* fixture.fs.symlink(fixture.path.join(fixture.home, "missing"), file)
+      const result = yield* Effect.exit(Effect.scoped(service.acquire(task(), fixture.baseSha)))
+      assert.strictEqual(Exit.isFailure(result), true)
+      assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
+      assert.strictEqual(yield* git(fixture.repoRoot, ["branch", "--list", worktree.branch]), "")
+    })
+  ))

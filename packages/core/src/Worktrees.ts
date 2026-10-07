@@ -232,7 +232,9 @@ process.stdin.once('data',()=>{
       return yield* refusal(worktree, "case-only branch collision")
     }
     const file = receipt(worktree)
-    const owned = yield* OwnershipRecords.exists(file).pipe(Effect.mapError(() => refusal(worktree, "creation receipt cannot be read")))
+    const owned = yield* OwnershipRecords.exists(file).pipe(
+      Effect.mapError(() => refusal(worktree, "creation receipt cannot be read")),
+    )
     if (owned) {
       yield* OwnershipRecords.read(file, OwnershipRecords.BranchReceipt, owner(worktree)).pipe(
         Effect.mapError(() => refusal(worktree, "creation receipt belongs to another run or is invalid")),

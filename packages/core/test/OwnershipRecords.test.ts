@@ -12,7 +12,8 @@ let directory: string
 let file: string
 const identity = { version: 1, runId: "run-0042", repoRoot: "/repo" }
 const expected = JSON.stringify(identity)
-const read = (content = expected) => Effect.runPromise(OwnershipRecords.read(file, OwnershipRecords.RunReservation, content))
+const read = (content = expected) =>
+  Effect.runPromise(OwnershipRecords.read(file, OwnershipRecords.RunReservation, content))
 const refused = async () => expect(read()).rejects.toThrow()
 
 beforeEach(async () => {
@@ -47,9 +48,20 @@ for (const type of ["fifo", "directory", "socket", "symlink", "device"] as const
   })
 }
 
-for (const content of ["", "{", "null", "[]", "1", JSON.stringify({ ...identity, version: 2 }),
-  JSON.stringify({ ...identity, runId: 3 }), JSON.stringify({ version: 1, runId: "run-0042" }),
-  JSON.stringify({ ...identity, extra: true }), "\ufeff" + expected]) {
+for (
+  const content of [
+    "",
+    "{",
+    "null",
+    "[]",
+    "1",
+    JSON.stringify({ ...identity, version: 2 }),
+    JSON.stringify({ ...identity, runId: 3 }),
+    JSON.stringify({ version: 1, runId: "run-0042" }),
+    JSON.stringify({ ...identity, extra: true }),
+    "\ufeff" + expected,
+  ]
+) {
   test(`refuses malformed/schema data ${JSON.stringify(content)}`, async () => {
     await fs.writeFile(file, content)
     await expect(read(content)).rejects.toThrow()
@@ -69,7 +81,9 @@ for (const field of ["runId", "repoRoot", "taskId", "path", "branch"]) {
   test(`refuses foreign receipt ${field}`, async () => {
     const receipt = { ...identity, taskId: "task", path: "/workspace", branch: "agentrun/task-0042" }
     await fs.writeFile(file, JSON.stringify({ ...receipt, [field]: "foreign" }))
-    await expect(Effect.runPromise(OwnershipRecords.read(file, OwnershipRecords.BranchReceipt, JSON.stringify(receipt))))
+    await expect(
+      Effect.runPromise(OwnershipRecords.read(file, OwnershipRecords.BranchReceipt, JSON.stringify(receipt))),
+    )
       .rejects.toThrow()
   })
 }
@@ -119,13 +133,27 @@ test("handles short reads in the same fixed buffer and closes on success", async
       return original(...args as Parameters<typeof original>)
     })
     const close = handle.close.bind(handle)
-    vi.spyOn(handle, "close").mockImplementation(async () => { closed++; await close() })
+    vi.spyOn(handle, "close").mockImplementation(async () => {
+      closed++
+      await close()
+    })
   })
   expect(await read()).toBe(expected)
   expect(buffers.size).toBe(1)
   expect(closed).toBe(1)
 })
-for (const fault of ["replace-before-open", "device-before-open", "replace-after-open", "grow", "truncate", "same-size", "read-error", "premature-eof"] as const) {
+for (
+  const fault of [
+    "replace-before-open",
+    "device-before-open",
+    "replace-after-open",
+    "grow",
+    "truncate",
+    "same-size",
+    "read-error",
+    "premature-eof",
+  ] as const
+) {
   test(`refuses ${fault} and closes acquired handle`, async () => {
     let closed = 0
     let injected = false
@@ -138,33 +166,39 @@ for (const fault of ["replace-before-open", "device-before-open", "replace-after
         injected = true
         const handle = await open(...args)
         const close = handle.close.bind(handle)
-        vi.spyOn(handle, "close").mockImplementation(async () => { closed++; await close() })
+        vi.spyOn(handle, "close").mockImplementation(async () => {
+          closed++
+          await close()
+        })
         return handle
       })
-    } else instrument((handle) => {
-      const original = handle.read.bind(handle)
-      vi.spyOn(handle, "read").mockImplementation(async (...args: any[]) => {
-        if (!injected) {
-          injected = true
-          if (fault === "read-error") throw new Error("private contents must not escape")
-          if (fault === "premature-eof") return { bytesRead: 0, buffer: args[0] }
-          if (fault === "replace-after-open") {
-            await fs.rename(file, join(directory, "original"))
-            await fs.writeFile(file, expected)
+    } else {instrument((handle) => {
+        const original = handle.read.bind(handle)
+        vi.spyOn(handle, "read").mockImplementation(async (...args: any[]) => {
+          if (!injected) {
+            injected = true
+            if (fault === "read-error") throw new Error("private contents must not escape")
+            if (fault === "premature-eof") return { bytesRead: 0, buffer: args[0] }
+            if (fault === "replace-after-open") {
+              await fs.rename(file, join(directory, "original"))
+              await fs.writeFile(file, expected)
+            }
+            if (fault === "grow") await fs.appendFile(file, " ")
+            if (fault === "truncate") await fs.truncate(file, 1)
+            if (fault === "same-size") {
+              await fs.writeFile(file, expected)
+              const stat = await handle.stat()
+              await fs.utimes(file, stat.atime, new Date(stat.mtimeMs + 1000))
+            }
           }
-          if (fault === "grow") await fs.appendFile(file, " ")
-          if (fault === "truncate") await fs.truncate(file, 1)
-          if (fault === "same-size") {
-            await fs.writeFile(file, expected)
-            const stat = await handle.stat()
-            await fs.utimes(file, stat.atime, new Date(stat.mtimeMs + 1000))
-          }
-        }
-        return original(...args as Parameters<typeof original>)
-      })
-      const close = handle.close.bind(handle)
-      vi.spyOn(handle, "close").mockImplementation(async () => { closed++; await close() })
-    })
+          return original(...args as Parameters<typeof original>)
+        })
+        const close = handle.close.bind(handle)
+        vi.spyOn(handle, "close").mockImplementation(async () => {
+          closed++
+          await close()
+        })
+      })}
     await refused()
     expect(injected).toBe(true)
     expect(closed).toBe(fault === "device-before-open" ? 0 : 1)
@@ -174,19 +208,29 @@ for (const phase of ["acquisition", "read"]) {
   test(`interruption during ${phase} closes the handle`, async () => {
     let release!: () => void
     let entered!: () => void
-    const ready = new Promise<void>((resolve) => { entered = resolve })
-    const gate = new Promise<void>((resolve) => { release = resolve })
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
     let closed = 0
     const open = fs.open.bind(fs)
     vi.spyOn(fs, "open").mockImplementation(async (...args) => {
       const handle = await open(...args)
       const close = handle.close.bind(handle)
-      vi.spyOn(handle, "close").mockImplementation(async () => { closed++; await close() })
-      if (phase === "acquisition") { entered(); await gate }
-      else {
+      vi.spyOn(handle, "close").mockImplementation(async () => {
+        closed++
+        await close()
+      })
+      if (phase === "acquisition") {
+        entered()
+        await gate
+      } else {
         const original = handle.read.bind(handle)
         vi.spyOn(handle, "read").mockImplementation(async (...args: any[]) => {
-          entered(); await gate
+          entered()
+          await gate
           return original(...args as Parameters<typeof original>)
         })
       }
