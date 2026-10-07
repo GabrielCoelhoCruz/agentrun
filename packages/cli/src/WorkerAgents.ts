@@ -10,6 +10,7 @@ import {
   SetupError,
   stopProcessGroup,
   TaskId,
+  ToolProfile,
 } from "@agentrun/core"
 import type { AgentAdapter, AgentError, AgentInput } from "@agentrun/core"
 import { NodeStream } from "@effect/platform-node"
@@ -22,6 +23,7 @@ import { diagnostic } from "./ui/output.js"
 
 const WireInput = Schema.Struct({
   taskId: Schema.optional(TaskId),
+  tools: Schema.optional(ToolProfile),
   agent: Schema.Literals(["claude-code", "pi"]),
   prompt: Schema.String,
   cwd: Schema.String,
@@ -100,6 +102,7 @@ export const workerAgents = (worker: URL) =>
               const encoded = {
                 agent: id,
                 taskId: input.taskId,
+                tools: input.tools,
                 cwd: input.cwd,
                 prompt: input.prompt,
                 model: Option.getOrUndefined(input.model),
@@ -173,8 +176,12 @@ export const serveWorker = (
     const parsed = yield* Effect.try({ try: (): unknown => JSON.parse(first.value), catch: protocolError })
     const wire = yield* Schema.decodeUnknownEffect(WireInput)(parsed).pipe(Effect.mapError(protocolError))
     agent = wire.agent
+    if (wire.tools === "read-only" && (wire.loadProjectSettings || wire.setup !== undefined)) {
+      return yield* protocolError("read-only tools cannot load project settings or run setup")
+    }
     const input: AgentInput = {
       workerProcessGroup: true,
+      ...(wire.tools === undefined ? {} : { tools: wire.tools }),
       ...(wire.taskId === undefined ? {} : { taskId: wire.taskId }),
       prompt: wire.prompt,
       cwd: wire.cwd,

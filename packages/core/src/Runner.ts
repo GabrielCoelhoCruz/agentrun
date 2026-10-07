@@ -115,6 +115,20 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
 
   const run = Effect.fn("Runner.run")(
     function*(state: RunState): Effect.fn.Return<RunState, RunnerError, Scope.Scope> {
+      for (const task of state.tasks) {
+        if (task.tools !== "read-only") continue
+        const adapter = agents.get(task.agent)
+        if (
+          Option.isNone(adapter) || adapter.value.capabilities.readOnlyTools !== true
+          || options.loadProjectSettings || state.setup !== undefined
+        ) {
+          return yield* new AgentSpawnError({
+            agent: task.agent,
+            cause: "read-only tools require provider support and exclude project settings and setup",
+            retryable: false,
+          })
+        }
+      }
       yield* lock.acquire(state.repoRoot)
       yield* worktrees.recoverProcesses ?? Effect.void
       const current = yield* SynchronizedRef.make(state)
@@ -439,6 +453,7 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                   let lastEventAt = yield* Clock.currentTimeMillis
                   const consume = adapter.value.run({
                     taskId: task.id,
+                    ...(task.tools === undefined ? {} : { tools: task.tools }),
                     loadProjectSettings: options.loadProjectSettings === true,
                     ...(options.setupInAgent && state.setup !== undefined && !setupDone ? { setup: state.setup } : {}),
                     setupCompleted: () =>

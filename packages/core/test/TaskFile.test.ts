@@ -223,3 +223,53 @@ Create GET /health that returns 200 and the package version.`
       )
     }))
 })
+
+describe("restricted task tools", () => {
+  for (const agent of ["claude-code", "pi"] as const) {
+    it.effect(`preserves read-only ${agent} tasks and rejects missing capability`, () =>
+      Effect.gen(function*() {
+        const content = `---\nagent: ${agent}\ntools: read-only\n---\n## review: Review\nInspect the patch.\n`
+        const supported = {
+          "claude-code": { ...capabilities["claude-code"], readOnlyTools: true },
+          pi: { ...capabilities.pi, readOnlyTools: true },
+        }
+        const parsed = yield* TaskFile.parse({ path: "TASKS.md", content, capabilities: supported })
+        assert.strictEqual(parsed.tasks[0]?.tools, "read-only")
+        for (const support of [undefined, false]) {
+          const error = yield* Effect.flip(TaskFile.parse({
+            path: "TASKS.md",
+            content,
+            capabilities: { ...supported, [agent]: { ...supported[agent], readOnlyTools: support } },
+          }))
+          assert.strictEqual(error._tag, "UnsupportedOption")
+          if (error._tag === "UnsupportedOption") {
+            assert.strictEqual(error.option, "tools")
+            assert.strictEqual(error.line, 3)
+          }
+        }
+      }))
+  }
+  it.effect("rejects an unknown task profile at its line", () =>
+    Effect.gen(function*() {
+      const error = yield* Effect.flip(TaskFile.parse({
+        path: "TASKS.md",
+        content: "## review: Review\ntools: unrestricted\n\nInspect.\n",
+        capabilities,
+      }))
+      assert.strictEqual(error._tag, "TaskFileError")
+      assert.strictEqual(error.line, 2)
+    }))
+  it.effect("refuses setup for a read-only task before executing commands", () =>
+    Effect.gen(function*() {
+      const error = yield* Effect.flip(TaskFile.parse({
+        path: "TASKS.md",
+        content: "---\nsetup: touch forbidden\n---\n## review: Review\ntools: read-only\n\nInspect.\n",
+        capabilities: {
+          ...capabilities,
+          "claude-code": { ...capabilities["claude-code"], readOnlyTools: true },
+        },
+      }))
+      assert.strictEqual(error._tag, "TaskFileError")
+      assert.match(error.message, /setup.*read-only/)
+    }))
+})

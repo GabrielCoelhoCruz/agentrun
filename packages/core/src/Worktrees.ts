@@ -2,13 +2,13 @@ import { NodeStream } from "@effect/platform-node"
 import { Context, Effect, Exit, FileSystem, Layer, Path, Schema, Semaphore, Stream } from "effect"
 import type { Scope } from "effect"
 import { spawn } from "node:child_process"
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { GitError } from "./domain/Errors.js"
 import type { RunState } from "./domain/RunState.js"
 import { TaskId } from "./domain/Task.js"
 import type { Task } from "./domain/Task.js"
 import { stopProcessGroup } from "./ProcessGroup.js"
-import { repoHash } from "./RepoHash.js"
+import { repoIdentity } from "./RepoHash.js"
 
 export interface Worktree {
   readonly taskId: TaskId
@@ -39,6 +39,7 @@ interface Options {
 export class Worktrees extends Context.Service<Worktrees, {
   readonly recoverProcesses?: Effect.Effect<void, GitError>
   readonly locate: (taskId: TaskId) => Worktree
+  readonly assertAvailable: (taskId: TaskId) => Effect.Effect<void, GitError>
   readonly acquire: (
     task: Task,
     baseSha: string,
@@ -62,7 +63,7 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
   const path = yield* Path.Path
   const semaphore = yield* Semaphore.make(options.permits ?? 1)
 
-  const hash = yield* repoHash(options.repoRoot)
+  const { commonDir, hash } = yield* repoIdentity(options.repoRoot)
   const processes = path.join(options.home, ".agentrun", "git", hash, options.runId)
   const processError = (cause: unknown) =>
     new GitError({ command: "owned Git cleanup", exitCode: -1, stderr: String(cause) })
@@ -164,6 +165,7 @@ process.stdin.once('data',()=>{
     gitBytes(args, cwd).pipe(Effect.map((bytes) => bytes.toString("utf8").trim()))
 
   const repo = { cwd: options.repoRoot }
+  const ownership = path.join(commonDir, "agentrun", "ownership", "branches")
   const locate = (taskId: TaskId): Worktree => ({
     taskId,
     path: path.join(options.home, ".agentrun", "worktrees", hash, options.runId, taskId),
@@ -177,7 +179,91 @@ process.stdin.once('data',()=>{
     )
   })
 
+  const receipt = (worktree: Worktree) =>
+    path.join(ownership, `${createHash("sha256").update(worktree.branch.toLowerCase()).digest("hex")}.json`)
+  const owner = (worktree: Worktree) =>
+    JSON.stringify({
+      version: 1,
+      runId: options.runId,
+      repoRoot: options.repoRoot,
+      taskId: worktree.taskId,
+      path: worktree.path,
+      branch: worktree.branch,
+    })
+  const refusal = (worktree: Worktree, reason: string) =>
+    new GitError({
+      command: "worktree ownership",
+      exitCode: -1,
+      stderr:
+        `Worktree ownership is unproved for ${worktree.branch}: ${reason}. Preserve the files and inspect the run and repository.`,
+    })
+  const matchingBranches = (worktree: Worktree) =>
+    git(["for-each-ref", "--format=%(refname)", "refs/heads"], repo).pipe(
+      Effect.map((refs) =>
+        refs.split("\n").filter((ref) => ref.toLowerCase() === `refs/heads/${worktree.branch}`.toLowerCase())
+      ),
+    )
+  const assertAvailable = Effect.fn("Worktrees.assertAvailable")(function*(taskId: TaskId) {
+    const worktree = locate(taskId)
+    if (
+      (yield* fs.exists(worktree.path).pipe(Effect.mapError(processError)))
+      || (yield* fs.exists(receipt(worktree)).pipe(Effect.mapError(processError)))
+      || (yield* matchingBranches(worktree)).length > 0
+    ) {
+      return yield* new GitError({
+        command: "worktree ownership",
+        exitCode: -1,
+        stderr: `Worktree collision: ${worktree.branch}; choose a different run ID`,
+      })
+    }
+  })
+  const inspect = Effect.fn("Worktrees.inspect")(function*(worktree: Worktree) {
+    const expected = locate(worktree.taskId)
+    if (worktree.path !== expected.path || worktree.branch !== expected.branch) {
+      return yield* refusal(worktree, "resource identity differs")
+    }
+    const dir = yield* fs.exists(worktree.path).pipe(Effect.mapError(processError))
+    const branches = yield* matchingBranches(worktree)
+    if (branches.some((branch) => branch !== `refs/heads/${worktree.branch}`)) {
+      return yield* refusal(worktree, "case-only branch collision")
+    }
+    const file = receipt(worktree)
+    const owned = yield* fs.exists(file).pipe(Effect.mapError(processError))
+    if (owned) {
+      const content = yield* fs.readFileString(file).pipe(
+        Effect.mapError(() => refusal(worktree, "creation receipt cannot be read")),
+      )
+      if (content !== owner(worktree)) {
+        return yield* refusal(worktree, "creation receipt belongs to another run or is invalid")
+      }
+    } else if (dir || branches.length > 0) {
+      return yield* refusal(worktree, "creation receipt is missing")
+    }
+    if (dir) {
+      const identity = yield* git([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+        "--symbolic-full-name",
+        "HEAD",
+      ], { cwd: worktree.path }).pipe(Effect.mapError(() => refusal(worktree, "workspace Git identity cannot be read")))
+      const [directory, branch] = identity.split("\n")
+      if (
+        directory === undefined || branch !== `refs/heads/${worktree.branch}` || branches.length !== 1
+        || (yield* fs.realPath(directory).pipe(
+            Effect.mapError(() => refusal(worktree, "repository cannot be resolved")),
+          ))
+          !== commonDir
+      ) return yield* refusal(worktree, "workspace Git identity differs")
+    }
+    return { dir, branch: branches.length === 1, owned }
+  })
+  const assertOwned = Effect.fn("Worktrees.assertOwned")(function*(worktree: Worktree) {
+    if (!(yield* inspect(worktree)).owned) return yield* refusal(worktree, "creation receipt is missing")
+  })
+
   const remove = Effect.fn("Worktrees.remove")(function*(worktree: Worktree) {
+    yield* assertOwned(worktree)
     yield* git(["worktree", "remove", worktree.path], repo).pipe(semaphore.withPermits(1))
   })
 
@@ -191,26 +277,22 @@ process.stdin.once('data',()=>{
       return yield* Effect.acquireRelease(
         Effect.gen(function*() {
           const worktree = locate(task.id)
+          const existing = yield* inspect(worktree)
           yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.orDie)
-          if (yield* fs.exists(worktree.path).pipe(Effect.orDie)) {
-            const branch = yield* git(["symbolic-ref", "--short", "HEAD"], { cwd: worktree.path })
-            if (branch !== worktree.branch) {
-              return yield* new GitError({
-                command: "reuse worktree",
-                exitCode: -1,
-                stderr: "Recorded worktree has a different branch",
-              })
-            }
-            return worktree
-          }
+          if (existing.dir) return worktree
           yield* onCreate?.() ?? Effect.void
-          const exists = yield* branchExists(worktree.branch)
           yield* git(
-            exists
+            existing.branch
               ? ["worktree", "add", worktree.path, worktree.branch]
               : ["worktree", "add", "-b", worktree.branch, worktree.path, baseSha],
             repo,
           ).pipe(semaphore.withPermits(1))
+          if (!existing.owned) {
+            yield* fs.makeDirectory(ownership, { recursive: true, mode: 0o700 }).pipe(Effect.mapError(processError))
+            yield* fs.writeFileString(receipt(worktree), owner(worktree), { flag: "wx", mode: 0o600 }).pipe(
+              Effect.mapError(() => refusal(worktree, "creation receipt could not be saved")),
+            )
+          }
           return worktree
         }),
         (worktree, exit) =>
@@ -226,6 +308,7 @@ process.stdin.once('data',()=>{
   )
 
   const snapshot = Effect.fn("Worktrees.snapshot")(function*(worktree: Worktree, message: string) {
+    yield* assertOwned(worktree)
     const cwd = { cwd: worktree.path }
     yield* git(["add", "-A"], cwd)
     const parent = yield* git(["rev-parse", "HEAD"], cwd)
@@ -246,6 +329,7 @@ process.stdin.once('data',()=>{
     return { commit, committed: true }
   })
   const publish = Effect.fn("Worktrees.publish")(function*(worktree: Worktree, commit: string) {
+    yield* assertOwned(worktree)
     const ref = `refs/heads/${worktree.branch}`
     const current = yield* git(["rev-parse", "--verify", ref], repo)
     const delivered = yield* git(["merge-base", "--is-ancestor", commit, current], repo).pipe(
@@ -264,10 +348,15 @@ process.stdin.once('data',()=>{
   })
 
   const diff = Effect.fn("Worktrees.diff")(function*(worktree: Worktree, baseSha: string, commit?: string) {
+    if (commit === undefined) yield* assertOwned(worktree)
     return yield* gitBytes(["diff", "--binary", `${baseSha}..${commit ?? worktree.branch}`], repo)
   })
 
   const reconcile = Effect.fn("Worktrees.reconcile")(function*(state: RunState) {
+    for (const task of state.tasks) {
+      const recorded = state.worktrees[task.id]
+      yield* inspect(recorded === undefined ? locate(task.id) : { taskId: task.id, ...recorded })
+    }
     yield* git(["worktree", "prune"], repo).pipe(semaphore.withPermits(1))
     const actions: Array<Reconciled> = []
     for (const task of state.tasks) {
@@ -317,6 +406,7 @@ process.stdin.once('data',()=>{
   return Worktrees.of({
     recoverProcesses,
     locate,
+    assertAvailable,
     acquire,
     commit,
     diff,

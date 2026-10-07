@@ -83,6 +83,7 @@ const testLayer = (agents: Layer.Layer<Agents>, concurrency = 2) =>
 
 const clockWorktrees = Layer.succeed(Worktrees, {
   locate: (taskId) => ({ taskId, path: "/unused", branch: "test-branch" }),
+  assertAvailable: () => Effect.void,
   acquire: (task) => Effect.succeed({ taskId: task.id, path: "/unused", branch: "test-branch" }),
   commit: () => Effect.succeed(false),
   snapshot: () => Effect.succeed({ commit: "a".repeat(40), committed: false }),
@@ -502,8 +503,9 @@ for (const mode of ["recreated", "crashed", "missing", "failed", "retry"]) {
         const worktrees = yield* Worktrees
         const located = worktrees.locate(task().id)
         if (mode === "recreated" || mode === "crashed" || mode === "missing") {
-          yield* fixture.fs.makeDirectory(fixture.path.dirname(located.path), { recursive: true })
-          yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+          yield* Effect.scoped(Effect.gen(function*() {
+            yield* (yield* Worktrees).acquire(task(), fixture.baseSha)
+          })).pipe(Effect.provide(Worktrees.layer({ ...fixture, keepWorktrees: true })))
           if (mode !== "crashed") yield* fixture.fs.remove(located.path, { recursive: true })
         }
         const status: TaskStatus = mode === "recreated"
@@ -576,8 +578,9 @@ for (const code of ["ESRCH", "EPERM", "live", "invalid"]) {
     withRepo((fixture) =>
       Effect.gen(function*() {
         const located = (yield* Worktrees).locate(task().id)
-        yield* fixture.fs.makeDirectory(fixture.path.dirname(located.path), { recursive: true })
-        yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+        yield* Effect.scoped(Effect.gen(function*() {
+          yield* (yield* Worktrees).acquire(task(), fixture.baseSha)
+        })).pipe(Effect.provide(Worktrees.layer({ ...fixture, keepWorktrees: true })))
         const initial = runState([task()], {
           ...fixture,
           status: { [task().id]: { _tag: "running", attempt: 1, startedAt: yield* DateTime.now } },
@@ -598,7 +601,7 @@ for (const code of ["ESRCH", "EPERM", "live", "invalid"]) {
           yield* store.save(initial)
           const result = yield* Effect.result(runner.run(initial))
           if (code === "ESRCH") {
-            assert.ok(result._tag === "Success")
+            assert.ok(result._tag === "Success", JSON.stringify(result))
             assert.strictEqual(calls, 1)
           } else {
             assert.ok(result._tag === "Failure")
@@ -1088,3 +1091,19 @@ for (const mode of ["protocol", "stall", "ceiling"] as const) {
     }).pipe(Effect.scoped)
   })
 }
+
+it.effect("refuses an unsupported saved tool profile before worktree or provider work", () => {
+  let calls = 0
+  const agents = fakeAgents(() => {
+    calls++
+    return success
+  })
+  const restricted = new Task({ ...task(), tools: "read-only" })
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const error = yield* Effect.flip(runner.run(runState([restricted])))
+    assert.strictEqual(error._tag, "AgentSpawnError")
+    assert.strictEqual(calls, 0)
+    assert.deepStrictEqual(yield* (yield* StateStore).latest, Option.none())
+  }).pipe(Effect.provide(deadlineLayer(agents)), Effect.scoped)
+})

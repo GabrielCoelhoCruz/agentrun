@@ -1,6 +1,7 @@
 import {
   Agents,
   diagnostics,
+  GitError,
   markdown,
   Report,
   RunLock,
@@ -28,8 +29,14 @@ export class CliFailure extends Schema.TaggedError<CliFailure>()("CliFailure", {
   message: Schema.String,
   code: Schema.Int,
 }) {}
-const bad = (cause: unknown) => new CliFailure({ message: String(cause), code: 2 })
-const failed = (cause: unknown) => new CliFailure({ message: String(cause), code: 1 })
+const errorMessage = (cause: unknown) =>
+  cause instanceof GitError && (cause.command === "worktree ownership" || cause.command === "resume identity")
+    ? cause.stderr
+    : String(cause)
+const bad = (cause: unknown) => new CliFailure({ message: errorMessage(cause), code: 2 })
+const failed = (cause: unknown) => new CliFailure({ message: errorMessage(cause), code: 1 })
+const reserved = (id: string) =>
+  `Run ID already exists: ${id}. Preserve the reservation and inspect it. Resume requires valid state and ownership proof. Use a different run ID for new work.`
 const git = (args: string[], cwd = process.cwd()) =>
   Effect.tryPromise({
     try: () => exec("git", args, { cwd }),
@@ -66,6 +73,7 @@ const RunId = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,
 
 export const execute = Effect.fn("cli.execute")(
   function*(state: RunState, options: Options, retryFailed = false, resumeExisting = false) {
+    yield* Schema.decodeUnknownEffect(RunId)(state.runId).pipe(Effect.mapError(bad))
     const agents = yield* Agents
     const fs = yield* FileSystem.FileSystem
     const ignore = yield* fs.readFileString(`${state.repoRoot}/.gitignore`).pipe(Effect.catch(() => Effect.succeed("")))
@@ -80,7 +88,12 @@ export const execute = Effect.fn("cli.execute")(
       yield* lock.acquire(state.repoRoot)
       const store = yield* StateStore
       const candidate = resumeExisting ? yield* store.load(state.runId) : state
-      if (!resumeExisting) yield* store.save(candidate)
+      if (candidate.runId !== state.runId || candidate.repoRoot !== state.repoRoot) {
+        return yield* bad("Saved run identity differs from repository")
+      }
+      if (candidate.tasks.some((task) => task.tools === "read-only") && options.loadProjectSettings) {
+        return yield* bad("read-only tools cannot load project settings")
+      }
       const services = Layer.mergeAll(
         Report.layer,
         Layer.succeed(Agents, agents),
@@ -94,6 +107,44 @@ export const execute = Effect.fn("cli.execute")(
         }),
       )
       const program = Effect.gen(function*() {
+        const commonDir = yield* git(["rev-parse", "--path-format=absolute", "--git-common-dir"], state.repoRoot)
+        const reservations = `${commonDir}/agentrun/ownership/runs`
+        const reservation = `${reservations}/${state.runId.toLowerCase()}`
+        const owner = JSON.stringify({ version: 1, runId: state.runId, repoRoot: state.repoRoot })
+        if (resumeExisting) {
+          const recorded = yield* fs.readFileString(`${reservation}/owner.json`).pipe(
+            Effect.catch(() => Effect.succeed("")),
+          )
+          if (recorded !== owner) {
+            return yield* failed(
+              "Run ownership is unproved. Legacy runs and invalid ownership records cannot resume automatically. Preserve the files and inspect the run and repository.",
+            )
+          }
+        }
+        if (!resumeExisting) {
+          const runs = `${state.repoRoot}/.agentrun/runs`
+          const directory = `${runs}/${state.runId}`
+          const local = yield* fs.readDirectory(runs).pipe(
+            Effect.catch((error) => error.reason._tag === "NotFound" ? Effect.succeed([]) : Effect.fail(error)),
+          )
+          if (local.some((id) => id.toLowerCase() === state.runId.toLowerCase()) || (yield* fs.exists(reservation))) {
+            return yield* bad(reserved(state.runId))
+          }
+          const worktrees = yield* Worktrees
+          for (const task of candidate.tasks) {
+            yield* worktrees.assertAvailable(task.id).pipe(Effect.mapError(bad))
+          }
+          yield* fs.makeDirectory(reservations, { recursive: true, mode: 0o700 })
+          yield* fs.makeDirectory(reservation, { mode: 0o700 }).pipe(
+            Effect.mapError((error) => error.reason._tag === "AlreadyExists" ? bad(reserved(state.runId)) : error),
+          )
+          yield* fs.writeFileString(`${reservation}/owner.json`, owner, { flag: "wx", mode: 0o600 })
+          yield* fs.makeDirectory(runs, { recursive: true })
+          yield* fs.makeDirectory(directory).pipe(
+            Effect.mapError((error) => error.reason._tag === "AlreadyExists" ? bad(reserved(state.runId)) : error),
+          )
+          yield* store.save(candidate)
+        }
         const panel = !options.json && process.stdout.isTTY ? yield* panelScoped(candidate) : undefined
         const runner = yield* Runner
         const events = yield* runner.subscribe
@@ -120,7 +171,7 @@ export const execute = Effect.fn("cli.execute")(
           retryFailed,
           setupInAgent: true,
           loadProjectSettings: options.loadProjectSettings,
-        }).pipe(Layer.provide(services)),
+        }).pipe(Layer.provideMerge(services)),
       ))
       yield* program
     }).pipe(
@@ -129,14 +180,23 @@ export const execute = Effect.fn("cli.execute")(
         StateStore.layerFile({ repoRoot: state.repoRoot }),
         RunLock.layer({ home: homedir() }),
       )),
-      Effect.mapError(failed),
+      Effect.mapError((error) => error instanceof CliFailure ? error : failed(error)),
     )
     yield* run
   },
 )
 
 export const run = Effect.fn("cli.run")(
-  function*(options: Options & { readonly file: string; readonly base: Option.Option<string> }) {
+  function*(
+    options: Options & {
+      readonly file: string
+      readonly base: Option.Option<string>
+      readonly runId?: Option.Option<string>
+    },
+  ) {
+    if (options.runId !== undefined && Option.isSome(options.runId)) {
+      yield* Schema.decodeUnknownEffect(RunId)(options.runId.value).pipe(Effect.mapError(bad))
+    }
     const agents = yield* Agents
     const fs = yield* FileSystem.FileSystem
     const repoRoot = yield* git(["rev-parse", "--show-toplevel"])
@@ -153,6 +213,9 @@ export const run = Effect.fn("cli.run")(
         pi: pi.value.capabilities,
       },
     }).pipe(Effect.mapError(bad))
+    if (options.loadProjectSettings && parsed.tasks.some((task) => task.tools === "read-only")) {
+      return yield* bad("read-only tools cannot load project settings")
+    }
     const base = Option.getOrElse(options.base, () => parsed.base)
     const baseSha = yield* git(["rev-parse", "--verify", `${base}^{commit}`], realRoot)
     if (options.dryRun) {
@@ -164,7 +227,10 @@ export const run = Effect.fn("cli.run")(
       }, options.json)
     }
     const now = yield* Clock.currentTimeMillis
-    const runId = `${new Date(now).toISOString().replace(/[-:.]/g, "")}-${randomBytes(8).toString("hex")}`
+    const runId = Option.getOrElse(
+      options.runId ?? Option.none(),
+      () => `${new Date(now).toISOString().replace(/[-:.]/g, "")}-${randomBytes(8).toString("hex")}`,
+    )
     const state = new RunState({
       version: 1,
       runId,
@@ -191,7 +257,26 @@ export const resume = Effect.fn("cli.resume")(
       const id = Option.isSome(options.runId) ? options.runId : yield* store.latest
       if (Option.isNone(id)) return yield* bad("No saved run found")
       yield* Schema.decodeUnknownEffect(RunId)(id.value).pipe(Effect.mapError(bad))
-      const state = yield* store.load(id.value).pipe(Effect.mapError(bad))
+      const state = yield* store.load(id.value).pipe(
+        Effect.catchTag("RunNotFound", () =>
+          Effect.gen(function*() {
+            const commonDir = yield* git(["rev-parse", "--path-format=absolute", "--git-common-dir"], repoRoot)
+            if (
+              (yield* fs.exists(`${repoRoot}/.agentrun/runs/${id.value}`))
+              || (yield* fs.exists(`${commonDir}/agentrun/ownership/runs/${id.value.toLowerCase()}`))
+            ) {
+              return yield* bad(
+                `Run reservation has no saved state in this checkout: ${id.value}. Preserve the reservation and inspect the originating checkout. Resume cannot recover missing state automatically.`,
+              )
+            }
+            return yield* bad(`Run not found: ${id.value}`)
+          })),
+        Effect.catchTag("StateCorrupted", () =>
+          Effect.fail(bad(
+            `Run reservation has invalid state: ${id.value}. Preserve the reservation and inspect the run and repository.`,
+          ))),
+        Effect.mapError((error) => error instanceof CliFailure ? error : bad(error)),
+      )
       if (state.runId !== id.value || state.repoRoot !== repoRoot) {
         return yield* bad("Saved run identity differs from repository")
       }
@@ -235,7 +320,12 @@ export const doctor = Effect.fn("cli.doctor")(
 export const command = Command.make("agentrun").pipe(Command.withSubcommands([
   Command.make(
     "run",
-    { ...common, file: Argument.String("TASKS.md"), base: Flag.String("base").pipe(Flag.optional) },
+    {
+      ...common,
+      file: Argument.String("TASKS.md"),
+      base: Flag.String("base").pipe(Flag.optional),
+      runId: Flag.String("run-id").pipe(Flag.withSchema(RunId), Flag.optional),
+    },
     run,
   ),
   Command.make("resume", {

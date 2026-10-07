@@ -344,6 +344,45 @@ describe("Claude Code adapter", () => {
         maxBudgetUsd: true,
         model: true,
         costReporting: true,
+        readOnlyTools: true,
       })
     }).pipe(Effect.provide(Agents.layer)))
 })
+
+it.effect("read-only Claude exposes only inspection tools and excludes external tools", () =>
+  Effect.gen(function*() {
+    const adapter = make({
+      query: fakeQuery(({ options }) => {
+        assert.deepStrictEqual(options?.tools, ["Read", "Glob", "Grep"])
+        assert.deepStrictEqual(options?.allowedTools, ["Read", "Glob", "Grep"])
+        for (const tool of ["Bash", "Edit", "Write", "NotebookEdit", "Agent", "Task"]) {
+          assert.ok(options?.disallowedTools?.includes(tool), `${tool} must be denied`)
+        }
+        assert.strictEqual(options?.permissionMode, "dontAsk")
+        assert.deepStrictEqual(options?.settingSources, [])
+        assert.strictEqual(options?.strictMcpConfig, true)
+        assert.deepStrictEqual(options?.mcpServers, {})
+        return messages([init, success])
+      }),
+    })
+    const restricted = { ...input, tools: "read-only" as const }
+    const events = yield* Effect.scoped(Stream.runCollect(adapter.run(restricted)))
+    assert.strictEqual(events.at(-1)?._tag, "Completed")
+  }))
+
+it.effect("read-only Claude rejects settings and setup before SDK invocation", () =>
+  Effect.gen(function*() {
+    let calls = 0
+    const adapter = make({
+      query: fakeQuery(() => {
+        calls++
+        return messages([success])
+      }),
+    })
+    for (const extra of [{ loadProjectSettings: true }, { setup: "touch forbidden" }]) {
+      const restricted = { ...input, tools: "read-only" as const, ...extra }
+      const error = yield* Effect.flip(Effect.scoped(Stream.runDrain(adapter.run(restricted))))
+      assert.strictEqual(error._tag, "AgentSpawnError")
+    }
+    assert.strictEqual(calls, 0)
+  }))
