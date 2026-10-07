@@ -74,11 +74,13 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
       groups.add(row.group)
     }
-    const denied = new Set<number>()
+    const waitOnly = new Set<number>()
+    let firstSignal = true
     for (const signal of ["SIGTERM", "SIGKILL"] as const) {
       for (const group of groups) {
-        if (denied.has(group)) continue
-        const current = yield* processTable(true)
+        if (waitOnly.has(group)) continue
+        const current = firstSignal ? rows : yield* processTable(true)
+        firstSignal = false
         const members = current.filter((row) => row.group === group)
         if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
           groups.delete(group)
@@ -87,7 +89,8 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
         const original = rows.find((row) => row.pid === group && row.group === group)
         const leader = current.find((row) => row.pid === group && row.group === group)
         if (original === undefined || leader === undefined || leader.command !== original.command) {
-          return yield* error("Process group ownership changed before signal; recovery refused")
+          waitOnly.add(group)
+          continue
         }
         yield* Effect.try({ try: () => process.kill(-group, signal), catch: error }).pipe(
           Effect.catchIf(
@@ -97,7 +100,7 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
             (e) =>
               Effect.sync(() => {
                 if (Predicate.isObject(e.reason.cause) && "code" in e.reason.cause && e.reason.cause.code === "EPERM") {
-                  denied.add(group)
+                  waitOnly.add(group)
                 }
               }),
           ),
@@ -116,8 +119,8 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
     }
     return yield* error(
-      denied.size > 0
-        ? "Permission denied and process group exit could not be verified; recovery refused"
+      waitOnly.size > 0
+        ? "Signal ownership or permission changed and process group exit was not verified; recovery refused"
         : "Owned process group did not exit after SIGKILL; recovery refused",
     )
   },
