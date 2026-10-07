@@ -562,7 +562,10 @@ for (const record of ["reservation", "receipt"]) {
       const recordBefore = dynamic ? undefined : recordSnapshot(file)
       const backupBefore = existsSync(file + ".original") ? recordSnapshot(file + ".original") : undefined
       const before = { repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) }
-      writeFileSync(join(f.directory, "preservation-before.json"), JSON.stringify({ ...before, record: recordBefore, backup: backupBefore }, null, 2))
+      writeFileSync(
+        join(f.directory, "preservation-before.json"),
+        JSON.stringify({ ...before, record: recordBefore, backup: backupBefore }, null, 2),
+      )
       const calls = f.records().length
       const originalOptions = f.env.NODE_OPTIONS
       if (dynamic) {
@@ -589,8 +592,18 @@ for (const record of ["reservation", "receipt"]) {
       assert.equal(existsSync(marker), true, "Injection must have happened")
       const after = { repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) }
       assert.deepEqual(after, before)
-      writeFileSync(join(f.directory, "preservation-after.json"), JSON.stringify({ ...after, record: recordSnapshot(file),
-        backup: existsSync(file + ".original") ? recordSnapshot(file + ".original") : undefined }, null, 2))
+      writeFileSync(
+        join(f.directory, "preservation-after.json"),
+        JSON.stringify(
+          {
+            ...after,
+            record: recordSnapshot(file),
+            backup: existsSync(file + ".original") ? recordSnapshot(file + ".original") : undefined,
+          },
+          null,
+          2,
+        ),
+      )
       const injected = JSON.parse(readFileSync(marker))
       if (!dynamic) assert.deepEqual(recordSnapshot(file), recordBefore)
       if (backupBefore !== undefined) assert.deepEqual(recordSnapshot(file + ".original"), backupBefore)
