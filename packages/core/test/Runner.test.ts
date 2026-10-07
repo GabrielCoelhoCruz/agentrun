@@ -502,8 +502,9 @@ for (const mode of ["recreated", "crashed", "missing", "failed", "retry"]) {
         const worktrees = yield* Worktrees
         const located = worktrees.locate(task().id)
         if (mode === "recreated" || mode === "crashed" || mode === "missing") {
-          yield* fixture.fs.makeDirectory(fixture.path.dirname(located.path), { recursive: true })
-          yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+          yield* Effect.scoped(Effect.gen(function*() {
+            yield* (yield* Worktrees).acquire(task(), fixture.baseSha)
+          })).pipe(Effect.provide(Worktrees.layer({ ...fixture, keepWorktrees: true })))
           if (mode !== "crashed") yield* fixture.fs.remove(located.path, { recursive: true })
         }
         const status: TaskStatus = mode === "recreated"
