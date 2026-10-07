@@ -913,7 +913,7 @@ try {
         }
         const decided = c.command(args)
         assertExited(worker.pid)
-        assert.equal(decided.version, blocked.version + 1)
+        assert.equal(decided.version, blocked.version + (boundary === "reject" ? 2 : 1))
         assert.deepEqual(c.command(args), decided)
         if (boundary === "reject") {
           assert.equal(decided.stage, "cancelled")
