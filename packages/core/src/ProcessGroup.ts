@@ -6,7 +6,6 @@ import { isAlive } from "./RunLock.js"
 
 const exec = promisify(execFile)
 
-// A zombie has exited but can retain its PID and group until its parent reaps it.
 const processTable = Effect.fn("ProcessGroup.table")(function*(includeCommand = false) {
   const error = (cause: unknown) => systemError({ _tag: "Unknown", module: "ProcessGroup", method: "table", cause })
   const table = yield* Effect.tryPromise({
@@ -39,7 +38,8 @@ const processTable = Effect.fn("ProcessGroup.table")(function*(includeCommand = 
   }
   return rows
 })
-const running = (state: string) => !state.startsWith("Z")
+// A zombie has exited but can retain its PID and group until its parent reaps it.
+const running = (state: string) => !state.includes("Z") && !(process.platform === "darwin" && state.includes("E"))
 
 export const stopProcessGroup = Effect.fn("stopProcessGroup")(
   function*(pgid: number, token?: string, kind: "worker" | "git" | "factory" = "worker") {
@@ -74,12 +74,32 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
       groups.add(row.group)
     }
+    const denied = new Set<number>()
     for (const signal of ["SIGTERM", "SIGKILL"] as const) {
       for (const group of groups) {
+        if (denied.has(group)) continue
+        const current = yield* processTable(true)
+        const members = current.filter((row) => row.group === group)
+        if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
+          groups.delete(group)
+          continue
+        }
+        const original = rows.find((row) => row.pid === group && row.group === group)
+        const leader = current.find((row) => row.pid === group && row.group === group)
+        if (original === undefined || leader === undefined || leader.command !== original.command) {
+          return yield* error("Process group ownership changed before signal; recovery refused")
+        }
         yield* Effect.try({ try: () => process.kill(-group, signal), catch: error }).pipe(
           Effect.catchIf(
-            (e) => Predicate.isObject(e.reason.cause) && "code" in e.reason.cause && e.reason.cause.code === "ESRCH",
-            () => Effect.void,
+            (e) =>
+              Predicate.isObject(e.reason.cause) && "code" in e.reason.cause
+              && (e.reason.cause.code === "ESRCH" || e.reason.cause.code === "EPERM"),
+            (e) =>
+              Effect.sync(() => {
+                if (Predicate.isObject(e.reason.cause) && "code" in e.reason.cause && e.reason.cause.code === "EPERM") {
+                  denied.add(group)
+                }
+              }),
           ),
         )
       }
@@ -95,6 +115,10 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
         yield* Effect.sleep("50 millis")
       }
     }
-    return yield* error("Owned process group did not exit after SIGKILL; recovery refused")
+    return yield* error(
+      denied.size > 0
+        ? "Permission denied and process group exit could not be verified; recovery refused"
+        : "Owned process group did not exit after SIGKILL; recovery refused",
+    )
   },
 )
