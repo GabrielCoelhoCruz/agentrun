@@ -4,6 +4,7 @@ import { createHash } from "node:crypto"
 import {
   existsSync,
   lstatSync,
+  readlinkSync,
   symlinkSync,
   truncateSync,
   mkdirSync,
@@ -308,16 +309,25 @@ const snapshot = (directory, excluded = new Set()) => {
     if (excluded.has(file)) return;
     const stat = lstatSync(file);
     if (stat.isDirectory()) {
+      files[file] = { mode: stat.mode, ino: stat.ino, dev: stat.dev, entries: readdirSync(file).filter((name) => !excluded.has(join(file, name))).sort() };
       for (const name of readdirSync(file).sort()) visit(join(file, name));
     } else files[file] = {
       mode: stat.mode, size: stat.size, ino: stat.ino, dev: stat.dev,
-      bytes: stat.isFile() && stat.size <= 65536 ? createHash("sha256").update(readFileSync(file)).digest("hex") : null,
+      bytes: stat.isFile() ? createHash("sha256").update(readFileSync(file)).digest("hex") : null,
+      link: stat.isSymbolicLink() ? readlinkSync(file) : null,
     };
   };
   visit(directory);
   return files;
 };
-const faults = ["fifo", "directory", "socket", "symlink", "empty", "malformed", "utf8", "oversized", "sparse",
+const recordSnapshot = (file) => {
+  const stat = lstatSync(file);
+  return { mode: stat.mode, size: stat.size, ino: stat.ino, dev: stat.dev, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs,
+    bytes: stat.isFile() && stat.size <= 65536 ? createHash("sha256").update(readFileSync(file)).digest("hex") : null,
+    link: stat.isSymbolicLink() ? readlinkSync(file) : null,
+    entries: stat.isDirectory() ? readdirSync(file).sort() : null };
+};
+const faults = ["fifo", "directory", "socket", "symlink", "empty", "malformed", "utf8", "at-limit", "below-limit", "oversized", "sparse",
   "wrong-version", "wrong-type", "missing-field", "extra-field", "foreign-runId", "foreign-repoRoot", "serialized",
   "replace-before-open", "device-before-open", "replace-after-open", "grow", "truncate", "same-size", "read-error", "premature-eof"];
 for (const record of ["reservation", "receipt"]) {
@@ -344,6 +354,8 @@ for (const record of ["reservation", "receipt"]) {
         } else if (fault === "empty") writeFileSync(file, "");
         else if (fault === "malformed") writeFileSync(file, "PRIVATE_RECORD_CONTENT {");
         else if (fault === "utf8") writeFileSync(file, Buffer.from([0xc0, 0xaf]));
+        else if (fault === "at-limit") writeFileSync(file, Buffer.alloc(65536, 32));
+        else if (fault === "below-limit") writeFileSync(file, Buffer.alloc(65535, 32));
         else if (fault === "oversized") writeFileSync(file, Buffer.alloc(65537, 32));
         else if (fault === "sparse") truncateSync(file, 1024 * 1024 * 1024);
         else if (fault === "serialized") writeFileSync(file, JSON.stringify(JSON.parse(original), null, 2));
@@ -361,6 +373,8 @@ for (const record of ["reservation", "receipt"]) {
         writeFileSync(marker, JSON.stringify({fault, target: file, mode: stat.mode, size: stat.size}));
       }
       const excluded = new Set([file, file + ".original"]);
+      const recordBefore = dynamic ? undefined : recordSnapshot(file);
+      const backupBefore = existsSync(file + ".original") ? recordSnapshot(file + ".original") : undefined;
       const before = { repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) };
       const calls = f.records().length;
       const originalOptions = f.env.NODE_OPTIONS;
@@ -382,10 +396,13 @@ for (const record of ["reservation", "receipt"]) {
       assert.equal(existsSync(marker), true, "Injection must have happened");
       assert.deepEqual({ repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) }, before);
       const injected = JSON.parse(readFileSync(marker));
+      if (!dynamic) assert.deepEqual(recordSnapshot(file), recordBefore);
+      if (backupBefore !== undefined) assert.deepEqual(recordSnapshot(file + ".original"), backupBefore);
+      else if (dynamic && (fault.includes("replace") || fault === "device-before-open")) assert.deepEqual(readFileSync(file + ".original"), original);
       if (dynamic) {
         const stat = lstatSync(file);
         assert.deepEqual({mode: stat.mode, size: stat.size, ino: stat.ino, dev: stat.dev,
-          bytes: stat.isFile() && stat.size <= 65536 ? createHash("sha256").update(readFileSync(file)).digest("hex") : null}, injected.after);
+          bytes: stat.isFile() ? createHash("sha256").update(readFileSync(file)).digest("hex") : null}, injected.after);
       }
       writeFileSync(join(f.directory, "refusal.json"), JSON.stringify({record, fault, elapsedMs, additionalCalls: f.records().length - calls, preserved: true, injection: injected}, null, 2));
       f.env.NODE_OPTIONS = originalOptions;

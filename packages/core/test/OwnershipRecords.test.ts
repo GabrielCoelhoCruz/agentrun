@@ -155,7 +155,7 @@ for (const fault of ["replace-before-open", "device-before-open", "replace-after
           if (fault === "grow") await fs.appendFile(file, " ")
           if (fault === "truncate") await fs.truncate(file, 1)
           if (fault === "same-size") {
-            await fs.writeFile(file, expected.replace("0042", "0043"))
+            await fs.writeFile(file, expected)
             const stat = await handle.stat()
             await fs.utimes(file, stat.atime, new Date(stat.mtimeMs + 1000))
           }
@@ -196,7 +196,8 @@ for (const phase of ["acquisition", "read"]) {
     await ready
     const interrupted = Effect.runPromise(Fiber.interrupt(fiber))
     release()
-    expect(Exit.hasInterrupts(await interrupted)).toBe(true)
+    await interrupted
+    expect(Exit.hasInterrupts(await Effect.runPromise(Fiber.await(fiber)))).toBe(true)
     expect(closed).toBe(1)
   })
 }
