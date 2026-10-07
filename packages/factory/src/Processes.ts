@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto"
 import { existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { CommandSpec, failure, Id, ProcessResult } from "./Domain.js"
+import { CommandSpec, failure, Id, ownershipFailure, ProcessResult } from "./Domain.js"
 import type { AttemptState, OwnedProcess } from "./Domain.js"
 import { io, readBytes, readJson, sha256 } from "./Files.js"
 import { blob, Store } from "./Store.js"
@@ -31,10 +31,10 @@ export const receipt = (owned: OwnedProcess, attemptId: string) =>
   })
 export const stop = (store: Store, attemptId: string, owned: OwnedProcess, reason: string) =>
   Effect.gen(function*() {
-    yield* stopProcessGroup(owned.pid, owned.token, "factory").pipe(Effect.mapError(() =>
-      failure(
-        "process-ownership",
+    yield* stopProcessGroup(owned.pid, owned.token, "factory").pipe(Effect.mapError((error) =>
+      ownershipFailure(
         "Process ownership could not be verified. Preserve the attempt and inspect its processes.",
+        error,
       )
     ))
     const state = yield* store.read()

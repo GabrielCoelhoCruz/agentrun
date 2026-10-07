@@ -1,5 +1,6 @@
 import { AgentId, TaskId } from "@agentrun/core"
 import { Schema } from "effect"
+import type { PlatformError } from "effect/PlatformError"
 
 export class FactoryError extends Schema.TaggedError<FactoryError>()("FactoryError", {
   code: Schema.String,
@@ -7,6 +8,16 @@ export class FactoryError extends Schema.TaggedError<FactoryError>()("FactoryErr
   exitCode: Schema.Int,
 }) {}
 export const failure = (code: string, message: string, exitCode = 1) => new FactoryError({ code, message, exitCode })
+export const ownershipFailure = (message: string, error: PlatformError) => {
+  const reason = error.reason
+  // ProcessGroup.table supplies this bounded, redacted cause.
+  const diagnostic = reason.module === "ProcessGroup" && reason.method === "table"
+      && typeof reason.cause === "string" && reason.cause.length <= 1024
+      && reason.cause.startsWith("Could not read process table: ")
+    ? `: ${reason.cause}`
+    : ""
+  return failure("process-ownership", `${message}${diagnostic}`)
+}
 export const Id = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,95}$/))
 export const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))
 export const Commit = Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/))

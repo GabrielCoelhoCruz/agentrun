@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, relative } from "node:path"
 import { promisify } from "node:util"
-import { CheckResult, FactoryError, failure, Review } from "./Domain.js"
+import { CheckResult, FactoryError, failure, ownershipFailure, Review } from "./Domain.js"
 import type {
   AgentAttempt,
   AttemptState,
@@ -247,8 +247,8 @@ export const cleanupExecutor = (store: Store, run: WorkflowRun, attempt: AgentAt
       for (const owned of Object.values(saved.worktrees)) {
         if (owned.pgid !== undefined) {
           yield* stopProcessGroup(owned.pgid, owned.processToken).pipe(
-            Effect.mapError(() =>
-              failure("process-ownership", "Executor worker ownership is unproved; cleanup refused")
+            Effect.mapError((error) =>
+              ownershipFailure("Executor worker ownership is unproved; cleanup refused", error)
             ),
           )
         }
