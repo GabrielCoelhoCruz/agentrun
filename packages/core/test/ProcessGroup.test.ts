@@ -4,6 +4,7 @@ import { once } from "node:events"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { inspect } from "node:util"
 import { expect, test, vi } from "vitest"
 import { stopProcessGroup } from "../src/ProcessGroup.js"
 
@@ -344,7 +345,19 @@ test("two concurrent cleaners settle the same real SIGTERM-ignoring group", asyn
         Effect.runPromise(stopProcessGroup(child.pid!, token)),
       ])
       await done
-      expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"])
+      const diagnostics = {
+        platform: process.platform,
+        iteration,
+        pid: child.pid,
+        results: inspect(results, { depth: 8 }),
+      }
+      if (process.env.AGENTRUN_TEST_EVIDENCE) {
+        writeFileSync(
+          join(process.env.AGENTRUN_TEST_EVIDENCE, `concurrent-stop-${iteration}.json`),
+          JSON.stringify(diagnostics, null, 2),
+        )
+      }
+      expect(results.map((r) => r.status), diagnostics.results).toEqual(["fulfilled", "fulfilled"])
       expect(() => process.kill(child.pid!, 0)).toThrow()
       console.info(JSON.stringify({ platform: process.platform, iteration, pid: child.pid, results }))
     } finally {

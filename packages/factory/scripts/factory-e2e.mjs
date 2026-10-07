@@ -445,8 +445,10 @@ try {
       )
       if (origin === "gitlink") {
         c.git("update-index", "--add", "--cacheinfo", `160000,${c.base},submodule`)
+        mkdirSync(join(c.repo, "submodule"))
         c.git("-c", "user.name=Fixture", "-c", "user.email=fixture@localhost", "commit", "-qm", "tracked gitlink")
       }
+      assert.equal(c.git("status", "--porcelain"), "", `dirty ${origin} export fixture`)
       const state = c.start()
       assertHuman(state)
       approve(c, state)
