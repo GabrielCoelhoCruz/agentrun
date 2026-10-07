@@ -458,7 +458,7 @@ const recordSnapshot = (file) => {
     dev: stat.dev,
     mtimeMs: stat.mtimeMs,
     ctimeMs: stat.ctimeMs,
-    bytes: stat.isFile() && stat.size <= 65536 ? createHash("sha256").update(readFileSync(file)).digest("hex") : null,
+    bytes: stat.isFile() && stat.size <= 65537 ? createHash("sha256").update(readFileSync(file)).digest("hex") : null,
     link: stat.isSymbolicLink() ? readlinkSync(file) : null,
     entries: stat.isDirectory() ? readdirSync(file).sort() : null,
   }
@@ -562,6 +562,7 @@ for (const record of ["reservation", "receipt"]) {
       const recordBefore = dynamic ? undefined : recordSnapshot(file)
       const backupBefore = existsSync(file + ".original") ? recordSnapshot(file + ".original") : undefined
       const before = { repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) }
+      writeFileSync(join(f.directory, "preservation-before.json"), JSON.stringify({ ...before, record: recordBefore, backup: backupBefore }, null, 2))
       const calls = f.records().length
       const originalOptions = f.env.NODE_OPTIONS
       if (dynamic) {
@@ -586,7 +587,10 @@ for (const record of ["reservation", "receipt"]) {
       assert.ok(!result.stderr.includes("PRIVATE_RECORD_CONTENT"))
       assert.equal(f.records().length, calls)
       assert.equal(existsSync(marker), true, "Injection must have happened")
-      assert.deepEqual({ repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) }, before)
+      const after = { repo: snapshot(f.repo, excluded), workspace: snapshot(saved.worktrees.change.path) }
+      assert.deepEqual(after, before)
+      writeFileSync(join(f.directory, "preservation-after.json"), JSON.stringify({ ...after, record: recordSnapshot(file),
+        backup: existsSync(file + ".original") ? recordSnapshot(file + ".original") : undefined }, null, 2))
       const injected = JSON.parse(readFileSync(marker))
       if (!dynamic) assert.deepEqual(recordSnapshot(file), recordBefore)
       if (backupBefore !== undefined) assert.deepEqual(recordSnapshot(file + ".original"), backupBefore)
