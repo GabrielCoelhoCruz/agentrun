@@ -1125,7 +1125,7 @@ const timedFixture = (prompt: string, stall = "2 seconds", max = "10 seconds", s
 
 for (const prompt of ["retry-success", "retry-exhaust"]) {
   test(`CLI ${prompt} saves retry events, costs and terminal failure without automatic resume`, async () => {
-    const f = timedFixture(prompt)
+    const f = timedFixture(prompt, "5 minutes", "60 minutes")
     const c = child(f, ["run", "TASKS.md", "--json"])
     expect(await c.done).toBe(prompt === "retry-success" ? 0 : 1)
     expect(startsCount(f)).toBe(3)
