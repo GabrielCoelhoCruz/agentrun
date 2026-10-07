@@ -427,6 +427,49 @@ try {
     assert.ok(journey.some((entry) => entry.event === "migration-verified"))
     assert.equal(c.git("status", "--porcelain"), "")
   })
+  for (const origin of ["base", "candidate", "metadata", "gitlink"]) {
+    await scenario(`export-tree-${origin}`, async () => {
+      const c = setup(
+        `export-tree-${origin}`,
+        origin === "candidate" ? "candidate-attributes" : "happy",
+        (_p, repo) => {
+          if (origin === "base") writeFileSync(join(repo, ".gitattributes"), "server.ts export-ignore\n")
+          if (origin === "metadata") {
+            const folder = join(repo, "nested space", "é".repeat(60))
+            mkdirSync(folder, { recursive: true })
+            writeFileSync(join(folder, "line\nwith\ttab.bin"), Buffer.from([0, 255, 13, 10]))
+            writeFileSync(join(repo, "-executable"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+            symlinkSync("nested space/" + "é".repeat(60) + "/line\nwith\ttab.bin", join(repo, "link"))
+          }
+        },
+      )
+      if (origin === "gitlink") {
+        c.git("update-index", "--add", "--cacheinfo", `160000,${c.base},submodule`)
+        c.git("-c", "user.name=Fixture", "-c", "user.email=fixture@localhost", "commit", "-qm", "tracked gitlink")
+      }
+      const state = c.start()
+      assertHuman(state)
+      approve(c, state)
+      if (origin === "gitlink") {
+        const result = c.run(process.execPath, [cli, "export", c.id, "--json"])
+        assert.equal(result.code, 1, "tracked gitlink must refuse exact-source export")
+        assert.match(result.stderr, /gitlink|submodule/i)
+        assert.equal(c.events().some((e) => e.fact._tag === "ExportPrepared"), false)
+        return
+      }
+      const exported = c.command(["export", c.id])
+      const archive = join(exported.export.directory, "source.tar")
+      const verified = c.run("python3", [join(fixture, "verify-source.py"), c.repo, state.candidate.commit, archive])
+      assert.equal(verified.code, 0, verified.stderr)
+      note(c, "archive-proof", {
+        candidate: state.candidate.commit,
+        archiveSha256: hash(readFileSync(archive)),
+        manifestSha256: hash(readFileSync(join(exported.export.directory, "manifest.json"))),
+        entries: JSON.parse(verified.stdout),
+      })
+      assert.deepEqual(c.command(["export", c.id]), exported)
+    })
+  }
   await scenario("relative-command", async () => {
     const c = setup("relative-command", "happy", (profile, repo) => {
       profile.checks[0].argv = ["checks/run"]

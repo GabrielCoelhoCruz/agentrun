@@ -78,6 +78,12 @@ export function query({ prompt, options }) {
           }
         }
       }
+      if (mode === 'candidate-attributes') {
+        writeFileSync(join(options.cwd, '.gitattributes'), 'candidate-only.txt export-ignore\\nserver.ts export-subst\\n');
+        writeFileSync(join(options.cwd, 'candidate-only.txt'), 'checked candidate bytes\\n');
+        const server = join(options.cwd, 'server.ts');
+        writeFileSync(server, readFileSync(server, 'utf8') + '\\n// $Format:%H$\\n');
+      }
       if (mode === 'wrong-output') writeFileSync(join(options.cwd, 'unrelated.txt'), 'The agent claims success.\\n');
       if (mode === 'wrong-ancestry') {
         const git = (args) => { const r = spawnSync('git', args, { cwd: options.cwd, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };

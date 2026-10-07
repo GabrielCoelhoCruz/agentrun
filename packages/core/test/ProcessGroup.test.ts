@@ -4,7 +4,7 @@ import { once } from "node:events"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { expect, test } from "vitest"
+import { expect, test, vi } from "vitest"
 import { stopProcessGroup } from "../src/ProcessGroup.js"
 
 const token = "a".repeat(32)
@@ -310,3 +310,78 @@ process.stdin.on('end', () => child.kill('SIGKILL'))
     await sentinelDone
   }
 })
+
+const stubborn = async () => {
+  const child = spawn(process.execPath, [
+    "-e",
+    "process.on('SIGTERM',()=>{});process.on('message',()=>process.exit(0));process.send('ready');setInterval(()=>{},1000)",
+    `agentrun-worker-${token}`,
+  ], {
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  })
+  const done = once(child, "close")
+  await once(child, "message", { signal: AbortSignal.timeout(4000) })
+  return { child, done }
+}
+const dispose = async (child: ReturnType<typeof spawn>, done: Promise<unknown>) => {
+  const row = spawnSync("/bin/ps", ["-p", String(child.pid), "-o", "pgid=,command=", "-ww"], { encoding: "utf8" })
+  if (
+    row.status === 0 && row.stdout.trim().split(/\s+/)[0] === String(child.pid)
+    && row.stdout.trim().split(/\s+/).includes(`agentrun-worker-${token}`)
+  ) {
+    process.kill(-child.pid!, "SIGKILL")
+  }
+  await done
+}
+
+test("two concurrent cleaners settle the same real SIGTERM-ignoring group", async () => {
+  for (let iteration = 0; iteration < 5; iteration++) {
+    const { child, done } = await stubborn()
+    try {
+      const results = await Promise.allSettled([
+        Effect.runPromise(stopProcessGroup(child.pid!, token)),
+        Effect.runPromise(stopProcessGroup(child.pid!, token)),
+      ])
+      await done
+      expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"])
+      expect(() => process.kill(child.pid!, 0)).toThrow()
+      console.info(JSON.stringify({ platform: process.platform, iteration, pid: child.pid, results }))
+    } finally {
+      await dispose(child, done)
+    }
+  }
+}, 30000)
+
+test.each(["live", "exits"])("permission denial with a %s group requires bounded exit proof", async (state) => {
+  const { child, done } = await stubborn()
+  const realKill = process.kill.bind(process)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const signals: Array<string> = []
+  const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (pid === -child.pid! && signal !== 0) {
+      signals.push(String(signal))
+      if (state === "exits" && timer === undefined) timer = setTimeout(() => child.send("exit"), 100)
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" })
+    }
+    return realKill(pid, signal)
+  })
+  try {
+    const started = performance.now()
+    const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
+    if (state === "live") {
+      expect(result._tag).toBe("Failure")
+      expect(performance.now() - started).toBeGreaterThanOrEqual(1500)
+      expect(() => realKill(child.pid!, 0)).not.toThrow()
+    } else {
+      expect(result._tag).toBe("Success")
+      await done
+      expect(() => realKill(child.pid!, 0)).toThrow()
+    }
+    expect(signals).toEqual(["SIGTERM"])
+  } finally {
+    spy.mockRestore()
+    clearTimeout(timer)
+    await dispose(child, done)
+  }
+}, 15000)
