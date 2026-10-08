@@ -7,6 +7,7 @@ import { GitError } from "./domain/Errors.js"
 import type { RunState } from "./domain/RunState.js"
 import { TaskId } from "./domain/Task.js"
 import type { Task } from "./domain/Task.js"
+import * as OwnershipRecords from "./OwnershipRecords.js"
 import { stopProcessGroup } from "./ProcessGroup.js"
 import { repoIdentity } from "./RepoHash.js"
 
@@ -205,9 +206,12 @@ process.stdin.once('data',()=>{
     )
   const assertAvailable = Effect.fn("Worktrees.assertAvailable")(function*(taskId: TaskId) {
     const worktree = locate(taskId)
+    yield* OwnershipRecords.validateGenerated(owner(worktree)).pipe(
+      Effect.mapError(() => refusal(worktree, "creation receipt could not be saved")),
+    )
     if (
       (yield* fs.exists(worktree.path).pipe(Effect.mapError(processError)))
-      || (yield* fs.exists(receipt(worktree)).pipe(Effect.mapError(processError)))
+      || (yield* OwnershipRecords.exists(receipt(worktree)).pipe(Effect.mapError(processError)))
       || (yield* matchingBranches(worktree)).length > 0
     ) {
       return yield* new GitError({
@@ -228,14 +232,13 @@ process.stdin.once('data',()=>{
       return yield* refusal(worktree, "case-only branch collision")
     }
     const file = receipt(worktree)
-    const owned = yield* fs.exists(file).pipe(Effect.mapError(processError))
+    const owned = yield* OwnershipRecords.exists(file).pipe(
+      Effect.mapError(() => refusal(worktree, "creation receipt cannot be read")),
+    )
     if (owned) {
-      const content = yield* fs.readFileString(file).pipe(
-        Effect.mapError(() => refusal(worktree, "creation receipt cannot be read")),
+      yield* OwnershipRecords.read(file, OwnershipRecords.BranchReceipt, owner(worktree)).pipe(
+        Effect.mapError(() => refusal(worktree, "creation receipt belongs to another run or is invalid")),
       )
-      if (content !== owner(worktree)) {
-        return yield* refusal(worktree, "creation receipt belongs to another run or is invalid")
-      }
     } else if (dir || branches.length > 0) {
       return yield* refusal(worktree, "creation receipt is missing")
     }
@@ -277,6 +280,9 @@ process.stdin.once('data',()=>{
       return yield* Effect.acquireRelease(
         Effect.gen(function*() {
           const worktree = locate(task.id)
+          yield* OwnershipRecords.validateGenerated(owner(worktree)).pipe(
+            Effect.mapError(() => refusal(worktree, "creation receipt could not be saved")),
+          )
           const existing = yield* inspect(worktree)
           yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.orDie)
           if (existing.dir) return worktree
