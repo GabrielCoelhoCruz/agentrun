@@ -8,7 +8,7 @@ const evaluate = (body: string) =>
     "--input-type=module",
     "-e",
     `import assert from 'node:assert/strict';
-   import { verifyHashes, verifyBindings, verifyJourneys, runCommand } from ${
+   import { verifyHashes, verifyBindings, verifyJourneys, runCommand, lockedDependencyOverrides } from ${
       JSON.stringify(new URL("../scripts/installed-e2e.mjs", import.meta.url).href)
     };
    ${body}`,
@@ -72,4 +72,26 @@ test("installed proof refuses an existing evidence directory", () => {
   })
   expect(result.status).not.toBe(0)
   expect(result.stderr).toMatch(/EEXIST/)
+})
+
+test("installed proof keeps parent-specific transitive versions from the source lock", () => {
+  expect(evaluate(`
+    const snapshots = {
+      '@earendil-works/pi-coding-agent@1.0.0(peer@2.0.0)': {
+        dependencies: { '@earendil-works/pi-codemode': '1.0.0', shared: '2.0.0(peer@2.0.0)' },
+        optionalDependencies: { native: '3.0.0' },
+      },
+      'other@1.0.0': { dependencies: { shared: '1.0.0' } },
+      'leaf@1.0.0': {},
+    };
+    const overrides = lockedDependencyOverrides(snapshots);
+    assert.equal(overrides['@earendil-works/pi-coding-agent@1.0.0>@earendil-works/pi-codemode'], '1.0.0');
+    assert.equal(overrides['@earendil-works/pi-coding-agent@1.0.0>shared'], '2.0.0');
+    assert.equal(overrides['other@1.0.0>shared'], '1.0.0');
+    assert.equal(overrides['@earendil-works/pi-coding-agent@1.0.0>native'], '3.0.0');
+    assert.throws(() => lockedDependencyOverrides({
+      'parent@1.0.0(peer@1.0.0)': { dependencies: { child: '1.0.0' } },
+      'parent@1.0.0(peer@2.0.0)': { dependencies: { child: '2.0.0' } },
+    }), /conflicting/i);
+  `)).toBe("")
 })
