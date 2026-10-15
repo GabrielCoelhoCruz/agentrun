@@ -531,6 +531,7 @@ try {
     const c = setup("fenced-review", "fenced-review")
     assertHuman(c.start())
     assert.deepEqual(c.records().filter((r) => r.kind === "provider").map((r) => r.stage), ["implement", "review"])
+    assert.deepEqual(c.records().filter((r) => r.kind === "review-result").map((r) => r.fenced), [true])
   })
   await scenario("review-revision", async () => {
     const c = setup("review-revision", "review-revision")

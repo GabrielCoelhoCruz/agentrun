@@ -133,9 +133,10 @@ export const prepareAgent = (store: Store, state: Projection, kind: "implement" 
           },
           resultRules: [
             "Reply with exactly one JSON object in resultFormat and nothing else.",
-            "Use only the keys in resultFormat.",
+            "Use every key in resultFormat and no other key. version is the number 1.",
             "accepted requires an empty findings list. Any finding requires revision-needed or human-needed.",
-            "revision-needed requires at least one finding on a changed line of the diff.",
+            "revision-needed requires at least one finding.",
+            "Every finding names a file in the diff and a line that the diff adds or changes.",
           ],
         }
         : {}),

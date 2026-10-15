@@ -6,7 +6,7 @@ The package is private and is not published to npm.
 
 ## Start from a committed project
 
-Use Node 24. The executor supports macOS and Linux. Deterministic providers prove the TypeScript journey on macOS. One real Claude Code run also completed the TypeScript journey on macOS: implementation, the restart check, read-only review, approval and export.
+Use Node 24. The executor supports macOS and Linux. Deterministic providers prove the TypeScript journey on macOS. On 2026-10-15, one real Claude Code run also completed the TypeScript journey on macOS, for $0.26: implementation, the restart check, read-only review, approval and export.
 The Python portability journey and Linux real-provider runs remain separate work.
 
 Build this repository with `pnpm install --frozen-lockfile` and `pnpm build`.
