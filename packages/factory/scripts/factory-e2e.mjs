@@ -527,6 +527,11 @@ try {
       c.command(["export", c.id], 1)
     })
   }
+  await scenario("fenced-review", async () => {
+    const c = setup("fenced-review", "fenced-review")
+    assertHuman(c.start())
+    assert.deepEqual(c.records().filter((r) => r.kind === "provider").map((r) => r.stage), ["implement", "review"])
+  })
   await scenario("review-revision", async () => {
     const c = setup("review-revision", "review-revision")
     assertHuman(c.start())

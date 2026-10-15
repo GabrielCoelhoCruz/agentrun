@@ -114,6 +114,7 @@ export function query({ prompt, options }) {
       if (mode === 'changed-review') writeFileSync(join(options.cwd, 'review-write.txt'), 'unexpected write\\n');
       result = JSON.stringify({ version: 1, candidate: mode === 'wrong-review-candidate' ? '0'.repeat(40) : task.inputSha, profileHash: task.profileHash, verdict, findings });
       if (mode === 'malformed-review') result = 'accepted';
+      if (mode === 'fenced-review') result = '\u0060\u0060\u0060json\\n' + result + '\\n\u0060\u0060\u0060';
     }
     yield { type: 'result', subtype: 'success', is_error: false, result, total_cost_usd: 0, num_turns: 1 };
   })(), { close() {} });
