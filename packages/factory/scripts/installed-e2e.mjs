@@ -39,6 +39,24 @@ export const verifyJourneys = (outcomes, required) => {
   }
 }
 
+// Pin dependency edges so packing cannot silently select a different tested runtime graph.
+export const lockedDependencyOverrides = (snapshots) => {
+  const overrides = {}
+  for (const [snapshot, entry] of Object.entries(snapshots)) {
+    const parent = snapshot.split("(")[0]
+    for (const [name, resolved] of Object.entries({ ...entry.dependencies, ...entry.optionalDependencies })) {
+      const selector = `${parent}>${name}`
+      const version = resolved.split("(")[0]
+      assert.ok(
+        overrides[selector] === undefined || overrides[selector] === version,
+        `Conflicting locked dependency: ${selector}`,
+      )
+      overrides[selector] = version
+    }
+  }
+  return overrides
+}
+
 export const runCommand = (evidence, name, executable, argv, cwd, timeout = 900000) => {
   const started = new Date().toISOString()
   const result = spawnSync(executable, argv, { cwd, encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 })
@@ -98,10 +116,10 @@ const main = (directory, selected = "all") => {
     directory,
     manifest: read(join(source, "packages", directory, "package.json")),
   }))
-  const overrides = {}
   const dependencies = {}
   const { parse } = createRequire(join(source, "packages/core/package.json"))("yaml")
   const lock = parse(readFileSync(join(source, "pnpm-lock.yaml"), "utf8"))
+  const overrides = lockedDependencyOverrides(lock.snapshots)
   for (const { directory, manifest } of packages) {
     runCommand(
       evidence,
