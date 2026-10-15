@@ -30,11 +30,16 @@ jobs:
           AGENTRUN_CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
           AGENTRUN_CANDIDATE_BASE: ${{ github.event.pull_request.base.sha }}
         run: node packages/factory/scripts/installed-e2e.mjs "$RUNNER_TEMP/factory-installed-proof"
+      - name: Archive installed proof
+        if: ${{ always() }}
+        run: |
+          if [ -d "$RUNNER_TEMP/factory-installed-proof" ]; then
+            tar -czf "$RUNNER_TEMP/factory-installed-proof.tar.gz" -C "$RUNNER_TEMP" factory-installed-proof
+          fi
       - name: Save installed proof
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: factory-installed-proof-${{ github.sha }}
-          path: ${{ runner.temp }}/factory-installed-proof
-          include-hidden-files: true
+          path: ${{ runner.temp }}/factory-installed-proof.tar.gz
           if-no-files-found: warn
