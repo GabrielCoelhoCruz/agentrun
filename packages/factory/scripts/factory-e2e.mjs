@@ -621,6 +621,29 @@ try {
       }
     })
   }
+  for (const [name, write] of [["owner", "1"], ["source", "2"]]) {
+    await scenario(`crash-partial-${name}`, async () => {
+      const c = setup(`crash-partial-${name}`)
+      const state = c.start()
+      approve(c, state)
+      const crashed = c.run(process.execPath, [cli, "export", c.id, "--json"], {
+        FACTORY_FIXTURE_CRASH: "partial-write",
+        FACTORY_FIXTURE_CRASH_WRITE: write,
+      })
+      assert.equal(crashed.signal, "SIGKILL", crashed.stderr)
+      const directory = c.events().find((e) => e.fact._tag === "ExportPrepared").fact.receipt.directory
+      assert.equal(existsSync(join(directory, name === "owner" ? "owner.json" : "source.tar")), false)
+      const exported = c.command(["export", c.id])
+      assert.equal(exported.stage, "exported")
+      assert.equal(exported.export.directory, directory)
+      const manifest = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"))
+      assert.ok(manifest.files.some((file) => file.name === "source.tar"))
+      for (const file of manifest.files) assert.equal(hash(readFileSync(join(directory, file.name))), file.digest)
+      const listed = readdirSync(directory, { recursive: true }).map(String).sort()
+      assert.deepEqual(listed.filter((entry) => /partial/.test(entry)), [])
+      note(c, "partial-write-proof", { crashedWrite: name, listed })
+    })
+  }
   for (const mode of ["exit", "timeout"]) {
     await scenario(`report-failure-${mode}`, async () => {
       const c = setup(`report-failure-${mode}`)

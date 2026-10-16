@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { sourceArchive } from "./Archive.js"
 import { Candidate, FactoryError, failure, HumanAction, Id } from "./Domain.js"
 import type { Artifact, HumanDecision, HumanRequest, Projection } from "./Domain.js"
-import { gitBytes, inside, io, readBytes, sha256, syncDirectory, writeExclusive } from "./Files.js"
+import { gitBytes, inside, io, readBytes, removePartials, sha256, syncDirectory, writeExclusive } from "./Files.js"
 import { stop } from "./Processes.js"
 import { executorIdentity, prepareProfile, repository } from "./Profile.js"
 import {
@@ -367,9 +367,10 @@ const exportLocal = (store: Store) =>
     const owner = JSON.stringify({ workflow: state.run.id, manifestDigest: prepared.receipt.manifestDigest })
     yield* io("export", () => {
       const directory = prepared.receipt.directory
-      if (!existsSync(directory)) {
+      if (existsSync(directory)) removePartials(directory)
+      if (!existsSync(directory) || readdirSync(directory).length === 0) {
         mkdirSync(join(store.directory, "exports"), { recursive: true, mode: 0o700 })
-        mkdirSync(directory, { mode: 0o700 })
+        mkdirSync(directory, { recursive: true, mode: 0o700 })
         writeExclusive(join(directory, "owner.json"), owner)
         syncDirectory(join(store.directory, "exports"))
       } else if (

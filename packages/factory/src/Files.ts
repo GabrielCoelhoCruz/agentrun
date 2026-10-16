@@ -1,18 +1,21 @@
 import { Effect, Schema } from "effect"
 import { execFile } from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import {
   closeSync,
   constants,
   existsSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs"
-import { dirname, isAbsolute, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { promisify } from "node:util"
 import { FactoryError, failure, RelativePath } from "./Domain.js"
 
@@ -47,22 +50,42 @@ export const syncDirectory = (directory: string) => {
     closeSync(fd)
   }
 }
+const partial = /^\..+\.partial-[0-9a-f]{16}$/
+// Publishes complete bytes only: the final path appears through link, which never replaces an existing file.
 export const writeExclusive = (file: string, bytes: string | Uint8Array) => {
-  if (existsSync(file)) {
+  const accept = () => {
     if (sha256(readBytes(file, 64 * 1024 * 1024)) !== sha256(bytes)) {
       throw failure("artifact", `Existing artifact differs; preserve and inspect: ${file}`)
     }
-    return
   }
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
-  const fd = openSync(file, "wx", 0o600)
+  if (existsSync(file)) return accept()
+  const directory = dirname(file)
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const temporary = join(directory, `.${basename(file)}.partial-${randomBytes(8).toString("hex")}`)
   try {
-    writeFileSync(fd, bytes)
-    fsyncSync(fd)
+    const fd = openSync(temporary, "wx", 0o600)
+    try {
+      writeFileSync(fd, bytes)
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+    try {
+      linkSync(temporary, file)
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "EEXIST") return accept()
+      throw cause
+    }
   } finally {
-    closeSync(fd)
+    rmSync(temporary, { force: true })
   }
-  syncDirectory(dirname(file))
+  syncDirectory(directory)
+}
+// Removes files that a crashed writeExclusive left behind. Call only while holding the directory's writer lock.
+export const removePartials = (directory: string) => {
+  for (const entry of readdirSync(directory, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile() && partial.test(entry.name)) rmSync(join(entry.parentPath, entry.name))
+  }
 }
 export const inside = (root: string, name: string) => {
   Schema.decodeUnknownSync(RelativePath)(name)

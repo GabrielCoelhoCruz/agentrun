@@ -34,6 +34,21 @@ test("production CLI accepts a review verdict wrapped in one JSON code fence", a
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
 }, scenarioBudgetMs + 5000)
 
+test.each(["owner", "source"])(
+  "production CLI export recovers after a crash in the middle of a file write (%s)",
+  async (file) => {
+    const parent = await mkdtemp(join(tmpdir(), "factory-partial-write-e2e-"))
+    const result = await promisify(execFile)(process.execPath, [
+      fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+      fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+      join(parent, "proof"),
+      `crash-partial-${file}`,
+    ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+  },
+  scenarioBudgetMs + 5000,
+)
+
 test("factory driver lists the complete installed matrix without running journeys", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-journey-list-"))
   const result = await promisify(execFile)(process.execPath, [
