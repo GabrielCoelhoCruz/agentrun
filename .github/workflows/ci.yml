@@ -78,7 +78,7 @@ jobs:
       - run: pnpm build
       - name: Prove real-provider evidence is safe with a fixture
         run: node packages/factory/scripts/real-journey-e2e.mjs "$RUNNER_TEMP/real-journey-fixture"
-      - name: Prove installed factory
+      - name: Prove fresh dependency resolve and installed factory
         env:
           AGENTRUN_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
           AGENTRUN_PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
