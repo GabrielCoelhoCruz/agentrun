@@ -38,6 +38,8 @@ export function query({ prompt, options }) {
   const task = JSON.parse(prompt);
   const mode = process.env.FACTORY_FIXTURE_MODE ?? 'happy';
   const review = task.stage === 'review';
+  const source = process.env.FACTORY_FIXTURE_SOURCE;
+  const python = source.endsWith('.py');
   if (review) {
     assert.deepEqual(options.tools, ['Read', 'Glob', 'Grep']);
     assert.deepEqual(options.allowedTools, ['Read', 'Glob', 'Grep']);
@@ -71,18 +73,18 @@ export function query({ prompt, options }) {
         if (firstIncorrect || mode === 'correction-limit') {
           writeFileSync(join(options.cwd, 'attempt.txt'), task.attemptId + '\\n');
         } else {
-          copyFileSync(process.env.FACTORY_FIXTURE_DURABLE, join(options.cwd, 'server.ts'));
+          copyFileSync(process.env.FACTORY_FIXTURE_DURABLE, join(options.cwd, source));
           if (task.stage === 'correct') {
-            const file = join(options.cwd, 'server.ts');
+            const file = join(options.cwd, source);
             writeFileSync(file, readFileSync(file, 'utf8').replace('not found', 'note not found'));
           }
         }
       }
       if (mode === 'candidate-attributes') {
-        writeFileSync(join(options.cwd, '.gitattributes'), 'candidate-only.txt export-ignore\\nserver.ts export-subst\\n');
+        writeFileSync(join(options.cwd, '.gitattributes'), 'candidate-only.txt export-ignore\\n' + source + ' export-subst\\n');
         writeFileSync(join(options.cwd, 'candidate-only.txt'), 'checked candidate bytes\\n');
-        const server = join(options.cwd, 'server.ts');
-        writeFileSync(server, readFileSync(server, 'utf8') + '\\n// $Format:%H$\\n');
+        const server = join(options.cwd, source);
+        writeFileSync(server, readFileSync(server, 'utf8') + '\\n' + (python ? '#' : '//') + ' $Format:%H$\\n');
       }
       if (mode === 'wrong-output') writeFileSync(join(options.cwd, 'unrelated.txt'), 'The agent claims success.\\n');
       if (mode === 'wrong-ancestry') {
@@ -96,7 +98,9 @@ export function query({ prompt, options }) {
         renameSync(join(options.cwd, 'checks'), join(options.cwd, 'old-checks'));
         symlinkSync(process.env.FACTORY_FIXTURE_ORIGINAL_CHECKS, join(options.cwd, 'checks'), 'dir');
       }
-      if (mode === 'changed-check') writeFileSync(join(options.cwd, 'checks/restart.mjs'), 'process.exit(0)\\n');
+      if (mode === 'changed-check') {
+        writeFileSync(join(options.cwd, process.env.FACTORY_FIXTURE_CHECK_FILE), python ? 'raise SystemExit(0)\\n' : 'process.exit(0)\\n');
+      }
     }
     let result = 'Implementation complete';
     if (review) {
@@ -104,7 +108,7 @@ export function query({ prompt, options }) {
       let findings = [];
       if (mode === 'review-revision' && !prior.some((r) => r.stage === 'review')) {
         verdict = 'revision-needed';
-        findings = [{ file: 'server.ts', line: 6, severity: 'medium', message: 'Use the explicit note error message.' }];
+        findings = [{ file: source, line: 6, severity: 'medium', message: 'Use the explicit note error message.' }];
       }
       if (mode === 'outside-diff') {
         verdict = 'revision-needed';

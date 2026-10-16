@@ -52,6 +52,9 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec vitest run ${{ matrix.args }}
 
@@ -68,6 +71,9 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Prove installed factory

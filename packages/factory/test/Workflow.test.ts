@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -79,6 +79,37 @@ test("production CLI rejects invalid profiles and proves persistence after corre
   ], { timeout: 3 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 3, paidProviderCalls: 0 })
 }, 3 * scenarioBudgetMs + 5000)
+
+test("production CLI delivers the Python example with the same engine", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-python-e2e-"))
+  const root = join(parent, "proof")
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    root,
+    "happy,correct",
+    "notes-py",
+  ], { timeout: 2 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    result: "passed",
+    example: "notes-py",
+    scenarios: 2,
+    paidProviderCalls: 0,
+  })
+  const delivered = await readFile(join(root, "happy/delivered/server.py"), "utf8")
+  expect(delivered).toContain("import sqlite3")
+  const journey = JSON.parse(await readFile(join(root, "happy/exported-journey/journey.json"), "utf8"))
+  expect(journey.map((entry: { event: string }) => entry.event)).toEqual([
+    "runtime",
+    "ready",
+    "created",
+    "stopped",
+    "ready",
+    "read-after-restart",
+    "stopped",
+    "migration-verified",
+  ])
+}, 2 * scenarioBudgetMs + 5000)
 
 test("production CLI keeps rejection terminal and stops workers before correction", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-decisions-e2e-"))

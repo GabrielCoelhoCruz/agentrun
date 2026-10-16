@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "project": "notes-py",
+  "base": "HEAD",
+  "roles": {
+    "implement": {
+      "agent": "claude-code",
+      "instructions": "roles/implement.md"
+    },
+    "review": {
+      "agent": "claude-code",
+      "instructions": "roles/review.md"
+    }
+  },
+  "checks": [
+    {
+      "id": "restart",
+      "argv": ["python3", "-I", "-B", "checks/restart.py"],
+      "cwd": ".",
+      "files": ["checks/restart.py", "runtime.json"],
+      "requiredEnv": [],
+      "timeoutMs": 30000
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "persisted-note",
+      "description": "A note can be read after the server stops and starts again.",
+      "check": "restart"
+    }
+  ],
+  "limits": {
+    "corrections": 1,
+    "durationMs": 2700000,
+    "providerBudgetUsd": 4
+  }
+}
