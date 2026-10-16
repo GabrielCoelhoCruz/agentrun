@@ -973,15 +973,19 @@ process.stdout.write(table)
     await scenario(mode, async () => {
       const c = setup(
         mode,
-        mode === "cancel-agent" ? mode : "happy",
+        mode,
         () => {},
         mode === "cancel-check" ? mode : undefined,
       )
       const running = c.startAsync()
-      await waitFor(() => {
-        if (mode === "cancel-agent") return c.records().some((r) => r.kind === "child")
-        return activeCheck(c)
-      }, mode)
+      await waitFor(
+        () => {
+          if (mode === "cancel-agent") return c.records().some((r) => r.kind === "child")
+          return activeCheck(c)
+        },
+        mode,
+        c.profile.limits.durationMs,
+      )
       const check = activeCheck(c)
       const current = c.status()
       c.command(["cancel", c.id, "--expected-version", String(current.version)])

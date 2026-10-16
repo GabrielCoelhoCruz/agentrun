@@ -211,6 +211,16 @@ process.stdin.once('data',()=>{
         + `git -C ${quote(options.repoRoot)} reflog show ${quote(`refs/heads/${worktree.branch}`)}\n`
         + `git -C ${quote(worktree.path)} rev-parse --path-format=absolute --git-common-dir --symbolic-full-name HEAD\n`
         + `git -C ${quote(worktree.path)} status --porcelain=v1 --untracked-files=all --ignored\n`
+        + (reason === "pending workspace is not clean"
+          ? `Crash recovery cannot prove which files the hook wrote.\n`
+            + `Preview untracked and ignored files with:\n`
+            + `git -C ${quote(worktree.path)} clean --dry-run -d -x\n`
+            + `Inspect tracked changes with:\n`
+            + `git -C ${quote(worktree.path)} diff --binary\n`
+            + `git -C ${quote(worktree.path)} diff --cached --binary\n`
+            + `Move only confirmed disposable files to your backup. Preserve files whose source is uncertain.\n`
+            + `Repeat the status command and retry resume only when it is empty. Do not force cleanup.\n`
+          : "")
         + `Compare the saved run with ${quote(receipt(worktree))} and ${
           quote(`${receipt(worktree)}.pending`)
         }. Check file type and size before reading records.\n`
@@ -243,7 +253,7 @@ process.stdin.once('data',()=>{
       })
     }
   })
-  const inspect = Effect.fn("Worktrees.inspect")(function*(worktree: Worktree, baseSha?: string) {
+  const inspect = Effect.fn("Worktrees.inspect")(function*(worktree: Worktree, baseSha?: string, createdHere = false) {
     const expected = locate(worktree.taskId)
     if (worktree.path !== expected.path || worktree.branch !== expected.branch) {
       return yield* refusal(worktree, "resource identity differs")
@@ -305,7 +315,7 @@ process.stdin.once('data',()=>{
         return yield* refusal(worktree, "pending branch creation is unproved")
       }
       if (
-        dir
+        dir && !createdHere
         && (yield* git(["status", "--porcelain=v1", "--untracked-files=all", "--ignored"], { cwd: worktree.path }))
           !== ""
       ) {
@@ -314,16 +324,45 @@ process.stdin.once('data',()=>{
     }
     return { dir, branch: branches.length === 1, owned, pending }
   })
+  const saveReceipt = Effect.fn("Worktrees.saveReceipt")(
+    function*(worktree: Worktree, file: string, content: string, reason: string) {
+      yield* Effect.gen(function*() {
+        yield* OwnershipRecords.validateGenerated(content)
+        yield* fs.makeDirectory(ownership, { recursive: true, mode: 0o700 })
+        yield* Effect.scoped(Effect.gen(function*() {
+          const temporary = yield* fs.makeTempFileScoped({ directory: ownership, prefix: ".receipt-" })
+          yield* fs.chmod(temporary, 0o600)
+          yield* fs.writeFileString(temporary, content)
+          // An exclusive link exposes only complete proof and cannot replace another receipt.
+          yield* fs.link(temporary, file)
+        }))
+      }).pipe(Effect.mapError(() => refusal(worktree, reason)))
+    },
+  )
   const promote = Effect.fn("Worktrees.promote")(function*(worktree: Worktree) {
-    yield* Effect.scoped(Effect.gen(function*() {
-      const temporary = yield* fs.makeTempFileScoped({ directory: ownership, prefix: ".receipt-" })
-      yield* fs.chmod(temporary, 0o600)
-      yield* fs.writeFileString(temporary, owner(worktree))
-      // An exclusive link exposes only complete proof and cannot replace another receipt.
-      yield* fs.link(temporary, receipt(worktree))
-    })).pipe(Effect.mapError(() => refusal(worktree, "creation receipt could not be saved")))
+    yield* saveReceipt(worktree, receipt(worktree), owner(worktree), "creation receipt could not be saved")
     yield* fs.remove(`${receipt(worktree)}.pending`).pipe(
       Effect.mapError(() => refusal(worktree, "pending receipt could not be retired")),
+    )
+  })
+  const pruneMissing = Effect.fn("Worktrees.pruneMissing")(function*(worktree: Worktree) {
+    if (yield* OwnershipRecords.exists(worktree.path).pipe(Effect.mapError(processError))) {
+      return yield* refusal(worktree, "workspace path is no longer absent")
+    }
+    const parent = yield* fs.realPath(path.dirname(worktree.path)).pipe(Effect.mapError(processError))
+    const canonical = path.join(parent, path.basename(worktree.path))
+    const registered = yield* git(["worktree", "list", "--porcelain", "-z"], repo)
+    const fields = registered.split("\0\0").map((entry) => entry.split("\0")).find((entry) =>
+      entry[0] === `worktree ${worktree.path}` || entry[0] === `worktree ${canonical}`
+    )
+    if (fields === undefined) return
+    if (!fields.includes(`branch refs/heads/${worktree.branch}`)) {
+      return yield* refusal(worktree, "missing workspace registration belongs to another branch")
+    }
+    // Ordinary removal clears only this absent workspace's registration and respects Git locks.
+    yield* git(["worktree", "remove", worktree.path], repo).pipe(
+      semaphore.withPermits(1),
+      Effect.mapError(() => refusal(worktree, "missing workspace registration cannot be removed; inspect its lock")),
     )
   })
   const assertOwned = Effect.fn("Worktrees.assertOwned")(function*(worktree: Worktree) {
@@ -356,6 +395,7 @@ process.stdin.once('data',()=>{
           }
           yield* onCreate?.() ?? Effect.void
           if (existing.owned) {
+            yield* pruneMissing(worktree)
             yield* git(
               existing.branch
                 ? ["worktree", "add", worktree.path, worktree.branch]
@@ -365,15 +405,14 @@ process.stdin.once('data',()=>{
           } else {
             const base = yield* git(["rev-parse", "--verify", `${baseSha}^{commit}`], repo)
             if (!existing.pending) {
-              const content = pendingOwner(worktree, base)
-              yield* OwnershipRecords.validateGenerated(content).pipe(
-                Effect.mapError(() => refusal(worktree, "pending receipt could not be saved")),
-              )
-              yield* fs.makeDirectory(ownership, { recursive: true, mode: 0o700 }).pipe(Effect.mapError(processError))
-              yield* fs.writeFileString(`${receipt(worktree)}.pending`, content, { flag: "wx", mode: 0o600 }).pipe(
-                Effect.mapError(() => refusal(worktree, "pending receipt could not be saved")),
+              yield* saveReceipt(
+                worktree,
+                `${receipt(worktree)}.pending`,
+                pendingOwner(worktree, base),
+                "pending receipt could not be saved",
               )
             }
+            if (existing.branch) yield* pruneMissing(worktree)
             if (!existing.branch) {
               // Git writes this witness with the ref; an intent alone never proves branch creation.
               yield* git([
@@ -387,7 +426,7 @@ process.stdin.once('data',()=>{
               ], repo).pipe(semaphore.withPermits(1))
             }
             yield* git(["worktree", "add", worktree.path, worktree.branch], repo).pipe(semaphore.withPermits(1))
-            yield* inspect(worktree, base)
+            yield* inspect(worktree, base, true)
             yield* promote(worktree)
           }
           return worktree
@@ -458,14 +497,15 @@ process.stdin.once('data',()=>{
       if (existing.pending && existing.branch) pending.push(worktree)
     }
     for (const worktree of pending) {
-      if (!(yield* fs.exists(worktree.path).pipe(Effect.mapError(processError)))) {
+      const missing = !(yield* fs.exists(worktree.path).pipe(Effect.mapError(processError)))
+      if (missing) {
         yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.mapError(processError))
+        yield* pruneMissing(worktree)
         yield* git(["worktree", "add", worktree.path, worktree.branch], repo).pipe(semaphore.withPermits(1))
       }
-      yield* inspect(worktree, state.baseSha)
+      yield* inspect(worktree, state.baseSha, missing)
       yield* promote(worktree)
     }
-    yield* git(["worktree", "prune"], repo).pipe(semaphore.withPermits(1))
     const actions: Array<Reconciled> = []
     for (const task of state.tasks) {
       const taskId = task.id
@@ -475,6 +515,7 @@ process.stdin.once('data',()=>{
       const dir = yield* fs.exists(worktree.path).pipe(Effect.orDie)
       const branch = yield* branchExists(worktree.branch)
       if (status?._tag === "pending" && branch) {
+        if (!dir) yield* pruneMissing(worktree)
         const removed = dir ? yield* remove(worktree).pipe(Effect.result) : undefined
         if (removed?._tag === "Failure") {
           yield* Effect.logWarning("Worktree removal failed", removed.failure)
@@ -490,6 +531,7 @@ process.stdin.once('data',()=>{
           actions.push({ _tag: "Resumable", taskId })
         } else {
           yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.orDie)
+          yield* pruneMissing(worktree)
           yield* git(["worktree", "add", worktree.path, worktree.branch], repo).pipe(semaphore.withPermits(1))
           actions.push({ _tag: "Recreated", taskId })
         }

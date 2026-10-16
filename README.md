@@ -104,10 +104,16 @@ A creation receipt is the record that binds a run to its workspace and branch na
 Git can create a branch or workspace and then fail.
 Triggers include a failed `post-checkout` hook, checkout or Git LFS errors, the sixty-second Git limit, and the task deadline.
 A pending receipt records the expected owner, path, branch and base before Git starts.
+Both receipt kinds are published from a complete temporary file through an exclusive link.
+A stop during writing cannot expose an empty or partial pending record.
+A successful Git checkout can run user hooks and create files. The process that receives that success accepts those files.
+Crash recovery cannot prove which files a hook wrote. It still refuses changed or extra files, including ignored files.
 Git records a run-specific creation message with the new branch. Resume requires that single history entry, the exact base tip,
 the expected workspace identity, and a clean workspace including ignored files before saving final proof.
 A stop before Git permits a fresh creation attempt only while the expected resources remain absent.
-Changed commits, changed or extra files, and missing or invalid creation history require inspection.
+During crash recovery, changed commits, changed or extra files, and missing or invalid creation history require inspection.
+A proved branch with a missing workspace can be recreated. Recovery first removes only its stale Git registration.
+Locked registrations and unrelated workspaces remain intact.
 The CLI preserves those resources. `resume --retry-failed` refuses reuse or cleanup while ownership is unproved, even after the original error is fixed.
 A Git failure after resource creation can block automatic retry.
 
@@ -134,6 +140,12 @@ On Linux, replace `shasum -a 256` with `sha256sum`. Do not use `echo`; its newli
 A branch or workspace without its final receipt has incomplete ownership unless resume validates its pending proof. Missing, unreadable, mismatched, or partial records also require inspection.
 Check file type and size before reading a record. Do not read a pipe or device as JSON.
 A matching name alone does not prove creation. Do not create, rewrite, or copy receipts to bypass refusal. Do not delete an invalid receipt to make a retry pass.
+
+For a dirty pending workspace, preview extra files with `git -C <workspace> clean --dry-run -d -x`.
+Inspect tracked changes with `git diff --binary` and `git diff --cached --binary` in that workspace.
+Move only confirmed disposable files to your backup. Preserve files whose source is uncertain.
+Repeat the status command. Retry resume only when the status output is empty.
+Do not use force cleanup to bypass ownership checks.
 
 If any identity or dirtiness check is uncertain, retain the resources.
 For new work, use a different run ID and unused branch suffix.

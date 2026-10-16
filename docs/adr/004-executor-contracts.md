@@ -25,8 +25,11 @@ Those characters do not guarantee uniqueness, including when randomly generated.
 A branch or worktree collision exits with code 2 before a new run is saved.
 Saving a planned branch name does not establish ownership.
 Before Git creation, Worktrees writes an exclusive pending receipt with the run, checkout, task, branch, workspace and exact base identity.
+It writes each receipt into a temporary file and publishes it with an exclusive link after the complete write.
+A stop before publication leaves no partial record at the pending or final pathname.
 Git `update-ref --create-reflog` creates the branch only if absent and writes a run-specific message with that change.
-After Git creates the workspace, Worktrees validates the pending proof.
+After Git creates the workspace successfully, Worktrees validates its identity and branch creation history.
+The process that receives success accepts files written by checkout hooks. User hooks remain enabled.
 It publishes a complete final receipt through an exclusive hard link.
 The final receipt retains its existing format. A stop during its write cannot expose a partial final record.
 That receipt reserves the branch name for its owner, even after worktree cleanup.
@@ -47,8 +50,11 @@ Recovery has these boundaries:
 - A reservation without valid state blocks automatic dispatch and resume. Preserve it for inspection and use a different ID for new work.
 - Git can create a branch or workspace before a failed `post-checkout` hook, checkout or LFS error, Git timeout, or task deadline.
   Resume requires a matching record, the exact base tip, and the single expected creation history entry.
-  It also requires the expected Git workspace identity and clean status including ignored files.
+  Recovery of an existing workspace also requires the expected Git identity and clean status including ignored files.
+  Pending proof cannot distinguish hook output from later user files. Such files remain refused after a crash.
   A pending record with absent resources permits a new creation attempt. A proved branch with an absent workspace permits workspace recreation.
+  Recovery removes only the exact missing workspace registration through ordinary Git removal before recreation.
+  It preserves Git locks and unrelated live or stale registrations. It does not run a repository-wide prune.
   Modified, staged, untracked or ignored files, extra history, mismatched identities and invalid records cause refusal without cleanup.
   Expired or disabled creation history also prevents recovery. Git creates the history explicitly even when ordinary reflogs are disabled.
   The CLI preserves unproved resources. Fixing an unrelated failure does not establish creation proof.
