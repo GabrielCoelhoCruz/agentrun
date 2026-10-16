@@ -331,13 +331,12 @@ describe("Worktrees", () => {
         Effect.gen(function*() {
           const service = yield* Worktrees
           const worktree = service.locate(task().id)
-          if (row.dir) {
-            yield* fixture.fs.makeDirectory(fixture.path.dirname(worktree.path), { recursive: true })
-            yield* git(fixture.repoRoot, ["worktree", "add", "-b", worktree.branch, worktree.path, fixture.baseSha])
+          if (row.branch) {
+            yield* Effect.scoped(Effect.gen(function*() {
+              yield* (yield* Worktrees).acquire(task(), fixture.baseSha)
+            })).pipe(Effect.provide(Worktrees.layer({ ...fixture, keepWorktrees: true })))
+            if (!row.dir) yield* fixture.fs.remove(worktree.path, { recursive: true })
             if (row.dirty) yield* edit(fixture, worktree)
-          } else if (row.branch) {
-            yield* git(fixture.repoRoot, ["worktree", "add", "-b", worktree.branch, worktree.path, fixture.baseSha])
-            yield* fixture.fs.remove(worktree.path, { recursive: true })
           }
           const recorded = state(fixture, worktree, row.status)
           const before = JSON.stringify(recorded)
@@ -401,3 +400,116 @@ describe("Worktrees", () => {
       })
     ))
 })
+
+for (const resource of ["branch", "directory", "worktree"] as const) {
+  it.live(`refuses unrecorded pending ${resource} without cleanup`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const service = yield* Worktrees
+        const worktree = service.locate(task().id)
+        if (resource === "branch") yield* git(fixture.repoRoot, ["branch", worktree.branch, fixture.baseSha])
+        else {
+          yield* fixture.fs.makeDirectory(fixture.path.dirname(worktree.path), { recursive: true })
+          if (resource === "worktree") {
+            yield* git(fixture.repoRoot, ["worktree", "add", "-b", worktree.branch, worktree.path, fixture.baseSha])
+          } else yield* fixture.fs.makeDirectory(worktree.path)
+          yield* fixture.fs.writeFileString(fixture.path.join(worktree.path, "owner-file"), "preserve")
+        }
+        const before = yield* git(fixture.repoRoot, ["show-ref"])
+        const unowned = new RunState({ ...state(fixture, worktree, { _tag: "pending" }), worktrees: {} })
+        const error = yield* Effect.flip(service.reconcile(unowned))
+        assert.strictEqual(error._tag, "GitError")
+        assert.match(error.stderr, /[Cc]ollision|[Oo]wnership/)
+        assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+        if (resource !== "branch") {
+          assert.strictEqual(
+            yield* fixture.fs.readFileString(fixture.path.join(worktree.path, "owner-file")),
+            "preserve",
+          )
+        }
+      })
+    ))
+}
+
+it.live("new acquisition refuses an existing branch instead of adopting it", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const service = yield* Worktrees
+      const worktree = service.locate(task().id)
+      yield* git(fixture.repoRoot, ["branch", worktree.branch, fixture.baseSha])
+      const error = yield* Effect.flip(service.acquire(task(), fixture.baseSha))
+      assert.strictEqual(error._tag, "GitError")
+      assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", worktree.branch]), fixture.baseSha)
+      assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
+    })
+  ))
+
+for (const status of ["pending", "interrupted", "failed", "succeeded"] as const) {
+  it.live(`ownership refuses legacy ${status} resources with recorded names but no creation proof`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const service = yield* Worktrees
+        const located = service.locate(task().id)
+        yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+        yield* fixture.fs.writeFileString(fixture.path.join(located.path, "private-work"), "preserve\n")
+        const saved = state(
+          fixture,
+          located,
+          status === "pending"
+            ? { _tag: "pending" }
+            : status === "interrupted"
+            ? { _tag: "interrupted", attempt: 1 }
+            : status === "failed"
+            ? { _tag: "failed", attempt: 1, reason: "old failure" }
+            : { _tag: "succeeded", durationMs: 1 },
+        )
+        const before = yield* git(fixture.repoRoot, ["show-ref"])
+        const error = yield* Effect.flip(service.reconcile(saved))
+        assert.strictEqual(error._tag, "GitError")
+        assert.match(error.stderr, /[Oo]wnership/)
+        assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+        assert.strictEqual(
+          yield* fixture.fs.readFileString(fixture.path.join(located.path, "private-work")),
+          "preserve\n",
+        )
+      })
+    ))
+}
+
+it.live("ownership refuses snapshot and publication through a recorded but foreign workspace", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const service = yield* Worktrees
+      const located = service.locate(task().id)
+      yield* git(fixture.repoRoot, ["worktree", "add", "-b", located.branch, located.path, fixture.baseSha])
+      yield* edit(fixture, located)
+      const index = yield* git(located.path, ["diff", "--cached"])
+      const before = yield* git(fixture.repoRoot, ["show-ref"])
+      const snapshot = yield* Effect.flip(service.snapshot(located, "must not stage foreign work"))
+      assert.strictEqual(snapshot._tag, "GitError")
+      assert.match(snapshot.stderr, /[Oo]wnership/)
+      const publish = yield* Effect.flip(service.publish(located, fixture.baseSha))
+      assert.strictEqual(publish._tag, "GitError")
+      assert.strictEqual(yield* git(located.path, ["diff", "--cached"]), index)
+      assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+    })
+  ))
+
+it.live("ownership refuses a replacement repository at the owned workspace path", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const service = yield* Worktrees
+      const worktree = yield* Effect.scoped(service.acquire(task(), fixture.baseSha))
+      yield* fixture.fs.makeDirectory(worktree.path, { recursive: true })
+      yield* git(worktree.path, ["init", "-b", worktree.branch])
+      yield* fixture.fs.writeFileString(fixture.path.join(worktree.path, "private-work"), "foreign repository\n")
+      const error = yield* Effect.flip(service.acquire(task(), fixture.baseSha))
+      assert.strictEqual(error._tag, "GitError")
+      assert.match(error.stderr, /[Oo]wnership/)
+      assert.strictEqual(
+        yield* fixture.fs.readFileString(fixture.path.join(worktree.path, "private-work")),
+        "foreign repository\n",
+      )
+      assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", worktree.branch]), fixture.baseSha)
+    })
+  ))

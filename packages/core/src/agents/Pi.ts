@@ -118,6 +118,14 @@ const setup = Effect.fn("Pi.setup")(function*(input: AgentInput) {
   if (Option.isSome(input.maxTurns) || Option.isSome(input.maxBudgetUsd)) {
     return yield* spawnError(new Error("Pi does not support maxTurns or maxBudgetUsd"))
   }
+  const readOnly = input.tools === "read-only"
+  if (readOnly && (input.loadProjectSettings || input.setup !== undefined)) {
+    return yield* new AgentSpawnError({
+      agent: "pi",
+      cause: "read-only tools cannot load project settings or run setup",
+      retryable: false,
+    })
+  }
   const agentDir = getAgentDir()
   const settingsManager = SettingsManager.inMemory(
     input.loadProjectSettings
@@ -145,8 +153,10 @@ const setup = Effect.fn("Pi.setup")(function*(input: AgentInput) {
     settingsManager,
     resourceLoader,
     sessionManager: SessionManager.inMemory(input.cwd),
-    tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
-    ...(input.workerProcessGroup ? { customTools: [workerBashTool(input.cwd, settingsManager.getShellPath())] } : {}),
+    tools: readOnly ? ["read", "grep", "find", "ls"] : ["read", "bash", "edit", "write", "grep", "find", "ls"],
+    ...(input.workerProcessGroup && !readOnly
+      ? { customTools: [workerBashTool(input.cwd, settingsManager.getShellPath())] }
+      : {}),
   }
   if (Option.isSome(input.model)) {
     const reference = input.model.value
@@ -176,7 +186,7 @@ export const make = (deps: {
   readonly createAgentSession: (options: CreateAgentSessionOptions) => Promise<{ readonly session: Session }>
 }): AgentAdapter => ({
   id: "pi",
-  capabilities: { maxTurns: false, maxBudgetUsd: false, model: true, costReporting: true },
+  capabilities: { maxTurns: false, maxBudgetUsd: false, model: true, costReporting: true, readOnlyTools: true },
   run: (input) =>
     Stream.suspend(() => {
       let last = Option.none<AgentEvent>()

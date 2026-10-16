@@ -12,7 +12,7 @@ export class TaskFileError extends Schema.TaggedError<TaskFileError>()("TaskFile
 export class UnsupportedOption extends Schema.TaggedError<UnsupportedOption>()("UnsupportedOption", {
   taskId: TaskId,
   agent: AgentId,
-  option: Schema.Literals(["maxBudgetUsd", "maxTurns", "model"]),
+  option: Schema.Literals(["maxBudgetUsd", "maxTurns", "model", "tools"]),
   path: Schema.String,
   line: Schema.Int,
   message: Schema.String,
@@ -100,6 +100,6 @@ export class ReportError extends Schema.TaggedError<ReportError>()("ReportError"
   }
 }
 
-export type RunnerError = RunLocked | StateCorrupted | GitError | PlatformError | ReportError
+export type RunnerError = RunLocked | StateCorrupted | GitError | PlatformError | ReportError | AgentSpawnError
 
 export type AgentError = AgentSpawnError | AgentCrashed | AgentProtocolError | SetupError

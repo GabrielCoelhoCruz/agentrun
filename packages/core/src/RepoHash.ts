@@ -3,7 +3,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { createHash } from "node:crypto"
 import { GitError } from "./domain/Errors.js"
 
-export const repoHash = Effect.fn("repoHash")(function*(repoRoot: string) {
+export const repoIdentity = Effect.fn("repoIdentity")(function*(repoRoot: string) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
@@ -29,5 +29,7 @@ export const repoHash = Effect.fn("repoHash")(function*(repoRoot: string) {
       new GitError({ command: "realpath git-common-dir", exitCode: -1, stderr: error.message })
     ),
   )
-  return createHash("sha256").update(realPath).digest("hex").slice(0, 12)
+  return { commonDir: realPath, hash: createHash("sha256").update(realPath).digest("hex").slice(0, 12) }
 })
+
+export const repoHash = (repoRoot: string) => repoIdentity(repoRoot).pipe(Effect.map((identity) => identity.hash))

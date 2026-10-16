@@ -393,6 +393,7 @@ describe("Pi", () => {
         maxBudgetUsd: false,
         model: true,
         costReporting: true,
+        readOnlyTools: true,
       })
       for (const option of ["maxTurns", "maxBudgetUsd"] as const) {
         const parseError:
@@ -418,3 +419,35 @@ describe("Pi", () => {
       }
     }).pipe(Effect.provide(Agents.layer)))
 })
+
+it.effect("read-only Pi excludes write tools and the worker Bash override", () =>
+  Effect.gen(function*() {
+    const adapter = make({
+      createAgentSession: (options) => {
+        assert.deepStrictEqual(options.tools, ["read", "grep", "find", "ls"])
+        assert.strictEqual(options.customTools, undefined)
+        assert.deepStrictEqual(options.resourceLoader?.getExtensions().extensions, [])
+        return Promise.resolve({ session: new FakeSession([assistant(), settled]) })
+      },
+    })
+    const restricted = { ...input, tools: "read-only" as const, workerProcessGroup: true }
+    const events = yield* Effect.scoped(Stream.runCollect(adapter.run(restricted)))
+    assert.strictEqual(events.at(-1)?._tag, "Completed")
+  }))
+
+it.effect("read-only Pi rejects settings and setup before SDK invocation", () =>
+  Effect.gen(function*() {
+    let calls = 0
+    const adapter = make({
+      createAgentSession: () => {
+        calls++
+        return Promise.resolve({ session: new FakeSession([settled]) })
+      },
+    })
+    for (const extra of [{ loadProjectSettings: true }, { setup: "touch forbidden" }]) {
+      const restricted = { ...input, tools: "read-only" as const, ...extra }
+      const error = yield* Effect.flip(Effect.scoped(Stream.runDrain(adapter.run(restricted))))
+      assert.strictEqual(error._tag, "AgentSpawnError")
+    }
+    assert.strictEqual(calls, 0)
+  }))

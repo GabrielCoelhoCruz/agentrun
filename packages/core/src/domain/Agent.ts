@@ -1,9 +1,10 @@
 import type { Effect, Option } from "effect"
 import type { AgentError } from "./Errors.js"
-import type { TaskId } from "./Task.js"
+import type { TaskId, ToolProfile } from "./Task.js"
 
 export interface AgentInput {
   readonly taskId?: TaskId
+  readonly tools?: ToolProfile
   readonly loadProjectSettings?: boolean
   readonly setup?: string
   readonly setupCompleted?: () => Effect.Effect<void, AgentError>
@@ -17,6 +18,7 @@ export interface AgentInput {
 }
 
 export interface AgentCapabilities {
+  readonly readOnlyTools?: boolean
   readonly maxTurns: boolean
   readonly maxBudgetUsd: boolean
   readonly model: boolean
