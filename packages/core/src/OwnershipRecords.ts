@@ -16,6 +16,11 @@ export const BranchReceipt = Schema.Struct({
   branch: Schema.String,
 })
 
+export const PendingBranchReceipt = Schema.Struct({
+  ...BranchReceipt.fields,
+  baseSha: Schema.String,
+})
+
 // Contents and native error details are deliberately excluded from diagnostics.
 export class OwnershipRecordError extends Schema.TaggedError<OwnershipRecordError>()("OwnershipRecordError", {
   code: Schema.optional(Schema.Literal("ENOENT")),
@@ -78,7 +83,11 @@ export const readBytes = Effect.fn("OwnershipRecords.readBytes")(
 )
 
 export const read = Effect.fn("OwnershipRecords.read")(
-  function*(file: string, schema: typeof RunReservation | typeof BranchReceipt, expected: string) {
+  function*(
+    file: string,
+    schema: typeof RunReservation | typeof BranchReceipt | typeof PendingBranchReceipt,
+    expected: string,
+  ) {
     const before = yield* attempt(() => fs.lstat(file, { bigint: true }))
     const bytes = yield* readBytes(file)
     if (!same(before, yield* attempt(() => fs.lstat(file, { bigint: true })), limit)) return yield* refused()

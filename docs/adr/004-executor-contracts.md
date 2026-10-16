@@ -24,7 +24,11 @@ Branch names retain the last four ID characters for compatibility.
 Those characters do not guarantee uniqueness, including when randomly generated.
 A branch or worktree collision exits with code 2 before a new run is saved.
 Saving a planned branch name does not establish ownership.
-After successful Git creation, Worktrees writes an exclusive receipt with the run, checkout, task, branch, and workspace identity.
+Before Git creation, Worktrees writes an exclusive pending receipt with the run, checkout, task, branch, workspace and exact base identity.
+Git `update-ref --create-reflog` creates the branch only if absent and writes a run-specific message with that change.
+After Git creates the workspace, Worktrees validates the pending proof.
+It publishes a complete final receipt through an exclusive hard link.
+The final receipt retains its existing format. A stop during its write cannot expose a partial final record.
 That receipt reserves the branch name for its owner, even after worktree cleanup.
 Acquisition, reconciliation, snapshot, publication, and cleanup validate the receipt before using existing resources.
 An existing workspace must also have the expected Git common directory and branch.
@@ -42,18 +46,23 @@ Recovery has these boundaries:
 - A live owner blocks another execution. A report can still describe completed work.
 - A reservation without valid state blocks automatic dispatch and resume. Preserve it for inspection and use a different ID for new work.
 - Git can create a branch or workspace before a failed `post-checkout` hook, checkout or LFS error, Git timeout, or task deadline.
-  A crash, interruption, or receipt write failure can also leave resources without valid proof.
-  The CLI preserves unproved resources and refuses reuse or cleanup on later retries. Fixing the original failure does not remove this refusal.
+  Resume requires a matching record, the exact base tip, and the single expected creation history entry.
+  It also requires the expected Git workspace identity and clean status including ignored files.
+  A pending record with absent resources permits a new creation attempt. A proved branch with an absent workspace permits workspace recreation.
+  Modified, staged, untracked or ignored files, extra history, mismatched identities and invalid records cause refusal without cleanup.
+  Expired or disabled creation history also prevents recovery. Git creates the history explicitly even when ordinary reflogs are disabled.
+  The CLI preserves unproved resources. Fixing an unrelated failure does not establish creation proof.
 - Legacy runs without a common reservation cannot resume automatically. Legacy resources without creation receipts cannot be reused or cleaned up automatically.
 - Legacy reports remain readable. These refusals do not delete, move, reset, or rewrite the existing resources.
 - A saved completion or delivery uses existing recovery checkpoints without repeating completed provider work.
 - Interrupted provider work can restart a conversation under the existing v1 resume rules. This is not exactly-once provider execution.
 
 The initial run reservation precedes state storage. A crash can leave only that reservation.
-The creation receipt follows Git creation. A missing or partially written receipt cannot authorize resource use.
+The final creation receipt follows Git creation. Pending intent alone cannot authorize resource use.
+Acquisition and reconciliation validate pending proof before promotion. Snapshot, publication and removal require final proof.
 No migration infers ownership from a saved name. Current-build owned clean, dirty, and interrupted worktrees keep their lifecycle.
 Incomplete workspaces without creation proof are now preserved and refused on retry. Earlier builds cleaned up some clean partial workspaces.
-Transient post-creation failures therefore require manual inspection, not guaranteed automatic retry.
+Safe pending creation can resume automatically. Other partial creation failures still require manual inspection.
 
 Before upgrading, finish in-flight runs with the old build. Retain the old build, backups, and work.
 Both explicit and latest resume refuse legacy runs without ownership records. Reports remain readable.

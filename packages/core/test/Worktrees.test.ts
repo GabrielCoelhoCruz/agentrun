@@ -1,6 +1,19 @@
 import { NodeServices } from "@effect/platform-node"
 import { describe, it } from "@effect/vitest"
-import { Console, DateTime, Deferred, Duration, Effect, Exit, Fiber, FileSystem, Path, Schema, Stream } from "effect"
+import {
+  Console,
+  DateTime,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Fiber,
+  FileSystem,
+  Layer,
+  Path,
+  Schema,
+  Stream,
+} from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
@@ -49,7 +62,7 @@ const withRepo = Effect.fn("test.withRepo")(
   ) {
     const fs = yield* FileSystem.FileSystem
     const path = yield* Path.Path
-    const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "agentrun-repo-" })
+    const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "agentrun-repo-" }).pipe(Effect.flatMap(fs.realPath))
     const home = yield* fs.makeTempDirectoryScoped({ prefix: "agentrun-home-" })
     yield* git(repoRoot, ["init", "-b", "main"])
     yield* git(repoRoot, ["config", "commit.gpgsign", "false"])
@@ -225,7 +238,7 @@ describe("Worktrees", () => {
         "Two-permit acquisitions",
         JSON.stringify({ iterations: 10, failed: failures.length, failures }),
       )
-    }), 30000)
+    }), 60000)
 
   const rows: ReadonlyArray<{
     readonly name: string
@@ -388,14 +401,13 @@ describe("Worktrees", () => {
         const worktree = service.locate(task().id)
         const error = yield* Effect.flip(Effect.scoped(service.acquire(task(), "missing-base-sha")))
         assert.strictEqual(error._tag, "GitError")
-        assert.strictEqual(error.command, `git worktree add -b ${worktree.branch} ${worktree.path} missing-base-sha`)
-        const direct = spawnSync("git", ["worktree", "add", "-b", worktree.branch, worktree.path, "missing-base-sha"], {
+        assert.strictEqual(error.command, "git rev-parse --verify missing-base-sha^{commit}")
+        const direct = spawnSync("git", ["rev-parse", "--verify", "missing-base-sha^{commit}"], {
           cwd: fixture.repoRoot,
           encoding: "utf8",
         })
         assert.strictEqual(error.exitCode, direct.status)
         assert.strictEqual(error.stderr, direct.stderr)
-        assert.ok(error.stderr.includes("missing-base-sha"))
         assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
       })
     ))
@@ -594,5 +606,279 @@ it.live("refuses dangling receipt symlink before creating a branch or workspace"
       assert.strictEqual(Exit.isFailure(result), true)
       assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
       assert.strictEqual(yield* git(fixture.repoRoot, ["branch", "--list", worktree.branch]), "")
+    })
+  ))
+
+const receiptFile = (fixture: Fixture, worktree: Worktree) =>
+  fixture.path.join(
+    fixture.repoRoot,
+    ".git",
+    "agentrun",
+    "ownership",
+    "branches",
+    `${createHash("sha256").update(worktree.branch.toLowerCase()).digest("hex")}.json`,
+  )
+
+const stopCreation = Effect.fn("test.stopCreation")(
+  function*(fixture: Fixture, stage: "before-git" | "before-promote" | "failed-promote") {
+    const original = fixture.fs
+    const service = yield* Worktrees
+    const worktree = service.locate(task().id)
+    const file = receiptFile(fixture, worktree)
+    const fs: FileSystem.FileSystem = {
+      ...original,
+      writeFileString: (target, content, options) => {
+        if (stage === "before-git" && target === `${file}.pending`) {
+          return original.writeFileString(target, content, options).pipe(Effect.andThen(Effect.interrupt))
+        }
+        // Also stop the old implementation at its final receipt write.
+        if (stage !== "before-git" && target === file) return Effect.interrupt
+        return original.writeFileString(target, content, options)
+      },
+      link: (source, target) =>
+        target !== file
+          ? original.link(source, target)
+          : stage === "failed-promote"
+          ? original.link(`${source}.missing`, target)
+          : Effect.interrupt,
+    }
+    const result = yield* Effect.exit(
+      Effect.scoped(Effect.gen(function*() {
+        return yield* (yield* Worktrees).acquire(task(), fixture.baseSha)
+      })).pipe(
+        Effect.provide(
+          Worktrees.layer({ ...fixture, keepWorktrees: true }).pipe(
+            Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
+          ),
+        ),
+      ),
+    )
+    return { worktree, file, result }
+  },
+)
+
+it.live("pending creation resumes after a stop before Git without claiming an existing branch", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const { worktree, file, result } = yield* stopCreation(fixture, "before-git")
+      assert.strictEqual(Exit.hasInterrupts(result), true)
+      assert.strictEqual(yield* fixture.fs.exists(file), false)
+      assert.strictEqual(yield* fixture.fs.exists(`${file}.pending`), true)
+      assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
+      assert.strictEqual(yield* git(fixture.repoRoot, ["branch", "--list", worktree.branch]), "")
+      const service = yield* Worktrees
+      assert.deepStrictEqual(yield* service.reconcile(state(fixture, worktree, { _tag: "pending" })), [
+        { _tag: "Nothing", taskId: task().id },
+      ])
+      yield* Effect.scoped(Effect.gen(function*() {
+        const acquired = yield* service.acquire(task(), fixture.baseSha)
+        assert.deepStrictEqual(acquired, worktree)
+        assert.strictEqual(yield* git(acquired.path, ["rev-parse", "HEAD"]), fixture.baseSha)
+        assert.strictEqual(yield* fixture.fs.exists(file), true)
+        assert.strictEqual(yield* fixture.fs.exists(`${file}.pending`), false)
+      }))
+    })
+  ))
+
+for (const stage of ["before-promote", "failed-promote"] as const) {
+  it.live(`pending creation recovers after ${stage} through reconcile and acquire`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const { worktree, file, result } = yield* stopCreation(fixture, stage)
+        assert.strictEqual(Exit.isFailure(result), true)
+        assert.strictEqual(yield* fixture.fs.exists(file), false)
+        assert.strictEqual(yield* fixture.fs.exists(`${file}.pending`), true)
+        assert.strictEqual(yield* git(worktree.path, ["rev-parse", "HEAD"]), fixture.baseSha)
+        const service = yield* Worktrees
+        // Pending intent cannot authorize staging, publication or cleanup.
+        const snapshot = yield* Effect.flip(service.snapshot(worktree, "refuse pending"))
+        assert.strictEqual(snapshot.command, "worktree ownership")
+        const publish = yield* Effect.flip(service.publish(worktree, fixture.baseSha))
+        assert.strictEqual(publish.command, "worktree ownership")
+        assert.deepStrictEqual(
+          yield* service.reconcile(state(fixture, worktree, { _tag: "interrupted", attempt: 1 })),
+          [
+            { _tag: "Resumable", taskId: task().id },
+          ],
+        )
+        assert.strictEqual(yield* fixture.fs.exists(file), true)
+        assert.strictEqual(yield* fixture.fs.exists(`${file}.pending`), false)
+        yield* Effect.scoped(service.acquire(task(), fixture.baseSha))
+      })
+    ))
+}
+
+for (const change of ["commit", "untracked", "ignored", "modified", "staged"] as const) {
+  it.live(`pending creation refuses ${change} and preserves the workspace`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const { worktree, file } = yield* stopCreation(fixture, "before-promote")
+        const privateFile = fixture.path.join(worktree.path, change === "modified" ? "tracked.txt" : "private.txt")
+        if (change === "ignored") {
+          yield* fixture.fs.writeFileString(
+            fixture.path.join(fixture.repoRoot, ".git", "info", "exclude"),
+            "private.txt\n",
+          )
+        }
+        yield* fixture.fs.writeFileString(privateFile, "preserve user work\n")
+        if (change === "staged" || change === "commit") yield* git(worktree.path, ["add", "private.txt"])
+        if (change === "commit") {
+          yield* git(worktree.path, [
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "-m",
+            "User work",
+          ])
+        }
+        const before = yield* git(fixture.repoRoot, ["show-ref"])
+        const index = yield* git(worktree.path, ["diff", "--cached"])
+        const service = yield* Worktrees
+        for (
+          const operation of [
+            Effect.scoped(service.acquire(task(), fixture.baseSha)).pipe(Effect.asVoid),
+            service.reconcile(state(fixture, worktree, { _tag: "pending" })).pipe(Effect.asVoid),
+          ]
+        ) {
+          const error = yield* Effect.flip(operation)
+          assert.strictEqual(error.command, "worktree ownership")
+          assert.ok(
+            error.stderr.includes(
+              change === "commit" ? "pending branch tip differs" : "pending workspace is not clean",
+            ),
+          )
+          assert.ok(error.stderr.includes("git -C"))
+          assert.ok(error.stderr.includes("--untracked-files=all --ignored"))
+          assert.ok(error.stderr.includes("worktree remove"))
+          assert.ok(error.stderr.includes("branch -d"))
+        }
+        assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+        assert.strictEqual(yield* git(worktree.path, ["diff", "--cached"]), index)
+        assert.strictEqual(yield* fixture.fs.readFileString(privateFile), "preserve user work\n")
+        assert.strictEqual(yield* fixture.fs.exists(file), false)
+      })
+    ))
+}
+
+it.live("pending intent refuses a hand-made clean branch and worktree at the same base", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const { worktree, file } = yield* stopCreation(fixture, "before-git")
+      yield* fixture.fs.makeDirectory(fixture.path.dirname(worktree.path), { recursive: true })
+      yield* git(fixture.repoRoot, ["worktree", "add", "-b", worktree.branch, worktree.path, fixture.baseSha])
+      const before = yield* git(fixture.repoRoot, ["show-ref"])
+      const service = yield* Worktrees
+      for (
+        const operation of [
+          Effect.scoped(service.acquire(task(), fixture.baseSha)).pipe(Effect.asVoid),
+          service.reconcile(state(fixture, worktree, { _tag: "pending" })).pipe(Effect.asVoid),
+        ]
+      ) {
+        const error = yield* Effect.flip(operation)
+        assert.ok(error.stderr.includes("pending branch creation is unproved"))
+      }
+      assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+      assert.strictEqual(yield* fixture.fs.exists(worktree.path), true)
+      assert.strictEqual(yield* fixture.fs.exists(file), false)
+    })
+  ))
+
+it.live("a failed pending receipt write creates no branch or workspace", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const service = yield* Worktrees
+      const worktree = service.locate(task().id)
+      const file = receiptFile(fixture, worktree)
+      const fs: FileSystem.FileSystem = {
+        ...fixture.fs,
+        writeFileString: (target, content, options) =>
+          target === `${file}.pending`
+            ? fixture.fs.writeFileString(fixture.path.join(fixture.home, "missing", "receipt"), content, options)
+            : fixture.fs.writeFileString(target, content, options),
+      }
+      const result = yield* Effect.exit(
+        Effect.scoped(Effect.gen(function*() {
+          return yield* (yield* Worktrees).acquire(task(), fixture.baseSha)
+        })).pipe(
+          Effect.provide(Worktrees.layer(fixture).pipe(Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)))),
+        ),
+      )
+      assert.strictEqual(Exit.isFailure(result), true)
+      assert.strictEqual(yield* fixture.fs.exists(worktree.path), false)
+      assert.strictEqual(yield* git(fixture.repoRoot, ["branch", "--list", worktree.branch]), "")
+      assert.strictEqual(yield* fixture.fs.exists(file), false)
+    })
+  ))
+
+for (const malformed of ["oversized", "symlink", "different-base", "invalid-json"] as const) {
+  it.live(`pending creation refuses ${malformed} without mutation`, () =>
+    withRepo((fixture) =>
+      Effect.gen(function*() {
+        const { worktree, file } = yield* stopCreation(fixture, "before-promote")
+        const pending = `${file}.pending`
+        if (malformed === "oversized") yield* fixture.fs.writeFileString(pending, "x".repeat(65537))
+        else if (malformed === "symlink") {
+          yield* fixture.fs.rename(pending, `${pending}.saved`)
+          yield* fixture.fs.symlink(`${pending}.saved`, pending)
+        } else if (malformed === "different-base") {
+          const content = yield* fixture.fs.readFileString(pending)
+          yield* fixture.fs.writeFileString(pending, content.replace(fixture.baseSha, "0".repeat(40)))
+        } else yield* fixture.fs.writeFileString(pending, "{")
+        const before = yield* git(fixture.repoRoot, ["show-ref"])
+        const result = yield* Effect.exit((yield* Worktrees).reconcile(state(fixture, worktree, { _tag: "pending" })))
+        assert.strictEqual(Exit.isFailure(result), true)
+        assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+        assert.strictEqual(yield* fixture.fs.exists(worktree.path), true)
+        assert.strictEqual(yield* fixture.fs.exists(file), false)
+      })
+    ))
+}
+
+it.live("pending creation recreates a missing directory only with the branch creation witness", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const { worktree, file } = yield* stopCreation(fixture, "before-promote")
+      yield* git(fixture.repoRoot, ["worktree", "remove", worktree.path])
+      const service = yield* Worktrees
+      assert.deepStrictEqual(yield* service.reconcile(state(fixture, worktree, { _tag: "interrupted", attempt: 1 })), [
+        { _tag: "Resumable", taskId: task().id },
+      ])
+      assert.strictEqual(yield* git(worktree.path, ["rev-parse", "HEAD"]), fixture.baseSha)
+      assert.strictEqual(yield* fixture.fs.exists(file), true)
+    })
+  ))
+
+it.live("pending creation rejects extra branch history even when the tip returns to the base", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const { worktree, file } = yield* stopCreation(fixture, "before-promote")
+      yield* git(worktree.path, [
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@localhost",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "User commit",
+      ])
+      yield* git(fixture.repoRoot, ["update-ref", `refs/heads/${worktree.branch}`, fixture.baseSha])
+      const before = yield* git(fixture.repoRoot, ["show-ref"])
+      const error = yield* Effect.flip((yield* Worktrees).reconcile(state(fixture, worktree, { _tag: "pending" })))
+      assert.ok(error.stderr.includes("pending branch creation is unproved"))
+      assert.strictEqual(yield* git(fixture.repoRoot, ["show-ref"]), before)
+      assert.strictEqual(yield* fixture.fs.exists(file), false)
+      assert.strictEqual(yield* fixture.fs.exists(worktree.path), true)
+    })
+  ))
+
+it.live("pending receipt reserves the name before Git starts", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      const { worktree } = yield* stopCreation(fixture, "before-git")
+      const error = yield* Effect.flip((yield* Worktrees).assertAvailable(task().id))
+      assert.strictEqual(error.stderr, `Worktree collision: ${worktree.branch}; choose a different run ID`)
     })
   ))

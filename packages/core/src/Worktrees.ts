@@ -185,21 +185,39 @@ process.stdin.once('data',()=>{
 
   const receipt = (worktree: Worktree) =>
     path.join(ownership, `${createHash("sha256").update(worktree.branch.toLowerCase()).digest("hex")}.json`)
-  const owner = (worktree: Worktree) =>
-    JSON.stringify({
-      version: 1,
-      runId: options.runId,
-      repoRoot: options.repoRoot,
-      taskId: worktree.taskId,
-      path: worktree.path,
-      branch: worktree.branch,
-    })
+  const identity = (worktree: Worktree) => ({
+    version: 1,
+    runId: options.runId,
+    repoRoot: options.repoRoot,
+    taskId: worktree.taskId,
+    path: worktree.path,
+    branch: worktree.branch,
+  })
+  const owner = (worktree: Worktree) => JSON.stringify(identity(worktree))
+  const pendingOwner = (worktree: Worktree, baseSha: string) => JSON.stringify({ ...identity(worktree), baseSha })
+  const creationMessage = (worktree: Worktree, baseSha: string) =>
+    `agentrun: create ${createHash("sha256").update(pendingOwner(worktree, baseSha)).digest("hex")}`
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
   const refusal = (worktree: Worktree, reason: string) =>
     new GitError({
       command: "worktree ownership",
       exitCode: -1,
-      stderr:
-        `Worktree ownership is unproved for ${worktree.branch}: ${reason}. Preserve the files and inspect the run and repository.`,
+      stderr: `Worktree ownership is unproved for ${worktree.branch}: ${reason}.\n`
+        + `Stop execution for this repository and its linked checkouts. Back up the run, Git data and workspace, including ignored files.\n`
+        + `Inspect with:\n`
+        + `git -C ${quote(options.repoRoot)} rev-parse --path-format=absolute --git-common-dir\n`
+        + `git -C ${quote(options.repoRoot)} worktree list --porcelain\n`
+        + `git -C ${quote(options.repoRoot)} show-ref --verify ${quote(`refs/heads/${worktree.branch}`)}\n`
+        + `git -C ${quote(options.repoRoot)} reflog show ${quote(`refs/heads/${worktree.branch}`)}\n`
+        + `git -C ${quote(worktree.path)} rev-parse --path-format=absolute --git-common-dir --symbolic-full-name HEAD\n`
+        + `git -C ${quote(worktree.path)} status --porcelain=v1 --untracked-files=all --ignored\n`
+        + `Compare the saved run with ${quote(receipt(worktree))} and ${
+          quote(`${receipt(worktree)}.pending`)
+        }. Check file type and size before reading records.\n`
+        + `Only after backups and proof of creation, remove confirmed disposable resources with:\n`
+        + `git -C ${quote(options.repoRoot)} worktree remove ${quote(worktree.path)}\n`
+        + `git -C ${quote(options.repoRoot)} branch -d ${quote(worktree.branch)}\n`
+        + `If proof is missing or ordinary cleanup refuses, preserve the resources and use a different run ID. Do not force cleanup or rewrite receipts.`,
     })
   const matchingBranches = (worktree: Worktree) =>
     git(["for-each-ref", "--format=%(refname)", "refs/heads"], repo).pipe(
@@ -215,6 +233,7 @@ process.stdin.once('data',()=>{
     if (
       (yield* fs.exists(worktree.path).pipe(Effect.mapError(processError)))
       || (yield* OwnershipRecords.exists(receipt(worktree)).pipe(Effect.mapError(processError)))
+      || (yield* OwnershipRecords.exists(`${receipt(worktree)}.pending`).pipe(Effect.mapError(processError)))
       || (yield* matchingBranches(worktree)).length > 0
     ) {
       return yield* new GitError({
@@ -224,7 +243,7 @@ process.stdin.once('data',()=>{
       })
     }
   })
-  const inspect = Effect.fn("Worktrees.inspect")(function*(worktree: Worktree) {
+  const inspect = Effect.fn("Worktrees.inspect")(function*(worktree: Worktree, baseSha?: string) {
     const expected = locate(worktree.taskId)
     if (worktree.path !== expected.path || worktree.branch !== expected.branch) {
       return yield* refusal(worktree, "resource identity differs")
@@ -238,9 +257,21 @@ process.stdin.once('data',()=>{
     const owned = yield* OwnershipRecords.exists(file).pipe(
       Effect.mapError(() => refusal(worktree, "creation receipt cannot be read")),
     )
+    const pending = !owned && (yield* OwnershipRecords.exists(`${file}.pending`).pipe(
+      Effect.mapError(() => refusal(worktree, "pending receipt cannot be read")),
+    ))
     if (owned) {
       yield* OwnershipRecords.read(file, OwnershipRecords.BranchReceipt, owner(worktree)).pipe(
         Effect.mapError(() => refusal(worktree, "creation receipt belongs to another run or is invalid")),
+      )
+    } else if (pending) {
+      if (baseSha === undefined) return yield* refusal(worktree, "pending creation requires resume validation")
+      yield* OwnershipRecords.read(
+        `${file}.pending`,
+        OwnershipRecords.PendingBranchReceipt,
+        pendingOwner(worktree, baseSha),
+      ).pipe(
+        Effect.mapError(() => refusal(worktree, "pending receipt belongs to another run or base, or is invalid")),
       )
     } else if (dir || branches.length > 0) {
       return yield* refusal(worktree, "creation receipt is missing")
@@ -262,7 +293,38 @@ process.stdin.once('data',()=>{
           !== commonDir
       ) return yield* refusal(worktree, "workspace Git identity differs")
     }
-    return { dir, branch: branches.length === 1, owned }
+    if (pending && branches.length === 1 && baseSha !== undefined) {
+      const ref = `refs/heads/${worktree.branch}`
+      if ((yield* git(["rev-parse", "--verify", ref], repo)) !== baseSha) {
+        return yield* refusal(worktree, "pending branch tip differs from the recorded base")
+      }
+      const history = yield* git(["reflog", "show", "--format=%H %gs", ref], repo).pipe(
+        Effect.mapError(() => refusal(worktree, "pending branch creation is unproved")),
+      )
+      if (history !== `${baseSha} ${creationMessage(worktree, baseSha)}`) {
+        return yield* refusal(worktree, "pending branch creation is unproved")
+      }
+      if (
+        dir
+        && (yield* git(["status", "--porcelain=v1", "--untracked-files=all", "--ignored"], { cwd: worktree.path }))
+          !== ""
+      ) {
+        return yield* refusal(worktree, "pending workspace is not clean")
+      }
+    }
+    return { dir, branch: branches.length === 1, owned, pending }
+  })
+  const promote = Effect.fn("Worktrees.promote")(function*(worktree: Worktree) {
+    yield* Effect.scoped(Effect.gen(function*() {
+      const temporary = yield* fs.makeTempFileScoped({ directory: ownership, prefix: ".receipt-" })
+      yield* fs.chmod(temporary, 0o600)
+      yield* fs.writeFileString(temporary, owner(worktree))
+      // An exclusive link exposes only complete proof and cannot replace another receipt.
+      yield* fs.link(temporary, receipt(worktree))
+    })).pipe(Effect.mapError(() => refusal(worktree, "creation receipt could not be saved")))
+    yield* fs.remove(`${receipt(worktree)}.pending`).pipe(
+      Effect.mapError(() => refusal(worktree, "pending receipt could not be retired")),
+    )
   })
   const assertOwned = Effect.fn("Worktrees.assertOwned")(function*(worktree: Worktree) {
     if (!(yield* inspect(worktree)).owned) return yield* refusal(worktree, "creation receipt is missing")
@@ -286,21 +348,47 @@ process.stdin.once('data',()=>{
           yield* OwnershipRecords.validateGenerated(owner(worktree)).pipe(
             Effect.mapError(() => refusal(worktree, "creation receipt could not be saved")),
           )
-          const existing = yield* inspect(worktree)
+          const existing = yield* inspect(worktree, baseSha)
           yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.orDie)
-          if (existing.dir) return worktree
+          if (existing.dir) {
+            if (existing.pending) yield* promote(worktree)
+            return worktree
+          }
           yield* onCreate?.() ?? Effect.void
-          yield* git(
-            existing.branch
-              ? ["worktree", "add", worktree.path, worktree.branch]
-              : ["worktree", "add", "-b", worktree.branch, worktree.path, baseSha],
-            repo,
-          ).pipe(semaphore.withPermits(1))
-          if (!existing.owned) {
-            yield* fs.makeDirectory(ownership, { recursive: true, mode: 0o700 }).pipe(Effect.mapError(processError))
-            yield* fs.writeFileString(receipt(worktree), owner(worktree), { flag: "wx", mode: 0o600 }).pipe(
-              Effect.mapError(() => refusal(worktree, "creation receipt could not be saved")),
-            )
+          if (existing.owned) {
+            yield* git(
+              existing.branch
+                ? ["worktree", "add", worktree.path, worktree.branch]
+                : ["worktree", "add", "-b", worktree.branch, worktree.path, baseSha],
+              repo,
+            ).pipe(semaphore.withPermits(1))
+          } else {
+            const base = yield* git(["rev-parse", "--verify", `${baseSha}^{commit}`], repo)
+            if (!existing.pending) {
+              const content = pendingOwner(worktree, base)
+              yield* OwnershipRecords.validateGenerated(content).pipe(
+                Effect.mapError(() => refusal(worktree, "pending receipt could not be saved")),
+              )
+              yield* fs.makeDirectory(ownership, { recursive: true, mode: 0o700 }).pipe(Effect.mapError(processError))
+              yield* fs.writeFileString(`${receipt(worktree)}.pending`, content, { flag: "wx", mode: 0o600 }).pipe(
+                Effect.mapError(() => refusal(worktree, "pending receipt could not be saved")),
+              )
+            }
+            if (!existing.branch) {
+              // Git writes this witness with the ref; an intent alone never proves branch creation.
+              yield* git([
+                "update-ref",
+                "--create-reflog",
+                "-m",
+                creationMessage(worktree, base),
+                `refs/heads/${worktree.branch}`,
+                base,
+                "",
+              ], repo).pipe(semaphore.withPermits(1))
+            }
+            yield* git(["worktree", "add", worktree.path, worktree.branch], repo).pipe(semaphore.withPermits(1))
+            yield* inspect(worktree, base)
+            yield* promote(worktree)
           }
           return worktree
         }),
@@ -362,9 +450,20 @@ process.stdin.once('data',()=>{
   })
 
   const reconcile = Effect.fn("Worktrees.reconcile")(function*(state: RunState) {
+    const pending: Array<Worktree> = []
     for (const task of state.tasks) {
       const recorded = state.worktrees[task.id]
-      yield* inspect(recorded === undefined ? locate(task.id) : { taskId: task.id, ...recorded })
+      const worktree = recorded === undefined ? locate(task.id) : { taskId: task.id, ...recorded }
+      const existing = yield* inspect(worktree, state.baseSha)
+      if (existing.pending && existing.branch) pending.push(worktree)
+    }
+    for (const worktree of pending) {
+      if (!(yield* fs.exists(worktree.path).pipe(Effect.mapError(processError)))) {
+        yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.mapError(processError))
+        yield* git(["worktree", "add", worktree.path, worktree.branch], repo).pipe(semaphore.withPermits(1))
+      }
+      yield* inspect(worktree, state.baseSha)
+      yield* promote(worktree)
     }
     yield* git(["worktree", "prune"], repo).pipe(semaphore.withPermits(1))
     const actions: Array<Reconciled> = []

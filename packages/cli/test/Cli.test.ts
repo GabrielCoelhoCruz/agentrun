@@ -324,7 +324,7 @@ test("doctor exposes SDK versions and honest auth outcomes without prompt", asyn
   expect(existsSync(join(f.repo, ".agentrun"))).toBe(false)
 }, 30000)
 
-test("intent crash and missing worktree become failed until explicit retry", async () => {
+test("intent crash after proved branch creation resumes without manual cleanup", async () => {
   const f = fixture(1)
   mkdirSync(join(f.root, "bin"))
   writeFileSync(
@@ -348,14 +348,13 @@ exec /usr/bin/git "$@"
   await c.done
   process.kill(gitPid, "SIGKILL")
   await wait(() => !alive(gitPid))
-  expect(await child(f, ["resume", "--json"]).done).toBe(1)
-  expect(state(f).status.task0?._tag).toBe("failed")
-  expect(state(f).status.task0?.attempt).toBe(1)
   expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
-  expect(await child(f, ["resume", "--retry-failed", "--json"]).done).toBe(0)
+  expect(await child(f, ["resume", "--json"]).done).toBe(0)
   expect(state(f).status.task0?._tag).toBe("succeeded")
+  expect(JSON.parse(readFileSync(statePath(f), "utf8")).taskReports.task0.attempt).toBe(2)
+  expect(starts(f)).toBe(1)
   expect(state(f).worktrees.task0?.branch).toBe(before.worktrees.task0?.branch)
-}, 30000)
+}, 60000)
 
 test("setup background child stays in the recorded worker group and is stopped", async () => {
   const f = fixture(1, "hold")
@@ -760,7 +759,7 @@ for (const window of ["commit", "artifacts"]) {
         `#!${process.execPath}\n`
           + `const {spawnSync}=require('node:child_process'); const fs=require('node:fs');\n`
           + `const r=spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:'inherit'});\n`
-          + `if(process.argv.includes('update-ref') && !fs.existsSync(${
+          + `if(process.argv.includes('update-ref') && !process.argv.includes('--create-reflog') && !fs.existsSync(${
             JSON.stringify(join(f.root, "crashed"))
           })){fs.writeFileSync(${
             JSON.stringify(join(f.root, "crashed"))
@@ -1004,7 +1003,9 @@ test("resume publishes the recorded commit after a crash before branch update", 
     join(f.root, "bin/git"),
     `#!${process.execPath}
 const {spawnSync}=require('node:child_process'); const fs=require('node:fs');
-if(process.argv.includes('update-ref') && !fs.existsSync(${JSON.stringify(join(f.root, "prepared-crash"))})) {
+if(process.argv.includes('update-ref') && !process.argv.includes('--create-reflog') && !fs.existsSync(${
+      JSON.stringify(join(f.root, "prepared-crash"))
+    })) {
  fs.writeFileSync(${
       JSON.stringify(join(f.root, "prepared-crash"))
     },'before publish'); process.kill(Number(spawnSync('ps',['-p',String(process.ppid),'-o','ppid='],{encoding:'utf8'}).stdout.trim()),'SIGKILL'); process.exit(1);
@@ -1403,7 +1404,9 @@ const hangingGit = (f: Fixture, operation: "acquire" | "delivery") => {
     join(f.root, "bin/git"),
     `#!/bin/sh
 if [ ! -e ${quote(join(f.root, "git-hang"))} ] && ${
-      operation === "acquire" ? "[ \"$1\" = worktree ] && [ \"$2\" = add ]" : "[ \"$1\" = update-ref ]"
+      operation === "acquire"
+        ? "[ \"$1\" = worktree ] && [ \"$2\" = add ]"
+        : "[ \"$1\" = update-ref ] && [ \"$2\" != --create-reflog ]"
     }; then
  exec ${quote(process.execPath)} ${quote(handler)} "$@"
 fi
@@ -1417,7 +1420,9 @@ exec ${quote(realGit)} "$@"
 const {spawn,spawnSync}=require('node:child_process'); const fs=require('node:fs');
 const args=process.argv.slice(2); const marker=${JSON.stringify(join(f.root, "git-hang"))};
 if(!fs.existsSync(marker) && (${
-      operation === "acquire" ? "args[0]==='worktree' && args[1]==='add'" : "args[0]==='update-ref'"
+      operation === "acquire"
+        ? "args[0]==='worktree' && args[1]==='add'"
+        : "args[0]==='update-ref' && !args.includes('--create-reflog')"
     })) {
  ${
       operation === "acquire"
@@ -1470,9 +1475,15 @@ for (const dirty of [false, true]) {
       expect(existsSync(join(f.repo, ".agentrun/runs", state(f).runId, "report.json"))).toBe(true)
       const refused = child(f, ["resume", "--json"])
       expect(await refused.done).toBe(1)
-      expect(refused.stderr()).toMatch(/[Oo]wnership/)
-      expect(existsSync(partial)).toBe(true)
-      if (dirty) expect(readFileSync(join(partial, "partial-user-work"), "utf8")).toBe("preserve this\n")
+      if (dirty) {
+        expect(refused.stderr()).toMatch(/[Oo]wnership/)
+        expect(existsSync(partial)).toBe(true)
+        expect(readFileSync(join(partial, "partial-user-work"), "utf8")).toBe("preserve this\n")
+      } else {
+        expect(refused.stderr()).not.toMatch(/[Oo]wnership/)
+        expect(existsSync(partial)).toBe(false)
+        expect(state(f).status.task0?.reason).toBe("AgentTimedOut: Exceeded 5000ms")
+      }
       expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
     } finally {
       if (alive(c.p.pid!)) c.p.kill("SIGKILL")
@@ -1482,7 +1493,7 @@ for (const dirty of [false, true]) {
         for (const pid of [owned.pid, owned.child]) if (alive(pid)) process.kill(pid, "SIGKILL")
       }
     }
-  }, 30000)
+  }, 60000)
 }
 
 for (const crash of [false, true]) {
