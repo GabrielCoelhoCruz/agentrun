@@ -94,6 +94,19 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
         expect(readFileSync(join(root, "running.ansi"), "utf8")).toContain(
           "task0 [running] Task 0 界 👩‍💻 long title for narrow terminals",
         )
+        expect(existsSync(join(root, "resize-wait-error.txt")), "Resize did not redraw while workers were paused")
+          .toBe(false)
+        const resize = saved.frames.find((frame: { name: string; bytes: number }) => frame.name === "resize")
+        expect(resize).toBeDefined()
+        const afterResize = readFileSync(join(root, "capture.ansi")).subarray(resize.bytes).toString().replaceAll(
+          "\r",
+          "",
+        )
+        const liveOutput = afterResize.split("agentrun: finished")[0]?.split("\x1b[?1049l")[0]
+        expect(liveOutput).toContain(
+          "\x1b[H\x1b[2Jagentrun: running | 0/3 succeed\n"
+            + "task0 [running] Task 0 界 👩‍💻 \n",
+        )
         const finalLines = output.split("\x1b[?1049l")[1]?.replaceAll("\r", "").split("\n")
         expect(finalLines?.slice(0, 2)).toEqual([
           "agentrun: finished | 3/3 succee",
