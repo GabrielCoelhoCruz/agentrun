@@ -76,6 +76,8 @@ Starting an existing ID fails without overwriting its state. Use its exact ID to
 Existing branch or worktree collisions also fail. Different IDs can share the same four-character branch suffix.
 Collision checks ignore letter case on macOS and Linux. Linked checkouts share run reservations and branch ownership records in Git's common directory.
 Resume requires a matching reservation and proof that the run created its resources. A saved branch name is only a plan.
+Ownership records must be regular files no larger than 64 KiB, with valid UTF-8 and the exact version 1 identity.
+The CLI refuses special files, symbolic links, malformed records, and observed changes during reading. It preserves resources for inspection.
 
 An empty reservation, missing creation proof, or legacy run without ownership records requires inspection. Automatic resume refuses these cases and preserves the files.
 This includes Git failures after resource creation, before the CLI saves its creation receipt. Existing reports remain readable.

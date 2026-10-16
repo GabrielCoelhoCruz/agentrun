@@ -22,6 +22,8 @@ export { diagnostics } from "./Diagnostics.js"
 export { stopProcessGroup } from "./ProcessGroup.js"
 export { subprocessFailure } from "./SubprocessFailure.js"
 
+export * as OwnershipRecords from "./OwnershipRecords.js"
+
 export { RunReport } from "./domain/RunReport.js"
 export { TaskReport } from "./domain/TaskReport.js"
 export { markdown, Report } from "./Report.js"
