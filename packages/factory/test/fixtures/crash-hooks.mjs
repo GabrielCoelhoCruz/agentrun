@@ -4,6 +4,22 @@ import { DatabaseSync } from "node:sqlite"
 
 process.env.FACTORY_FIXTURE_COORDINATOR ??= String(process.pid)
 
+if (process.argv[1]?.endsWith("/supervisor.mjs") && process.env.FACTORY_FIXTURE_EXIT_GATE) {
+  const exit = process.exit.bind(process)
+  process.exit = (code) => {
+    if (code === 0) {
+      const gate = process.env.FACTORY_FIXTURE_EXIT_GATE
+      process.title = "factory-exiting"
+      writeFileSync(`${gate}.ready`, String(process.pid))
+      const deadline = Date.now() + 30000
+      while (!existsSync(`${gate}.release`) && Date.now() < deadline) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+      }
+    }
+    exit(code)
+  }
+}
+
 const prepare = DatabaseSync.prototype.prepare
 DatabaseSync.prototype.prepare = function(sql) {
   const statement = prepare.call(this, sql)

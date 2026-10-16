@@ -45,6 +45,7 @@ test.each([
   "supervisor-crash-invalid-owner",
   "supervisor-crash-foreign-owner",
   "supervisor-crash-live-cancel",
+  "crash-DispatchReleased-exiting-supervisor",
 ])("production CLI protects tracked state and cleans up a dead supervisor (%s)", async (scenario) => {
   const parent = await mkdtemp(join(tmpdir(), "factory-owner-e2e-"))
   const result = await promisify(execFile)(process.execPath, [

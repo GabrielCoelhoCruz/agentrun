@@ -52,16 +52,15 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
     }
     const rows = yield* processTable(true)
     const members = rows.filter((row) => row.group === pgid)
-    if (members.length === 0) {
-      if (!(yield* isAlive(-pgid))) return
-      return yield* error("Live process group absent from process table; recovery refused")
-    }
-    if (members.every((row) => !running(row.state))) return
+    if (members.length > 0 && members.every((row) => !running(row.state))) return
     const leader = rows.find((row) => row.pid === pgid && row.group === pgid)
-    if (leader === undefined || !leader.command.trim().split(/\s+/).includes(`agentrun-${kind}-${token}`)) {
-      return yield* error("Process group ownership changed; recovery refused")
-    }
-    const owned = new Set([pgid])
+    const unverified = members.length === 0
+      ? "Live process group absent from process table; recovery refused"
+      : leader === undefined || !leader.command.trim().split(/\s+/).includes(`agentrun-${kind}-${token}`)
+      ? "Process group ownership changed; recovery refused"
+      : undefined
+    // Exit can erase the initial command evidence. Wait for exit without signalling an unproved group.
+    const owned = new Set<number>(unverified === undefined ? [pgid] : [])
     let previousSize = 0
     while (previousSize !== owned.size) {
       previousSize = owned.size
@@ -75,7 +74,7 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
       groups.add(row.group)
     }
-    const waitOnly = new Set<number>()
+    const waitOnly = new Set<number>(unverified === undefined ? [] : [pgid])
     let firstSignal = true
     for (const signal of ["SIGTERM", "SIGKILL"] as const) {
       for (const group of groups) {
@@ -120,9 +119,9 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
     }
     return yield* error(
-      waitOnly.size > 0
+      unverified ?? (waitOnly.size > 0
         ? "Signal ownership or permission changed and process group exit was not verified; recovery refused"
-        : "Owned process group did not exit after SIGKILL; recovery refused",
+        : "Owned process group did not exit after SIGKILL; recovery refused"),
     )
   },
 )

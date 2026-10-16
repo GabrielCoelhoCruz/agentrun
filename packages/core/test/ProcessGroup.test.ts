@@ -378,6 +378,63 @@ const dispose = async (child: ReturnType<typeof spawn>, done: Promise<unknown>) 
   await done
 }
 
+test.each(["missing command", "missing leader", "missing group"])(
+  "cleanup waits without signalling when initial evidence has a %s during exit",
+  async (evidence) => {
+    const { child, done } = await stubborn()
+    const directory = mkdtempSync(join(tmpdir(), "agentrun-initial-exit-"))
+    const original = process.env.PATH
+    const observed = join(directory, "observed")
+    const realKill = process.kill.bind(process)
+    const signals: Array<string> = []
+    const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === -child.pid! && signal !== 0) signals.push(String(signal))
+      return realKill(pid, signal)
+    })
+    const rows = evidence === "missing command"
+      ? `${child.pid} ${process.pid} ${child.pid} S (node)`
+      : evidence === "missing leader"
+      ? `999999 ${child.pid} ${child.pid} S (node)`
+      : "999999 0 0 S (node)"
+    let released = false
+    const timer = setInterval(() => {
+      if (!released && existsSync(observed)) {
+        released = true
+        child.send("exit")
+      }
+    }, 20)
+    try {
+      writeFileSync(
+        join(directory, "ps"),
+        `#!/bin/sh
+case "$*" in
+  *command=*)
+    touch '${observed}'
+    echo '${rows}'
+    exit 0;;
+esac
+exec /bin/ps "$@"
+`,
+        { mode: 0o755 },
+      )
+      process.env.PATH = `${directory}:${original}`
+      const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
+      expect(result._tag, inspect(result, { depth: 8 })).toBe("Success")
+      expect(released).toBe(true)
+      expect(signals).toEqual([])
+      await done
+      expect(() => realKill(child.pid!, 0)).toThrow()
+    } finally {
+      clearInterval(timer)
+      spy.mockRestore()
+      process.env.PATH = original
+      await dispose(child, done)
+      rmSync(directory, { recursive: true })
+    }
+  },
+  15000,
+)
+
 test("two concurrent cleaners settle the same real SIGTERM-ignoring group", async () => {
   for (let iteration = 0; iteration < 10; iteration++) {
     const { child, done } = await stubborn()

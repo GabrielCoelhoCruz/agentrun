@@ -711,6 +711,45 @@ try {
       }
     })
   }
+  await scenario("crash-DispatchReleased-exiting-supervisor", async () => {
+    const c = setup("crash-DispatchReleased-exiting-supervisor")
+    const gate = join(c.directory, "exit-gate")
+    const running = c.startAsync({
+      FACTORY_FIXTURE_CRASH: "DispatchReleased",
+      FACTORY_FIXTURE_EXIT_GATE: gate,
+    })
+    try {
+      const crashed = await running.completed
+      assert.equal(crashed.signal, "SIGKILL", crashed.stderr)
+      const pid = await waitFor(
+        () => existsSync(`${gate}.ready`) && Number(readFileSync(`${gate}.ready`, "utf8")),
+        "supervisor exit before launch",
+      )
+      const bin = join(c.directory, "bin")
+      mkdirSync(bin)
+      writeFileSync(
+        join(bin, "ps"),
+        `#!${process.execPath}
+import { execFileSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
+const table = execFileSync('/bin/ps', process.argv.slice(2), { encoding: 'utf8' })
+if (table.split('\\n').some(line => line.trim().split(/\\s+/)[0] === '${pid}' && line.includes('factory-exiting'))) {
+  writeFileSync(${JSON.stringify(join(c.directory, "exit-process-table.txt"))}, table)
+  writeFileSync(${JSON.stringify(`${gate}.release`)}, 'exit')
+}
+process.stdout.write(table)
+`,
+        { mode: 0o755 },
+      )
+      const resumed = c.command(["resume", c.id], 0, { PATH: `${bin}:${c.env.PATH}` })
+      assertHuman(resumed)
+      assertExited(pid)
+      assert.ok(existsSync(join(c.directory, "exit-process-table.txt")))
+      assert.equal(c.records().filter((r) => r.kind === "provider").length, 2)
+    } finally {
+      writeFileSync(`${gate}.release`, "exit")
+    }
+  })
   for (const ownership of ["foreign", "missing", "empty"]) {
     await scenario(`${ownership}-export-owner`, async () => {
       const c = setup(`${ownership}-export-owner`)
