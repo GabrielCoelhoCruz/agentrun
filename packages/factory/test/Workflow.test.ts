@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -32,6 +32,29 @@ test.each([
   },
   scenarioBudgetMs + 5000,
 )
+
+test.each([
+  "state-checkout-modified",
+  "state-checkout-staged",
+  "state-checkout-deleted",
+  "state-checkout-renamed",
+  "state-checkout-untracked",
+  "state-checkout-ignored",
+  "supervisor-crash-cancel",
+  "supervisor-crash-resume",
+  "supervisor-crash-invalid-owner",
+  "supervisor-crash-foreign-owner",
+  "supervisor-crash-live-cancel",
+])("production CLI protects tracked state and cleans up a dead supervisor (%s)", async (scenario) => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-owner-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    scenario,
+  ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+}, scenarioBudgetMs + 5000)
 
 test.each(["exit", "timeout"])(
   "production CLI retains process-table diagnostics during correction (%s)",
@@ -73,6 +96,28 @@ test.each(["owner", "source"])(
   },
   scenarioBudgetMs + 5000,
 )
+
+test("production CLI starts a second workflow beside the executor state", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-second-start-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    "second-start",
+  ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+}, scenarioBudgetMs + 5000)
+
+test("production CLI records a timeout for a check that stops slowly", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-check-timeout-stubborn-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    "check-timeout-stubborn",
+  ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+}, scenarioBudgetMs + 5000)
 
 test("factory driver lists the complete installed matrix without running journeys", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-journey-list-"))
@@ -119,6 +164,37 @@ test("production CLI rejects invalid profiles and proves persistence after corre
   ], { timeout: 3 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 3, paidProviderCalls: 0 })
 }, 3 * scenarioBudgetMs + 5000)
+
+test("production CLI delivers the Python example with the same engine", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-python-e2e-"))
+  const root = join(parent, "proof")
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    root,
+    "happy,correct",
+    "notes-py",
+  ], { timeout: 2 * scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    result: "passed",
+    example: "notes-py",
+    scenarios: 2,
+    paidProviderCalls: 0,
+  })
+  const delivered = await readFile(join(root, "happy/delivered/server.py"), "utf8")
+  expect(delivered).toContain("import sqlite3")
+  const journey = JSON.parse(await readFile(join(root, "happy/exported-journey/journey.json"), "utf8"))
+  expect(journey.map((entry: { event: string }) => entry.event)).toEqual([
+    "runtime",
+    "ready",
+    "created",
+    "stopped",
+    "ready",
+    "read-after-restart",
+    "stopped",
+    "migration-verified",
+  ])
+}, 2 * scenarioBudgetMs + 5000)
 
 test("production CLI keeps rejection terminal and stops workers before correction", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-decisions-e2e-"))

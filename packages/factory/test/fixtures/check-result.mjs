@@ -15,6 +15,19 @@ if (mode === "cancel-check" || mode === "timeout") {
   )
   await new Promise(() => {})
 }
+if (mode === "timeout-stubborn") {
+  // The check needs longer than two seconds to stop, and its child ignores SIGTERM.
+  process.on("SIGTERM", () => setTimeout(() => process.exit(0), 3000))
+  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], {
+    stdio: "ignore",
+  })
+  writeFileSync(
+    join(process.env.FACTORY_ARTIFACT_DIR, "active.json"),
+    JSON.stringify({ pid: process.pid, child: child.pid }),
+  )
+  setInterval(() => {}, 1000)
+  await new Promise(() => {})
+}
 if (mode === "missing-result") process.exit(0)
 const artifact = join(process.env.FACTORY_ARTIFACT_DIR, "observation.txt")
 writeFileSync(artifact, "The configured producer executed.\n")

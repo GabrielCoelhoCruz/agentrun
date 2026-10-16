@@ -10,6 +10,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -21,8 +22,25 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 const cli = resolve(process.argv[2])
 const root = resolve(process.argv[3])
 const selected = process.argv[4] ?? "all"
+const exampleName = process.argv[5] ?? "notes-ts"
 const fixture = fileURLToPath(new URL("../test/fixtures/", import.meta.url))
-const example = fileURLToPath(new URL("../../../examples/factory/notes-ts/", import.meta.url))
+// Each example app differs only in its source file and check command; the engine is the same.
+const app = {
+  "notes-ts": {
+    source: "server.ts",
+    durable: "server-durable.ts",
+    check: ["node", "checks/restart.mjs"],
+    command: (file) => [process.execPath, file],
+  },
+  "notes-py": {
+    source: "server.py",
+    durable: "server-durable.py",
+    check: ["python3", "-I", "-B", "checks/restart.py"],
+    command: (file) => ["python3", "-I", "-B", file],
+  },
+}[exampleName]
+assert.ok(app, `Unknown example: ${exampleName}`)
+const example = fileURLToPath(new URL(`../../../examples/factory/${exampleName}/`, import.meta.url))
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex")
 mkdirSync(root, { recursive: false })
 const outcomes = []
@@ -60,7 +78,9 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
     FACTORY_FIXTURE_LOG: log,
     FACTORY_FIXTURE_MODE: mode,
     FACTORY_FIXTURE_ORIGINAL_CHECKS: join(repo, "checks"),
-    FACTORY_FIXTURE_DURABLE: join(fixture, "server-durable.ts"),
+    FACTORY_FIXTURE_DURABLE: join(fixture, app.durable),
+    FACTORY_FIXTURE_SOURCE: app.source,
+    FACTORY_FIXTURE_CHECK_FILE: app.check.at(-1),
     FACTORY_FIXTURE_CRASH_MARKER: join(directory, "crashed"),
     FACTORY_FIXTURE_CHECK_LOG: join(directory, "checks.jsonl"),
     ...(checkMode === undefined ? {} : { FACTORY_FIXTURE_CHECK: checkMode }),
@@ -143,11 +163,12 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
   profile.limits.durationMs = 300000
   if (checkMode !== undefined) {
     cpSync(join(fixture, "check-result.mjs"), join(repo, "checks/restart.mjs"))
+    profile.checks[0].argv = ["node", "checks/restart.mjs"]
+    profile.checks[0].files = ["checks/restart.mjs"]
     profile.checks[0].requiredEnv = ["FACTORY_FIXTURE_CHECK", "FACTORY_FIXTURE_CHECK_LOG"]
   }
   changeProfile(profile, repo)
   writeFileSync(join(repo, "factory.json"), JSON.stringify(profile, null, 2))
-  writeFileSync(join(repo, ".gitignore"), ".agentrun/\n")
   git("init", "-q")
   git("config", "commit.gpgsign", "false")
   git("add", ".")
@@ -321,7 +342,13 @@ const scenario = async (name, run) => {
     writeFileSync(
       join(root, "results.json"),
       JSON.stringify(
-        { cli, cliSha256: existsSync(cli) ? hash(readFileSync(cli)) : null, paidProviderCalls: 0, outcomes },
+        {
+          cli,
+          cliSha256: existsSync(cli) ? hash(readFileSync(cli)) : null,
+          example: exampleName,
+          paidProviderCalls: 0,
+          outcomes,
+        },
         null,
         2,
       ),
@@ -399,12 +426,13 @@ try {
     const extracted = spawnSync("tar", ["-xf", join(exported.export.directory, "source.tar"), "-C", unpacked])
     assert.equal(extracted.status, 0)
     assert.equal(
-      readFileSync(join(unpacked, "server.ts"), "utf8"),
-      `${c.git("show", `${state.candidate.commit}:server.ts`)}\n`,
+      readFileSync(join(unpacked, app.source), "utf8"),
+      `${c.git("show", `${state.candidate.commit}:${app.source}`)}\n`,
     )
     const artifacts = join(c.directory, "exported-journey")
     mkdirSync(artifacts)
-    const result = spawnSync(process.execPath, ["checks/restart.mjs"], {
+    const [executable, ...argv] = app.command(app.check.at(-1))
+    const result = spawnSync(executable, argv, {
       cwd: unpacked,
       env: {
         PATH: c.env.PATH,
@@ -422,7 +450,7 @@ try {
       join(c.directory, "exported-journey-command.json"),
       JSON.stringify(
         {
-          argv: [process.execPath, "checks/restart.mjs"],
+          argv: [executable, ...argv],
           cwd: unpacked,
           code: result.status,
           stdout: result.stdout,
@@ -436,7 +464,65 @@ try {
     const journey = JSON.parse(readFileSync(join(artifacts, "journey.json"), "utf8"))
     assert.ok(journey.some((entry) => entry.event === "read-after-restart"))
     assert.ok(journey.some((entry) => entry.event === "migration-verified"))
-    assert.equal(c.git("status", "--porcelain"), "")
+    assert.equal(c.git("status", "--porcelain", "--", ":(top)", ":(top,exclude).agentrun/"), "")
+  })
+  for (const change of ["modified", "staged", "deleted", "renamed", "untracked", "ignored"]) {
+    await scenario(`state-checkout-${change}`, async () => {
+      const c = setup(`state-checkout-${change}`, "happy", (_p, repo) => {
+        mkdirSync(join(repo, ".agentrun"))
+        writeFileSync(join(repo, ".agentrun/tracked.txt"), "committed\n")
+        if (change === "ignored") writeFileSync(join(repo, ".gitignore"), ".agentrun/state/\n")
+      })
+      const tracked = join(c.repo, ".agentrun/tracked.txt")
+      if (change === "modified" || change === "staged") writeFileSync(tracked, "changed\n")
+      if (change === "staged") c.git("add", ".agentrun/tracked.txt")
+      if (change === "deleted") rmSync(tracked)
+      if (change === "renamed") c.git("mv", ".agentrun/tracked.txt", ".agentrun/renamed.txt")
+      if (change === "untracked" || change === "ignored") {
+        mkdirSync(join(c.repo, ".agentrun/state"))
+        writeFileSync(join(c.repo, ".agentrun/state/run.json"), "{}\n")
+        assertHuman(c.start())
+      } else {
+        const result = c.run(process.execPath, [
+          cli,
+          "start",
+          "--profile",
+          "factory.json",
+          "--goal",
+          "test",
+          "--id",
+          c.id,
+          "--json",
+        ])
+        assert.equal(result.code, 2, result.stderr)
+        assert.match(result.stderr, /clean project checkout/)
+        assert.equal(existsSync(c.stateDirectory), false)
+      }
+    })
+  }
+  await scenario("second-start", async () => {
+    const c = setup("second-start")
+    assertHuman(c.start())
+    assert.ok(existsSync(join(c.repo, ".agentrun/runs")), "The executor must have written its state")
+    assert.equal(c.start().stage, "human")
+    const second = [
+      "start",
+      "--profile",
+      "factory.json",
+      "--goal",
+      "Store a second note and read it after restart",
+      "--id",
+      "notes-002",
+    ]
+    writeFileSync(join(c.repo, "server.ts"), `${readFileSync(join(c.repo, "server.ts"), "utf8")}// local edit\n`)
+    assert.match(c.run(process.execPath, [cli, ...second, "--json"]).stderr, /clean project checkout/)
+    c.git("checkout", "--", "server.ts")
+    mkdirSync(join(c.repo, "roles/.agentrun"))
+    writeFileSync(join(c.repo, "roles/.agentrun/state.json"), "{}\n")
+    assert.match(c.run(process.execPath, [cli, ...second, "--json"]).stderr, /clean project checkout/)
+    rmSync(join(c.repo, "roles/.agentrun"), { recursive: true })
+    assert.equal(existsSync(join(c.repo, ".git/agentrun/factory/runs/notes-002")), false)
+    assertHuman(c.command(second))
   })
   for (const origin of ["base", "candidate", "metadata", "gitlink"]) {
     await scenario(`export-tree-${origin}`, async () => {
@@ -444,7 +530,7 @@ try {
         `export-tree-${origin}`,
         origin === "candidate" ? "candidate-attributes" : "happy",
         (_p, repo) => {
-          if (origin === "base") writeFileSync(join(repo, ".gitattributes"), "server.ts export-ignore\n")
+          if (origin === "base") writeFileSync(join(repo, ".gitattributes"), `${app.source} export-ignore\n`)
           if (origin === "metadata") {
             const folder = join(repo, "nested space", "é".repeat(60))
             mkdirSync(folder, { recursive: true })
@@ -487,7 +573,7 @@ try {
     const c = setup("relative-command", "happy", (profile, repo) => {
       profile.checks[0].argv = ["checks/run"]
       profile.checks[0].files.push("checks/run")
-      writeFileSync(join(repo, "checks/run"), "#!/bin/sh\ncd \"$(dirname \"$0\")/..\"\nexec node checks/restart.mjs\n")
+      writeFileSync(join(repo, "checks/run"), `#!/bin/sh\ncd "$(dirname "$0")/.."\nexec ${app.check.join(" ")}\n`)
       chmodSync(join(repo, "checks/run"), 0o755)
     })
     assertHuman(c.start())
@@ -1268,10 +1354,73 @@ ${boundary.endsWith("exit") ? "exit 23" : "exec node -e 'setInterval(()=>{},1000
     assertHuman(c.command(["resume", c.id]))
     assert.equal(readFileSync(c.env.FACTORY_FIXTURE_CHECK_LOG, "utf8").trim().split("\n").length, 1)
   })
+  for (const recovery of ["cancel", "live-cancel", "resume", "invalid-owner", "foreign-owner"]) {
+    await scenario(`supervisor-crash-${recovery}`, async () => {
+      const c = setup(`supervisor-crash-${recovery}`, "happy", () => {}, "cancel-check")
+      const running = c.startAsync()
+      const check = await waitFor(() => activeCheck(c), "executed check and its child")
+      const registration = c.events().filter((event) => event.fact._tag === "ProcessRegistered").at(-1).fact
+      const owned = registration.process
+      const group = processRow(check.pid).group
+      note(c, "crash-processes", { supervisor: owned.pid, group, ...check })
+      let sentinel
+      let sentinelEnded
+      try {
+        if (recovery !== "live-cancel") {
+          running.child.kill("SIGKILL")
+          assert.equal((await running.completed).signal, "SIGKILL")
+        }
+        process.kill(owned.pid, "SIGKILL")
+        await waitFor(() => processRow(owned.pid) === undefined, "dead supervisor")
+        if (recovery === "live-cancel") assert.equal((await running.completed).code, 1)
+        if (recovery === "invalid-owner" || recovery === "foreign-owner") {
+          let record = {}
+          if (recovery === "foreign-owner") {
+            sentinel = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { detached: true, stdio: "ignore" })
+            sentinelEnded = new Promise((done) => sentinel.once("close", done))
+            record = {
+              version: 1,
+              attemptId: registration.attemptId,
+              token: owned.token,
+              commandHash: owned.commandHash,
+              pid: owned.pid,
+              pgid: sentinel.pid,
+            }
+          }
+          writeFileSync(join(owned.directory, "command-group.json"), JSON.stringify(record))
+          c.command(["cancel", c.id, "--expected-version", String(c.status().version)], 1)
+          assert.notEqual(c.status().stage, "cancelled")
+          assert.ok(processRow(check.pid), "Unverified check must not receive a signal")
+          if (sentinel) assert.ok(processRow(sentinel.pid), "Foreign group must not receive a signal")
+        } else {
+          if (recovery === "resume") assertBlocked(c.command(["resume", c.id], 1), /unknown|active/i)
+          else {assert.equal(
+              c.command(["cancel", c.id, "--expected-version", String(c.status().version)]).stage,
+              "cancelled",
+            )}
+          assertExited(check.pid)
+          assertExited(check.child)
+          if (recovery === "resume") c.command(["cancel", c.id, "--expected-version", String(c.status().version)])
+          assert.equal(c.status().stage, "cancelled")
+        }
+      } finally {
+        if (sentinel) {
+          sentinel.kill("SIGKILL")
+          await sentinelEnded
+        }
+        // This scenario owns this group, including the deliberately unverified test case.
+        if (processRow(check.pid) !== undefined || processRow(check.child) !== undefined) {
+          try {
+            process.kill(-group, "SIGKILL")
+          } catch {}
+        }
+      }
+    })
+  }
   await scenario("crash-check", async () => {
     const c = setup("crash-check", "happy", () => {}, "cancel-check")
     const running = c.startAsync()
-    const check = await waitFor(() => activeCheck(c), "executed check and its child")
+    const check = await waitFor(() => activeCheck(c), "executed check and its child", 120000)
     running.child.kill("SIGKILL")
     assert.equal((await running.completed).signal, "SIGKILL")
     assertBlocked(c.command(["resume", c.id], 1), /check.*active|unknown outcome/i)
@@ -1287,6 +1436,18 @@ ${boundary.endsWith("exit") ? "exit 23" : "exec node -e 'setInterval(()=>{},1000
     assertBlocked(c.start(1), /result is missing|unknown outcome/i)
     const check = activeCheck(c)
     assert.ok(check, "The timed-out check must have actually started")
+    assertExited(check.pid)
+    assertExited(check.child)
+  })
+  await scenario("check-timeout-stubborn", async () => {
+    const c = setup("check-timeout-stubborn", "happy", (p) => {
+      p.checks[0].timeoutMs = 500
+    }, "timeout-stubborn")
+    assertBlocked(c.start(1), /result is missing/i)
+    const check = activeCheck(c)
+    assert.ok(check, "The timed-out check must have actually started")
+    const receipts = c.events().filter((event) => event.fact._tag === "ProcessCompleted")
+    assert.equal(receipts.at(-1)?.fact.result.signal, "TIMEOUT", JSON.stringify(receipts))
     assertExited(check.pid)
     assertExited(check.child)
   })
@@ -1352,6 +1513,7 @@ ${boundary.endsWith("exit") ? "exit 23" : "exec node -e 'setInterval(()=>{},1000
     console.log(
       JSON.stringify({
         result: "passed",
+        example: exampleName,
         scenarios: outcomes.length,
         cli: realpathSync(cli),
         root,

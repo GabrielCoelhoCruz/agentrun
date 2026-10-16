@@ -6,8 +6,8 @@ The package is private and is not published to npm.
 
 ## Start from a committed project
 
-Use Node 24. The executor supports macOS and Linux. Deterministic providers prove the TypeScript journey on macOS. On 2026-10-15, one real Claude Code run also completed the TypeScript journey on macOS, for $0.26: implementation, the restart check, read-only review, approval and export.
-The Python portability journey and Linux real-provider runs remain separate work.
+Use Node 24. The executor supports macOS and Linux. Deterministic providers prove the TypeScript and Python journeys on macOS and Linux. On 2026-10-15, one real Claude Code run also completed the TypeScript journey on macOS, for $0.26: implementation, the restart check, read-only review, approval and export.
+Real-provider runs of the Python journey and on Linux remain separate work.
 
 Build this repository with `pnpm install --frozen-lockfile` and `pnpm build`.
 Run the factory binary from the target project's root. Commit the profile and its declared files before starting.
@@ -24,6 +24,9 @@ Provider authentication comes from the caller's environment and provider configu
 Its starter server deliberately stores notes in memory. The implementation goal is to make those notes survive restart using SQLite.
 The check starts the server, verifies readiness, creates a note, stops the server, restarts it, and reads the note.
 It also inspects the database migration version and the stored row.
+
+[The Python example](../../examples/factory/notes-py/factory.json) declares the same journey for a Python 3.12 standard-library server.
+The engine code is the same. Only the profile, the starter `server.py`, and the check `checks/restart.py` differ.
 
 ## Configure explicit acceptance
 
@@ -161,4 +164,13 @@ node packages/factory/scripts/factory-e2e.mjs /path/to/installed/bin.mjs /path/t
 ```
 
 The driver uses deterministic SDK fixtures. It does not make paid provider calls.
-Each scenario saves commands, output, durable state, and artifacts. The exported TypeScript application repeats the restart journey from its delivered source.
+Each scenario saves commands, output, durable state, and artifacts. The exported application repeats the restart journey from its delivered source.
+
+The same engine also delivers a Python application. `examples/factory/notes-py` uses the Python 3.12 standard library and checks the note with `python3 -I -B checks/restart.py`.
+Select the example with the fourth argument, after the scenario list:
+
+```sh
+node packages/factory/scripts/factory-e2e.mjs /path/to/installed/bin.mjs /path/to/new-evidence happy,correct notes-py
+```
+
+The installed proof runs every TypeScript journey and the Python journeys that read or change application files.

@@ -16,6 +16,20 @@ const inside = (root, file) => {
   return path !== ".." && !path.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(path)
 }
 
+// The Python example repeats every journey that reads or changes application files.
+// Engine-only journeys (crashes, locks, cancellation) do not depend on the example.
+export const pythonJourneys = [
+  "invalid",
+  "happy",
+  "correct",
+  "relative-command",
+  "review-revision",
+  "export-tree-base",
+  "export-tree-candidate",
+  "changed-check",
+  "linked-checks",
+]
+
 export const verifyHashes = (files) => {
   assert.ok(Object.keys(files).length > 0, "Missing package hashes")
   for (const [file, expected] of Object.entries(files)) {
@@ -317,6 +331,26 @@ const main = async (directory, selected = "all") => {
     mergeJourneyResults(cancellations.map(({ output }) => read(join(output, "results.json")))).cliSha256,
     results.cliSha256,
   )
+  assert.equal(read(join(runs[0].output, "results.json")).example, "notes-ts")
+  const python = runCommand(evidence, "python-version", "python3", ["--version"], source).trim()
+  const pythonOutput = join(evidence, "python-journeys")
+  runCommand(
+    evidence,
+    "installed-python-journeys",
+    process.execPath,
+    [
+      driver,
+      cli,
+      pythonOutput,
+      pythonJourneys.join(","),
+      "notes-py",
+    ],
+    source,
+    3600000,
+  )
+  const pythonResults = read(join(pythonOutput, "results.json"))
+  assert.equal(pythonResults.example, "notes-py")
+  verifyJourneys(pythonResults.outcomes, pythonJourneys)
   verifyHashes(files)
   const finalBindings = resolveModules("module-bindings-after")
   assert.deepEqual(finalBindings, bindings)
@@ -331,6 +365,8 @@ const main = async (directory, selected = "all") => {
     scenarios: results.outcomes.length,
     cancellationRepeats: cancellations.length,
     concurrency,
+    python,
+    pythonScenarios: pythonResults.outcomes.length,
     paidProviderCalls: 0,
   })
   console.log(readFileSync(join(evidence, "summary.json"), "utf8"))
