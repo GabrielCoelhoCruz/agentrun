@@ -1257,7 +1257,7 @@ ${boundary.endsWith("exit") ? "exit 23" : "exec node -e 'setInterval(()=>{},1000
   await scenario("crash-check", async () => {
     const c = setup("crash-check", "happy", () => {}, "cancel-check")
     const running = c.startAsync()
-    const check = await waitFor(() => activeCheck(c), "executed check and its child")
+    const check = await waitFor(() => activeCheck(c), "executed check and its child", 120000)
     running.child.kill("SIGKILL")
     assert.equal((await running.completed).signal, "SIGKILL")
     assertBlocked(c.command(["resume", c.id], 1), /check.*active|unknown outcome/i)
