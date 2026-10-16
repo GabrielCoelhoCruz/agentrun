@@ -8,6 +8,29 @@ import { expect, test } from "vitest"
 
 const scenarioBudgetMs = 300000 + 60000 + 60000
 
+test.each([
+  "state-checkout-modified",
+  "state-checkout-staged",
+  "state-checkout-deleted",
+  "state-checkout-renamed",
+  "state-checkout-untracked",
+  "state-checkout-ignored",
+  "supervisor-crash-cancel",
+  "supervisor-crash-resume",
+  "supervisor-crash-invalid-owner",
+  "supervisor-crash-foreign-owner",
+  "supervisor-crash-live-cancel",
+])("production CLI protects tracked state and cleans up a dead supervisor (%s)", async (scenario) => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-owner-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    scenario,
+  ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+}, scenarioBudgetMs + 5000)
+
 test.each(["exit", "timeout"])(
   "production CLI retains process-table diagnostics during correction (%s)",
   async (mode) => {
@@ -30,6 +53,28 @@ test("production CLI accepts a review verdict wrapped in one JSON code fence", a
     fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
     join(parent, "proof"),
     "fenced-review",
+  ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+}, scenarioBudgetMs + 5000)
+
+test("production CLI starts a second workflow beside the executor state", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-second-start-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    "second-start",
+  ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+}, scenarioBudgetMs + 5000)
+
+test("production CLI records a timeout for a check that stops slowly", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-check-timeout-stubborn-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    "check-timeout-stubborn",
   ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
 }, scenarioBudgetMs + 5000)
