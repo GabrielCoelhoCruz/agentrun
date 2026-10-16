@@ -119,13 +119,13 @@ jobs:
       - name: Prepare unprivileged fixture user
         run: |
           sudo useradd --no-create-home --user-group --shell /usr/sbin/nologin agentrun-agent
-          chmod -R go-w "$GITHUB_WORKSPACE"
+          chmod -R a+rX,go-w "$GITHUB_WORKSPACE"
           directory="$GITHUB_WORKSPACE"
           while [ "$directory" != / ]; do
-            if [ -O "$directory" ]; then chmod go-w "$directory"; fi
+            if [ -O "$directory" ]; then chmod go-w,o+x "$directory"; fi
             directory=$(dirname "$directory")
           done
-          chmod go-w "$RUNNER_TEMP"
+          chmod go-w,o+x "$RUNNER_TEMP"
       - name: Prove agent cannot alter the harness or publication
         run: python3 packages/factory/scripts/real-journey-separated-e2e.py "$RUNNER_TEMP/separated-user-proof" agentrun-agent
       - name: Stop fixture user before saving evidence

@@ -59,14 +59,17 @@ def main():
     out = Path(args.out).absolute()
     require(not out.exists() and not out.is_symlink())
     out.mkdir(mode=0o755)
+    out.chmod(0o755)
     work = out / ".private"
     work.mkdir(mode=0o755)
+    work.chmod(0o755)
     agent = work / "agent"
     target = agent / "target"
     tools = work / "tools"
     control = work / "control"
     for directory in (agent, tools, control):
         directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
     helper = control / "journey-evidence.py"
     shutil.copyfile(Path(__file__).with_name("journey-evidence.py"), helper)
     helper.chmod(0o644)
@@ -166,7 +169,10 @@ for root in sys.argv[1:]:
     for entry in paths:
         resolved = entry.resolve()
         for path in [resolved, *resolved.parents]:
-            mode = path.stat().st_mode
+            try:
+                mode = path.stat().st_mode
+            except PermissionError:
+                continue
             # Sticky world-writable ancestors cannot replace another user's entries.
             sticky = path.is_dir() and mode & 0o1000 and path.stat().st_uid != os.getuid()
             if os.access(path, os.W_OK) and not sticky:

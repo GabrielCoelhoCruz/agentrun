@@ -12,6 +12,7 @@ root = Path(sys.argv[1]).resolve()
 user = sys.argv[2]
 uid = pwd.getpwnam(user).pw_uid
 root.mkdir(mode=0o755)
+root.chmod(0o755)
 key = "fake-review-key-0123456789-abcdefgh"
 source = (factory / "packages/factory/test/fixtures/provider-hooks.mjs").read_text()
 # Keep the reviewer's original tamper payload: rewrite the shim and helper.
@@ -66,6 +67,7 @@ results = []
 for attack in ["happy", "tamper", "checkout", "proc", "objects", "background"]:
     case = root / attack
     case.mkdir(mode=0o755)
+    case.chmod(0o755)
     private = case / "agent-log"
     subprocess.run(["sudo", "install", "-d", "-m", "700", "-o", user, str(private)], check=True)
     supplied = dict(os.environ, ANTHROPIC_API_KEY=key, NODE_OPTIONS="--import=" + hook.as_uri(),
