@@ -6,6 +6,8 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from urllib.parse import unquote_to_bytes
@@ -49,15 +51,19 @@ def digest(value, length=64):
     return value if isinstance(value, str) and re.fullmatch(f"[0-9a-f]{{{length}}}", value) else None
 
 
-def number(value):
-    return value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
+def number(value, maximum=1000000):
+    return value if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= maximum else None
+
+
+def integer(value, maximum):
+    return value if type(value) is int and 0 <= value <= maximum else None
 
 
 def enum(value, values):
     return value if isinstance(value, str) and value in values else None
 
 
-def summarize(work, out, code):
+def summarize(work, out, code, records, trusted):
     def save(name, value):
         write(out / name, json.dumps(value, indent=2, allow_nan=False) + "\n")
 
@@ -68,9 +74,9 @@ def summarize(work, out, code):
             "stage": enum(state.get("stage"), STAGES),
             "candidate": digest((state.get("candidate") or {}).get("commit"), 40),
             "costUsd": number(state.get("costUsd")),
-            "durationMs": number(state.get("durationMs")),
+            "durationMs": integer(state.get("durationMs"), 86400000),
             "reviewVerdict": enum(review.get("verdict"), {"accepted", "revision-needed", "human-needed"}),
-            "findingCount": len(review.get("findings", [])),
+            "findingCount": integer(len(review.get("findings", [])), 10000),
             "manifestDigest": digest((state.get("export") or {}).get("manifestDigest")),
         })
 
@@ -81,26 +87,110 @@ def summarize(work, out, code):
         "manifestDigest": digest(receipt.get("manifestDigest")),
         "fileDigests": [digest(file.get("digest")) for file in manifest.get("files", [])],
     })
-    result = load(work / "verify/result.json")
+    # Check programs write workspace files. Publish only the wrapper's exit result.
+    exits = parse_exits(records)
     save("check-result.json", {
-        "version": number(result.get("version")),
-        "candidate": digest(result.get("candidate"), 40),
-        "criteria": [{"outcome": enum(item.get("outcome"), {"pass", "fail", "not-run"})}
-                     for item in result.get("criteria", [])],
+        "version": 1,
+        "candidate": digest((load(work / "start.json").get("candidate") or {}).get("commit"), 40),
+        "criteria": [{"outcome": "pass" if exits.get("independent-check") == "0" else
+                      "not-run" if exits.get("independent-check") in (None, "missing-source") else "fail"}],
     })
-    # Fixed formats exclude prompts, paths, review messages, and arbitrary CLI text.
-    lines = (work / "exits.txt").read_text().splitlines() if (work / "exits.txt").exists() else []
-    safe = [line for line in lines if re.fullmatch(
-        r"(?:start|decide|export|independent-check|negative-control)=(?:[0-9]+|missing-source)|patch=(?:equal|DIFFERENT)", line)]
-    write(out / "exits.txt", "\n".join(safe) + "\n")
-    versions = (work / "toolchain.txt").read_text().splitlines()
-    save("toolchain.txt", {
-        "nodeVersion": next((line[5:] for line in versions if re.fullmatch(r"node v[0-9]+\.[0-9]+\.[0-9]+", line)), None),
-        "pythonVersion": next((line[7:] for line in versions if re.fullmatch(r"Python [0-9]+\.[0-9]+\.[0-9]+", line)), None),
-    })
-    head = digest((work / "factory-head.txt").read_text().strip(), 40)
+    write(out / "exits.txt", records.rstrip("\n") + "\n")
+    save("toolchain.txt", {name: trusted.get(name) for name in ("nodeVersion", "pythonVersion")})
+    head = digest(trusted.get("factoryHead"), 40)
     write(out / "factory-head.txt", (head or "unavailable") + "\n")
     write(out / "report.txt", "RESULT PASS\n" if code == 0 else "RESULT FAIL\n")
+
+
+def parse_exits(text):
+    values = {}
+    for line in text.splitlines():
+        if not line:
+            continue
+        match = re.fullmatch(r"(start|decide|export|independent-check|negative-control)=([0-9]{1,3}|missing-source)|patch=(equal|DIFFERENT)", line)
+        if not match:
+            raise EvidenceError("Invalid exit record")
+        name, value = line.split("=", 1)
+        if name in values or (value.isdigit() and int(value) > 255):
+            raise EvidenceError("Invalid exit record")
+        values[name] = value
+    return values
+
+
+def validate(contents):
+    def require(condition):
+        if not condition:
+            raise EvidenceError("Invalid evidence schema; publication blocked")
+
+    def fields(value, names):
+        require(isinstance(value, dict) and set(value) == set(names.split()))
+
+    def nullable(value, validated):
+        require(value is None or validated is not None)
+
+    for name in ("start.json", "decide.json", "export.json"):
+        value = json.loads(contents[name])
+        fields(value, "stage candidate costUsd durationMs reviewVerdict findingCount manifestDigest")
+        nullable(value["stage"], enum(value["stage"], STAGES))
+        nullable(value["candidate"], digest(value["candidate"], 40))
+        nullable(value["costUsd"], number(value["costUsd"]))
+        nullable(value["durationMs"], integer(value["durationMs"], 86400000))
+        nullable(value["reviewVerdict"], enum(value["reviewVerdict"], {"accepted", "revision-needed", "human-needed"}))
+        nullable(value["findingCount"], integer(value["findingCount"], 10000))
+        nullable(value["manifestDigest"], digest(value["manifestDigest"]))
+    value = json.loads(contents["toolchain.txt"])
+    fields(value, "nodeVersion pythonVersion")
+    for name, prefix in [("nodeVersion", "v"), ("pythonVersion", "")]:
+        version = value[name]
+        require(version is None or (isinstance(version, str) and re.fullmatch(prefix + r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", version)))
+    value = json.loads(contents["manifest-digests.json"])
+    fields(value, "manifestDigest fileDigests")
+    nullable(value["manifestDigest"], digest(value["manifestDigest"]))
+    require(isinstance(value["fileDigests"], list) and len(value["fileDigests"]) <= 1024)
+    for entry in value["fileDigests"]:
+        nullable(entry, digest(entry))
+    value = json.loads(contents["check-result.json"])
+    fields(value, "version candidate criteria")
+    require(type(value["version"]) is int and value["version"] == 1)
+    nullable(value["candidate"], digest(value["candidate"], 40))
+    require(isinstance(value["criteria"], list) and len(value["criteria"]) <= 1024)
+    for item in value["criteria"]:
+        fields(item, "outcome")
+        require(enum(item["outcome"], {"pass", "fail", "not-run"}) is not None)
+    parse_exits(contents["exits.txt"].decode())
+    head = contents["factory-head.txt"].decode()
+    require(head == "unavailable\n" or (head.endswith("\n") and digest(head[:-1], 40) is not None))
+    require(contents["report.txt"] in (b"RESULT PASS\n", b"RESULT FAIL\n"))
+
+
+def file_commands(action):
+    if action == "snapshot":
+        values = []
+        for name in ("GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH"):
+            path = os.environ.get(name)
+            if path:
+                file = Path(path)
+                if file.is_symlink() or (file.exists() and not file.is_file()):
+                    raise EvidenceError("Invalid Actions command file")
+                data = file.read_bytes() if file.exists() else b""
+                values.append({"path": path, "exists": file.exists(), "size": len(data),
+                               "data": base64.b64encode(data).decode()})
+        print(json.dumps(values))
+        return 0
+    changed = False
+    for value in json.load(sys.stdin):
+        file = Path(value["path"])
+        original = base64.b64decode(value["data"])
+        if file.is_symlink() or (file.exists() and not file.is_file()):
+            changed = True
+        elif (file.exists() != value["exists"] or
+              (file.exists() and (file.stat().st_size != value["size"] or file.read_bytes() != original))):
+            changed = True
+            if value["exists"]:
+                file.write_bytes(original)
+            elif file.exists():
+                file.unlink()
+    return 1 if changed else 0
 
 
 def check_secret(data):
@@ -136,6 +226,7 @@ def scan(out):
         check_secret(path.name.encode())
     if {path.name for path in entries} != ALLOWED or len(entries) != len(ALLOWED):
         raise EvidenceError("Evidence contains missing or unapproved files")
+    validate(contents)
     return contents
 
 
@@ -149,20 +240,66 @@ def summary(out):
     sys.stdout.buffer.write(data)
 
 
+def isolated_git(native, args):
+    # These journey commands do not use transports, editors or pagers. Disable
+    # the program hooks used by local reads, writes, commits and worktree setup.
+    fixed = ["--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+             "-c", "core.attributesFile=/dev/null", "-c", "commit.gpgSign=false",
+             "-c", "tag.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"]
+    env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+               GIT_ATTR_NOSYSTEM="1", GIT_NO_LAZY_FETCH="1")
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        option = args[index]
+        index += 2 if option in ("-c", "-C", "--git-dir", "--work-tree", "--config-env") else 1
+    # Reading config cannot run its configured programs. Replace every filter
+    # driver before add/checkout can use candidate attributes to select it.
+    config = subprocess.run([native, *args[:index], *fixed, "config", "--includes", "--null", "--name-only", "--list"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    filters = []
+    if config.returncode not in (0, 128):
+        return 1
+    for entry in config.stdout.decode().split("\0"):
+        name = entry
+        if re.fullmatch(r"filter\.[\s\S]+\.(clean|smudge|process|required)", name):
+            filters += ["-c", name + ("=false" if name.endswith(".required") else "=")]
+    command = args[index:index + 1]
+    flags = ["--no-ext-diff", "--no-textconv"] if command and command[0] in ("diff", "show", "log") else []
+    return subprocess.call([native, *args[:index], *fixed, *filters, *command, *flags, *args[index + 1:]], env=env)
+
+
 def main():
     action = sys.argv[1]
-    if action == "capture":
-        # Capture in memory, redact before writing, and discard child diagnostics.
+    if action == "git-shim":
+        path = Path(sys.argv[2]) / "git"
+        path.write_text("#!/usr/bin/env bash\nexec python3 " + shlex.quote(str(Path(__file__).resolve())) +
+                        " git " + shlex.quote(shutil.which("git")) + ' "$@"\n')
+        path.chmod(0o700)
+    elif action == "git":
+        return isolated_git(sys.argv[2], sys.argv[3:])
+    elif action == "toolchain":
+        env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+        head = subprocess.check_output(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                                        "-C", sys.argv[2], "rev-parse", "HEAD"], env=env, text=True).strip()
+        print(json.dumps({"nodeVersion": subprocess.check_output(["node", "-v"], text=True).strip(),
+                          "pythonVersion": ".".join(map(str, sys.version_info[:3])), "factoryHead": head}))
+    elif action == "file-commands":
+        return file_commands(sys.argv[2])
+    elif action == "capture":
+        # Capture both streams in private files. Neither stream reaches the Actions log.
         # Children can run provider tools. Keep CI file commands, runtime tokens,
         # and upload endpoints in the trusted wrapper, outside that process tree.
         env = {name: value for name, value in os.environ.items()
                if not name.startswith(("GITHUB_", "ACTIONS_", "RUNNER_", "GH_", "INPUT_"))}
         result = subprocess.run(sys.argv[4:], cwd=sys.argv[3], env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         Path(sys.argv[2]).write_bytes(redact(result.stdout))
+        Path(sys.argv[2] + ".stderr").write_bytes(redact(result.stderr))
         return result.returncode if result.returncode >= 0 else 1
-    if action == "summarize":
-        summarize(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]))
+    elif action == "summarize":
+        trusted = sys.stdin.read()
+        summarize(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]),
+                  sys.argv[5] if len(sys.argv) > 5 else "", json.loads(trusted) if trusted else {})
     elif action == "scan":
         scan(Path(sys.argv[2]))
     elif action == "summary":

@@ -100,5 +100,25 @@ run("scrubbed-child", ["capture", captured, root, "python3", "-c", child], 0, di
 passed = json.loads(captured.read_text()) == []
 results.append({"name": "publication-environment", "passed": passed})
 print(f"{'PASS' if passed else 'FAIL'} publication-environment")
+# Publication rejects structurally valid JSON carrying arbitrary provider values.
+for name, file, value in [
+    ("schema-free-text", "toolchain.txt", "UNTRUSTED_TEXT"),
+    ("schema-version", "toolchain.txt", {"nodeVersion": "v999999999999.1.1", "pythonVersion": "3.12.0"}),
+    ("schema-extra", "toolchain.txt", {"nodeVersion": "v24.21.0", "pythonVersion": "3.12.0", "message": "provider"}),
+    ("schema-stage", "start.json", dict(json.loads((good / "start.json").read_text()), stage="provider")),
+    ("schema-duration", "start.json", dict(json.loads((good / "start.json").read_text()), durationMs=10**30)),
+    ("schema-count", "start.json", dict(json.loads((good / "start.json").read_text()), findingCount=-1)),
+    ("schema-cost", "start.json", dict(json.loads((good / "start.json").read_text()), costUsd=True)),
+    ("schema-check", "check-result.json", {"version": 10**30, "candidate": "f" * 40, "criteria": [{"outcome": "pass"}]}),
+    ("schema-outcome", "check-result.json", {"version": 1, "candidate": None, "criteria": [{"outcome": "provider"}]}),
+    ("schema-exit", "exits.txt", "start=999999999999999999999999\n"),
+    ("schema-digest", "manifest-digests.json", {"manifestDigest": None, "fileDigests": ["provider"]}),
+]:
+    target = root / name
+    shutil.copytree(good, target)
+    (target / file).write_text(value if isinstance(value, str) else json.dumps(value))
+    result = run(name, ["summary", target], 1)
+    assert result.stdout == "", name
+
 (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
 sys.exit(0 if all(row["passed"] for row in results) else 1)

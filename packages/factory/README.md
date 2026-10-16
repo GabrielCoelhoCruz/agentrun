@@ -190,22 +190,41 @@ bash packages/factory/scripts/real-journey.sh --factory "$PWD" --out /path/to/ne
 `--example` selects another example directory, `--check` another profile check, and `--goal` another goal.
 The output directory contains only public evidence: exit codes, toolchain versions, the factory commit,
 start/decide/export summaries, manifest digests, the check result summary, and a report.
-Each file is limited to 64 KiB. The script generates public content from fixed verdicts, numbers, hashes, and validated versions.
+Each file is limited to 64 KiB. A fixed schema checks field names, verdicts, hashes, bounded numbers, and tool versions.
+The wrapper captures versions and the factory commit before the provider starts. It keeps these values and exit results in parent shell memory.
+Other public values come from captured factory records outside the agent workspace. The repeated check outcome comes from the wrapper exit result.
 It does not copy raw tool output, goals, paths, review messages, or provider text into public files.
-The script redacts the exact `ANTHROPIC_API_KEY` value from captured command output before writing it.
+The script captures factory and provider stdout and stderr in temporary files under the output directory.
+It redacts the exact `ANTHROPIC_API_KEY` value before saving those streams. The wrapper prints a fixed result line.
+Git commands ignore system and global configuration. They disable hooks, filesystem monitors, filters, signing, automatic maintenance, external diffs, and text conversion.
+Independent verification reads a fresh repository containing copied objects without candidate configuration.
 It uses a private home directory and deletes the temporary repository, factory state, exports, and databases when it exits.
 Provider code can write raw data inside that temporary directory while the journey runs.
 
 The `Real provider journey` GitHub Actions workflow runs the same script on Linux. Start it by hand from the Actions tab.
-It reads `ANTHROPIC_API_KEY` from the `real-provider` environment, so a required reviewer can approve each run before it spends.
+It reads `ANTHROPIC_API_KEY` from the `real-provider` environment. Add a required reviewer to that environment before a paid run.
 Factory processes and their provider children do not receive Actions file-command paths, runtime tokens, or upload endpoints.
 Before upload, a separate step scans the final evidence and generates a fixed summary from the scanned result.
-Only that trusted step writes to the Actions summary. The scan blocks the key, whitespace splits, base64 at each byte offset,
+The journey step clears its current Actions summary on exit. Changes to its environment, output, or path command files fail the journey and restore their previous contents.
+The scan step writes the summary from validated wrapper results. The scan blocks the key, whitespace splits, base64 at each byte offset,
 URL encoding, hex, and private key fragments of 16 or more characters.
 The step also rejects missing or extra files, read errors, links, nested paths, empty keys, and files over 64 KiB.
 A failed scan blocks the summary and upload and fails the job.
 Only the approved evidence is uploaded, including when the journey fails.
 Provider transcripts, prompts, agent logs, target repositories, factory state, and databases are excluded.
+
+### Threat model
+
+This repository is public. The workflow log, step summary, and artifacts are public too.
+The agent under test must receive `ANTHROPIC_API_KEY` and has network access.
+A deliberately malicious agent can send that key over the network. Output filtering cannot prevent this.
+A malicious process can also recover runner paths from ancestor processes, including through `/proc` on Linux.
+The wrapper is not an operating system sandbox against another process with the same user.
+
+The workflow protects against accidental leaks from an honest agent and its tools.
+It also prevents candidate Git configuration from running programs in the trusted harness.
+For the remaining malicious-agent risk, use manual `workflow_dispatch` only and add a required reviewer to the `real-provider` environment.
+Use a dedicated key with a low spending cap, set the budget input, and rotate the key after a suspicious run.
 
 After `pnpm build`, prove this boundary without paid calls:
 

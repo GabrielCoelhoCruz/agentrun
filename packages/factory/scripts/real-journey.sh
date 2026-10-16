@@ -55,39 +55,56 @@ bin=$factory/packages/factory/dist/bin.mjs
 umask 077
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
-work=$(mktemp -d "${TMPDIR:-/tmp}/real-journey.XXXXXXXX")
-helper=$factory/packages/factory/scripts/journey-evidence.py
-target=$work/target
+# Private command output stays under --out only until the EXIT cleanup.
+work=$out/.private
+mkdir "$work"
+mkdir "$work/control" "$work/tools"
+cp "$factory/packages/factory/scripts/journey-evidence.py" "$work/control/journey-evidence.py"
+helper=$work/control/journey-evidence.py
+target=$work/agent/target
 verify=$work/verify
-exits=$work/exits.txt
+records=""
+record() { records+="$1=$2"$'\n'; }
+# Keep trusted values in the parent shell, outside the agent's writable files.
+trusted=$(python3 "$helper" toolchain "$factory")
+channels=$(python3 "$helper" file-commands snapshot)
+exec 3>&1
+exec >"$work/harness.log" 2>&1
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 finish() {
   local code=$?
   trap - EXIT
   local prepared=yes
-  python3 "$helper" summarize "$work" "$out" "$code" || prepared=no
-  # Factory state can contain provider transcripts. Never retain or upload it.
-  rm -rf "$work"
-  if [ "$prepared" != yes ] || ! python3 "$helper" summary "$out"; then
-    code=1
-    echo 'RESULT FAIL'
+  python3 "$helper" file-commands check <<< "$channels" || code=1
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "$GITHUB_STEP_SUMMARY" ]; then
+    : > "$GITHUB_STEP_SUMMARY" || code=1
   fi
+  python3 "$helper" summarize "$work" "$out" "$code" "$records" <<< "$trusted" || prepared=no
+  # Factory state and command logs can contain provider data. Never upload them.
+  rm -rf "$work"
+  if [ "$prepared" != yes ] || ! python3 "$factory/packages/factory/scripts/journey-evidence.py" scan "$out" >/dev/null 2>&1; then
+    code=1
+  fi
+  if [ "$code" -eq 0 ]; then echo 'RESULT PASS' >&3; else echo 'RESULT FAIL' >&3; fi
   exit "$code"
 }
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# Keep executor worktrees and provider caches within the private directory too.
-export HOME="$work/home" TMPDIR="$work/tmp"
-export XDG_CONFIG_HOME="$HOME/.config" CLAUDE_CONFIG_DIR="$HOME/.claude" PI_CODING_AGENT_DIR="$HOME/.pi"
+# These overrides also protect factory/executor Git calls from hooks and monitors.
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+export GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
+python3 "$helper" git-shim "$work/tools"
+export PATH="$work/tools:$PATH"
+safe_git() {
+  git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+}
+# Keep executor worktrees and provider caches within the agent directory.
+export HOME="$work/agent/home" TMPDIR="$work/agent/tmp"
+export XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache"
+export CLAUDE_CONFIG_DIR="$HOME/.claude" PI_CODING_AGENT_DIR="$HOME/.pi"
 mkdir -p "$HOME" "$TMPDIR" "$verify/artifacts" "$verify/base-artifacts" "$verify/src" "$verify/base"
-
-{
-  echo "node $(node -v)"
-  python3 --version
-  echo "factory $(git -C "$factory" rev-parse HEAD)"
-} > "$work/toolchain.txt"
-git -C "$factory" rev-parse HEAD > "$work/factory-head.txt"
 
 cp -R "$example" "$target"
 python3 - "$target/factory.json" "$budget" <<'PY'
@@ -119,15 +136,15 @@ while IFS= read -r -d '' arg; do check_argv+=("$arg"); done < <(
   python3 -c 'import json, sys; sys.stdout.write("".join(a + "\0" for a in json.loads(sys.argv[1])["argv"]))' "$check_spec"
 )
 
-git -C "$target" init -q -b main
-git -C "$target" add -A
-git -C "$target" -c user.name=factory -c user.email=factory@localhost commit -qm "chore: starter"
-base=$(git -C "$target" rev-parse HEAD)
+safe_git -C "$target" init -q -b main
+safe_git -C "$target" add -A
+safe_git -C "$target" -c user.name=factory -c user.email=factory@localhost commit -qm "chore: starter"
+base=$(safe_git -C "$target" rev-parse HEAD)
 
 status=0
 python3 "$helper" capture "$work/start.json" "$target" \
   node "$bin" start --profile factory.json --goal "$goal" --id "$id" --json || status=$?
-echo "start=$status" > "$exits"
+record start "$status"
 
 read -r stage candidate request evidence version approvable < <(python3 - "$work/start.json" <<'PY'
 import json, sys
@@ -140,7 +157,7 @@ approvable = "yes" if "approve" in (r.get("allowedActions") or []) else "no"
 print(d.get("stage", "-"), (d.get("candidate") or {}).get("commit", "-"), r.get("id", "-"), r.get("evidenceDigest", "-"), r.get("expectedVersion", "-"), approvable)
 PY
 )
-if [ "$stage" != human ] || [ "$approvable" != yes ] || ! grep -qx 'start=0' "$exits"; then
+if [ "$stage" != human ] || [ "$approvable" != yes ] || [ "$status" -ne 0 ]; then
   exit 1
 fi
 
@@ -148,16 +165,19 @@ status=0
 python3 "$helper" capture "$work/decide.json" "$target" \
   node "$bin" decide "$id" --request "$request" --candidate "$candidate" --evidence "$evidence" \
   --expected-version "$version" --action approve --json || status=$?
-echo "decide=$status" >> "$exits"
+record decide "$status"
 status=0
 python3 "$helper" capture "$work/export.json" "$target" node "$bin" export "$id" --json || status=$?
-echo "export=$status" >> "$exits"
+record export "$status"
 exported=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["export"]["directory"])' "$work/export.json" 2>/dev/null || echo "")
 
-if [ -n "$exported" ] && git -C "$target" diff --binary "$base" "$candidate" | cmp -s - "$exported/change.patch"; then
-  echo "patch=equal" >> "$exits"
+# Read only copied objects. Candidate config, hooks and worktree settings are excluded.
+safe_git init -q --bare "$work/evidence.git"
+cp -R "$target/.git/objects/." "$work/evidence.git/objects/"
+if [ -n "$exported" ] && safe_git --git-dir="$work/evidence.git" diff --no-ext-diff --no-textconv --binary "$base" "$candidate" | cmp -s - "$exported/change.patch"; then
+  record patch equal
 else
-  echo "patch=DIFFERENT" >> "$exits"
+  record patch DIFFERENT
 fi
 
 # Repeat the check on the exported source and on the starter. The starter run is the negative control.
@@ -170,14 +190,14 @@ run_check() {
   echo "$code"
 }
 if [ -n "$exported" ] && tar -xf "$exported/source.tar" -C "$verify/src"; then
-  echo "independent-check=$(run_check "$verify/src" "$verify/artifacts" "$verify/result.json" independent "$candidate" "$verify/check.out")" >> "$exits"
+  record independent-check "$(run_check "$verify/src" "$verify/artifacts" "$verify/result.json" independent "$candidate" "$verify/check.out")"
 else
-  echo "independent-check=missing-source" >> "$exits"
+  record independent-check missing-source
 fi
-git -C "$target" archive "$base" | tar -x -C "$verify/base"
-echo "negative-control=$(run_check "$verify/base" "$verify/base-artifacts" "$verify/base-result.json" negative "$base" "$verify/base.out")" >> "$exits"
-if grep -qx 'decide=0' "$exits" && grep -qx 'export=0' "$exits" && grep -qx 'patch=equal' "$exits" \
-  && grep -qx 'independent-check=0' "$exits" && ! grep -qx 'negative-control=0' "$exits"; then
+safe_git --git-dir="$work/evidence.git" archive "$base" | tar -x -C "$verify/base"
+record negative-control "$(run_check "$verify/base" "$verify/base-artifacts" "$verify/base-result.json" negative "$base" "$verify/base.out")"
+if grep -qx 'decide=0' <<< "$records" && grep -qx 'export=0' <<< "$records" && grep -qx 'patch=equal' <<< "$records" \
+  && grep -qx 'independent-check=0' <<< "$records" && ! grep -qx 'negative-control=0' <<< "$records"; then
   exit 0
 else
   exit 1

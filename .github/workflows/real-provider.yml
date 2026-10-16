@@ -40,8 +40,9 @@ jobs:
           EXAMPLE: ${{ inputs.example }}
           BUDGET: ${{ inputs.budget }}
         run: |
-          [[ "$EXAMPLE" =~ ^[a-z0-9-]+$ ]] || { echo "invalid example: $EXAMPLE"; exit 2; }
-          [[ "$BUDGET" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "invalid budget: $BUDGET"; exit 2; }
+          trap ': > "$GITHUB_STEP_SUMMARY"' EXIT
+          [[ "$EXAMPLE" =~ ^[a-z0-9-]+$ ]] || { echo 'Invalid example'; exit 2; }
+          [[ "$BUDGET" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo 'Invalid budget'; exit 2; }
           bash packages/factory/scripts/real-journey.sh --factory "$GITHUB_WORKSPACE" \
             --out "$RUNNER_TEMP/real-journey" --id "real-$GITHUB_RUN_ID" \
             --example "examples/factory/$EXAMPLE" --budget "$BUDGET"

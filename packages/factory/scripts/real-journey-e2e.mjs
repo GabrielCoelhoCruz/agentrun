@@ -21,8 +21,8 @@ const allowed = [
   "toolchain.txt",
 ].sort()
 const commands = []
-const run = (command, args, env) => {
-  const result = spawnSync(command, args, { cwd: factory, env, encoding: "utf8", timeout: 180000 })
+const run = (command, args, env, timeout = 180000) => {
+  const result = spawnSync(command, args, { cwd: factory, env, encoding: "utf8", timeout })
   commands.push({
     command,
     args,
@@ -53,6 +53,7 @@ const env = {
   FACTORY_FIXTURE_PUBLICATION_ATTACK: "1",
   FACTORY_FIXTURE_LOG: join(root, "providers.jsonl"),
   FACTORY_FIXTURE_DURABLE: join(factory, "packages/factory/test/fixtures/server-durable.ts"),
+  FACTORY_FIXTURE_SOURCE: "server.ts",
 }
 const channels = ["GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STATE"]
 for (const name of channels) env[name] = join(root, name)
@@ -138,6 +139,15 @@ for (const kind of ["extra", "symlink", "large", "missing-key"]) {
   assert.equal(scan(bad, kind === "missing-key" ? { ANTHROPIC_API_KEY: "" } : {}).status, 1, kind)
   rmSync(bad, { recursive: true })
 }
+assert.equal(
+  run(
+    "python3",
+    [join(factory, "packages/factory/scripts/real-journey-r4-e2e.py"), join(root, "adversarial")],
+    env,
+    900000,
+  ).status,
+  0,
+)
 writeFileSync(join(root, "factory-head.txt"), run("git", ["rev-parse", "HEAD"], env).stdout)
 run("git", ["status", "--short"], env)
 console.log("PASS: echoed key excluded; injected leaks blocked; failed journey safe; no paid provider calls")
