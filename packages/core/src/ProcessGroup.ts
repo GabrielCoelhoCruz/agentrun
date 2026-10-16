@@ -61,7 +61,8 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       : leader === undefined || !leader.command.trim().split(/\s+/).includes(`agentrun-${kind}-${token}`)
       ? "Process group ownership changed; recovery refused"
       : undefined
-    // Exit can erase the initial command evidence. Wait for exit without signalling an unproved group.
+    // Both paths observe the same family; only verified ownership permits signals.
+    const maySignal = unverified === undefined
     const owned = new Set([pgid, ...members.map((row) => row.pid)])
     let previousSize = 0
     while (previousSize !== owned.size) {
@@ -71,17 +72,17 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
     const identities = new Map(rows.filter((row) => owned.has(row.pid)).map((row) => [row.pid, row.started]))
     const groups = new Set([pgid])
     for (const row of rows) {
-      if (unverified !== undefined || !owned.has(row.pid)) continue
+      if (!owned.has(row.pid)) continue
       if (row.group <= 1 || !owned.has(row.group)) {
-        return yield* error("Descendant joined an unowned group; cleanup refused")
+        return yield* error(unverified ?? "Descendant joined an unowned group; cleanup refused")
       }
       groups.add(row.group)
     }
-    const waitOnly = new Set<number>(unverified === undefined ? [] : [pgid])
+    const waitOnly = new Set<number>()
     let firstSignal = true
     for (const signal of ["SIGTERM", "SIGKILL"] as const) {
       for (const group of groups) {
-        if (waitOnly.has(group)) continue
+        if (!maySignal || waitOnly.has(group)) continue
         const current = firstSignal ? rows : yield* processTable(true)
         firstSignal = false
         const members = current.filter((row) => row.group === group)
@@ -89,7 +90,7 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
           groups.delete(group)
           continue
         }
-        const original = rows.find((row) => row.pid === group && row.group === group)
+        const original = rows.find((row) => row.pid === group && row.group === group && owned.has(row.pid))
         const leader = current.find((row) => row.pid === group && row.group === group)
         if (original === undefined || leader === undefined || leader.command !== original.command) {
           waitOnly.add(group)
@@ -111,24 +112,22 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
       for (let attempt = 0; attempt < 40; attempt++) {
         const current = yield* processTable()
-        if (unverified !== undefined) {
-          const alive = new Set(
-            current.filter((row) => identities.get(row.pid) === row.started && running(row.state))
-              .map((row) => row.pid),
-          )
-          let previousSize = -1
-          // A detached child whose parent exits between snapshots can lose its ancestry before observation.
-          // Verified cleanup has the same race (#50); closing it needs OS containment, not more polling.
-          while (previousSize !== alive.size) {
-            previousSize = alive.size
-            for (const row of current) {
-              if (running(row.state) && alive.has(row.parent) && !alive.has(row.pid)) {
-                alive.add(row.pid)
-                identities.set(row.pid, row.started)
-              }
+        const alive = new Set(
+          current.filter((row) => identities.get(row.pid) === row.started && running(row.state))
+            .map((row) => row.pid),
+        )
+        let previousSize = -1
+        // A detached fork can lose ancestry before observation (#50); both paths need OS containment to prevent it.
+        while (previousSize !== alive.size) {
+          previousSize = alive.size
+          for (const row of current) {
+            if (running(row.state) && alive.has(row.parent) && !alive.has(row.pid)) {
+              alive.add(row.pid)
+              identities.set(row.pid, row.started)
             }
           }
         }
+        for (const row of current) if (alive.has(row.pid) && row.group > 1) groups.add(row.group)
         for (const group of groups) {
           const members = current.filter((row) => row.group === group)
           if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {

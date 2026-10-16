@@ -363,7 +363,7 @@ test.each([
   { evidence: "missing leader", outcome: "live", expected: "Failure" },
   { evidence: "member with external parent", outcome: "live", expected: "Failure" },
   { evidence: "missing command", outcome: "exits", expected: "Success" },
-  { evidence: "missing command", outcome: "reused PID", expected: "Success" },
+  { evidence: "missing command", outcome: "reused PID", expected: "Failure" },
 ])("unverified cleanup tracks a detached descendant ($evidence, $outcome)", async ({ evidence, outcome, expected }) => {
   const directory = mkdtempSync(join(tmpdir(), "agentrun-unverified-descendant-"))
   const release = join(directory, "release")
