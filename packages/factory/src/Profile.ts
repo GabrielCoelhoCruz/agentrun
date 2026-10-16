@@ -118,7 +118,8 @@ export const prepareProfile = (repoRoot: string, commonDir: string, file: string
       }
     }
     const baseSha = yield* git(repoRoot, ["rev-parse", "--verify", `${profile.base}^{commit}`])
-    if ((yield* git(repoRoot, ["status", "--porcelain"])) !== "") {
+    // The executor writes its untracked run state under `.agentrun/` at the project root.
+    if ((yield* git(repoRoot, ["status", "--porcelain", "--", ":(top)", ":(top,exclude).agentrun/"])) !== "") {
       return yield* failure(
         "profile",
         "Start requires a clean project checkout. Commit the profile and project files first.",

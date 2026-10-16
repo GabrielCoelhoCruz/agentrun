@@ -9,6 +9,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs"
@@ -145,7 +146,6 @@ const setup = (name, mode = "happy", changeProfile = () => {}, checkMode) => {
   }
   changeProfile(profile, repo)
   writeFileSync(join(repo, "factory.json"), JSON.stringify(profile, null, 2))
-  writeFileSync(join(repo, ".gitignore"), ".agentrun/\n")
   git("init", "-q")
   git("config", "commit.gpgsign", "false")
   git("add", ".")
@@ -434,7 +434,31 @@ try {
     const journey = JSON.parse(readFileSync(join(artifacts, "journey.json"), "utf8"))
     assert.ok(journey.some((entry) => entry.event === "read-after-restart"))
     assert.ok(journey.some((entry) => entry.event === "migration-verified"))
-    assert.equal(c.git("status", "--porcelain"), "")
+    assert.equal(c.git("status", "--porcelain", "--", ":(top)", ":(top,exclude).agentrun/"), "")
+  })
+  await scenario("second-start", async () => {
+    const c = setup("second-start")
+    assertHuman(c.start())
+    assert.ok(existsSync(join(c.repo, ".agentrun/runs")), "The executor must have written its state")
+    assert.equal(c.start().stage, "human")
+    const second = [
+      "start",
+      "--profile",
+      "factory.json",
+      "--goal",
+      "Store a second note and read it after restart",
+      "--id",
+      "notes-002",
+    ]
+    writeFileSync(join(c.repo, "server.ts"), `${readFileSync(join(c.repo, "server.ts"), "utf8")}// local edit\n`)
+    assert.match(c.run(process.execPath, [cli, ...second, "--json"]).stderr, /clean project checkout/)
+    c.git("checkout", "--", "server.ts")
+    mkdirSync(join(c.repo, "roles/.agentrun"))
+    writeFileSync(join(c.repo, "roles/.agentrun/state.json"), "{}\n")
+    assert.match(c.run(process.execPath, [cli, ...second, "--json"]).stderr, /clean project checkout/)
+    rmSync(join(c.repo, "roles/.agentrun"), { recursive: true })
+    assert.equal(existsSync(join(c.repo, ".git/agentrun/factory/runs/notes-002")), false)
+    assertHuman(c.command(second))
   })
   for (const origin of ["base", "candidate", "metadata", "gitlink"]) {
     await scenario(`export-tree-${origin}`, async () => {
