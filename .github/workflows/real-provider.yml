@@ -1,0 +1,81 @@
+name: Real provider journey
+
+on:
+  workflow_dispatch:
+    inputs:
+      example:
+        description: Example directory under examples/factory
+        type: string
+        default: notes-ts
+      budget:
+        description: Provider budget in USD
+        type: string
+        default: "4"
+
+permissions:
+  contents: read
+
+jobs:
+  journey:
+    runs-on: ubuntu-latest
+    environment: real-provider
+    timeout-minutes: 60
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PATH: /usr/sbin:/usr/bin:/sbin:/bin
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install and build trusted factory
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/sudo /usr/bin/ln -sf /opt/hostedtoolcache/node/24.21.0/x64/bin/node /usr/bin/node
+          /home/runner/setup-pnpm/node_modules/.bin/pnpm install --frozen-lockfile
+          /home/runner/setup-pnpm/node_modules/.bin/pnpm -r build
+      - name: Build agent image
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/docker build --file packages/factory/scripts/journey.Dockerfile --tag agentrun-journey:local .
+      - name: Run journey
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EXAMPLE: ${{ inputs.example }}
+          BUDGET: ${{ inputs.budget }}
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          [[ "$EXAMPLE" =~ ^[a-z0-9-]+$ ]] || { echo 'Invalid example'; exit 2; }
+          [[ "$BUDGET" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo 'Invalid budget'; exit 2; }
+          /usr/bin/bash packages/factory/scripts/real-journey.sh --factory "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/real-journey" --id "real-$GITHUB_RUN_ID" \
+            --example "examples/factory/$EXAMPLE" --budget "$BUDGET" --container
+      - name: Stop agent containers before publication
+        id: stopped
+        if: ${{ always() }}
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/python3 -I packages/factory/scripts/stop-journey-containers.py
+          echo 'safe=true' >> "$GITHUB_OUTPUT"
+      - name: Scan public evidence
+        id: evidence
+        if: ${{ always() && steps.stopped.outputs.safe == 'true' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/python3 -I packages/factory/scripts/journey-evidence.py summary "$RUNNER_TEMP/real-journey" >> "$GITHUB_STEP_SUMMARY"
+          echo 'safe=true' >> "$GITHUB_OUTPUT"
+      - name: Save public evidence
+        if: ${{ always() && steps.evidence.outputs.safe == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-journey-${{ github.run_id }}
+          path: ${{ runner.temp }}/real-journey/
+          if-no-files-found: error

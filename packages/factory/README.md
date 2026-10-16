@@ -174,3 +174,103 @@ node packages/factory/scripts/factory-e2e.mjs /path/to/installed/bin.mjs /path/t
 ```
 
 The installed proof runs every TypeScript journey and the Python journeys that read or change application files.
+
+## Run a real-provider journey
+
+`scripts/real-journey.sh` repeats the TypeScript journey with the profile's real providers. These calls cost money.
+It copies an example into a new Git repository, starts the factory, approves the exact human request, and exports.
+Local mode compares `change.patch` with `git diff` and repeats the profile check on the exported `source.tar`.
+CI rebuilds the source and patch from copied Git objects. Both modes run the same check on the starter.
+The starter run must fail. The script prints the exit codes to `exits.txt` and ends with `RESULT PASS` or `RESULT FAIL`.
+
+On macOS or Linux, with Node 24 and Python 3 on `PATH` and provider authentication in the environment:
+
+```sh
+pnpm install --frozen-lockfile && pnpm build
+bash packages/factory/scripts/real-journey.sh --factory "$PWD" --out /path/to/new-output --id notes-real-001 --budget 4
+```
+
+`--example` selects another example directory, `--check` another profile check, and `--goal` another goal.
+The output directory contains only public evidence: exit codes, toolchain versions, the factory commit,
+start/decide/export summaries, manifest digests, the check result summary, and a report.
+Each file is limited to 64 KiB. A fixed schema checks field names, verdicts, hashes, bounded numbers, and tool versions.
+The wrapper captures versions and the factory commit before the provider starts. It keeps these values and exit results in parent shell memory.
+Other public values come from captured factory records outside the agent workspace. The repeated check outcome comes from the wrapper exit result.
+It does not copy raw tool output, goals, paths, review messages, or provider text into public files.
+The script captures factory and provider stdout and stderr in temporary files under the output directory.
+It redacts the exact `ANTHROPIC_API_KEY` value before saving those streams. The wrapper prints a fixed result line.
+Git commands ignore system and global configuration. They disable hooks, filesystem monitors, filters, signing, automatic maintenance, external diffs, and text conversion.
+Independent verification reads a fresh repository containing copied objects without candidate configuration.
+It uses a private home directory and deletes the temporary repository, factory state, exports, and databases when it exits.
+Provider code can write raw data inside that temporary directory while the journey runs.
+
+The `Real provider journey` GitHub Actions workflow uses `--container` on Linux.
+Start it by hand from the Actions tab. The workflow builds an image from official Node 24 and Python 3.12 images pinned by digest.
+Factory commands, provider code, and independent checks run as a non-root UID inside Docker.
+The root filesystem is read-only. Temporary files and HOME use tmpfs mounts.
+The container drops Linux capabilities, prevents privilege escalation, and limits processes to 256.
+Network access remains available for the provider.
+The container receives the key and an explicit list of environment variables. It receives no Actions variables or host PATH.
+Only the built factory and its dependencies are mounted read-only. One private work directory is mounted read-write.
+The source checkout, harness, host tools, Docker socket, and Actions command files are not mounted.
+The harness captures both streams privately and uses absolute host tools with a fixed system PATH.
+It removes the container and verifies removal before importing Git objects.
+This stops detached children as well as the main process.
+It rejects linked objects, alternates, special files, and candidate Git configuration.
+It validates JSON fields before using request IDs, versions, or commit hashes.
+
+Independent checks run in a fresh container without the provider key.
+The runner rebuilds their source from copied Git objects with isolated Git configuration.
+The check command comes from the original profile; check files must match the starter.
+Published digests come from the independently rebuilt source and patch.
+Agent export paths and manifest digests are discarded. CI records `patch=derived`.
+A final workflow step removes containers labelled for this run and verifies removal before publication.
+The Linux fixture job uses a fake key. Each boundary probe runs intact, weakened, and intact again.
+It tests host tool writes, checkout writes, host process visibility, Actions file writes, and detached children.
+Positive controls run both examples through start, decision, export, and independent checks.
+The proof also rejects a corrupt public schema before restoring and accepting the valid record.
+It reads `ANTHROPIC_API_KEY` from the `real-provider` environment. Add a required reviewer to that environment before a paid run.
+Factory processes and their provider children do not receive Actions file-command paths, runtime tokens, or upload endpoints.
+Before upload, a separate step scans the final evidence and generates a fixed summary from the scanned result.
+In CI, the harness checks its environment, output, path, and summary command files against their original contents.
+Changes fail the journey and restore those contents.
+The scan step writes the summary from validated wrapper results. The scan blocks the key, whitespace splits, base64 at each byte offset,
+URL encoding, hex, and private key fragments of 16 or more characters.
+The step also rejects missing or extra files, read errors, links, nested paths, empty keys, and files over 64 KiB.
+A failed scan blocks the summary and upload and fails the job.
+Only the approved evidence is uploaded, including when the journey fails.
+Provider transcripts, prompts, agent logs, target repositories, factory state, and databases are excluded.
+
+### Threat model
+
+This repository is public. The workflow log, step summary, and artifacts are public too.
+The agent under test must receive `ANTHROPIC_API_KEY` and has network access.
+A deliberately malicious agent can send that key over the network. Output filtering cannot prevent this.
+The CI workflow prevents accidental leakage into the public log, summary, and artifacts.
+It also prevents the trusted harness from executing agent-controlled code or trusting agent-controlled values
+beyond validated JSON records and copied Git objects. A separate PID namespace hides host process environments.
+Mount boundaries prevent writes to the runner's code, tools, and publication files.
+
+Local macOS and Linux runs without `--container` keep the developer's current user.
+They do not publish to Actions and are not isolated from malicious code running under that same user.
+Use local mode only with trusted providers and disposable credentials.
+The local wrapper's scan and capture steps protect against accidental output leaks;
+they do not establish the CI container boundary.
+For the remaining malicious-agent risk, use manual `workflow_dispatch` only and add a required reviewer to the `real-provider` environment.
+Use a dedicated key with a low spending cap, set the budget input, and rotate the key after a suspicious run.
+
+After `pnpm build`, prove this boundary without paid calls:
+
+```sh
+node packages/factory/scripts/real-journey-e2e.mjs /path/to/new-fixture-proof
+```
+
+The fixture provider echoes a fake key, adds raw and encoded tool text, and attempts to write to Actions publication paths.
+The proof checks the final artifact, the scrubbed child environment, and the trusted summary writer.
+The existing local proof keeps six adversarial journeys and 58 publication checks.
+The Linux proof runs `python3 -I packages/factory/scripts/real-journey-separated-e2e.py <new-output>`
+after building the factory and `agentrun-journey:local` with `packages/factory/scripts/journey.Dockerfile`.
+Its mutation flags require the fixed fake key and are unavailable from the journey CLI.
+It then adds encoded leaks and unsafe files and checks that publication fails without printing the key.
+
+Observed cost for notes-ts: $0.26 to $0.83 per run. These are observed values, not a limit. `--budget` sets the limit.
