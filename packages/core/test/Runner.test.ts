@@ -26,7 +26,7 @@ import { vi } from "vitest"
 import { Agents } from "../src/Agents.js"
 import type { AgentInput } from "../src/domain/Agent.js"
 import type { AgentEvent } from "../src/domain/AgentEvent.js"
-import { AgentCrashed, AgentProtocolError, AgentSpawnError, ReportError } from "../src/domain/Errors.js"
+import { AgentCrashed, AgentProtocolError, AgentSpawnError, GitError, ReportError } from "../src/domain/Errors.js"
 import type { AgentError } from "../src/domain/Errors.js"
 import type { RunEvent } from "../src/domain/RunEvent.js"
 import { RunState } from "../src/domain/RunState.js"
@@ -694,9 +694,10 @@ const deadlineLayer = (
   concurrency = 1,
   append: Report["Service"]["append"] = () => Effect.void,
   spawnerLayer: Layer.Layer<ChildProcessSpawner.ChildProcessSpawner> = NodeServices.layer,
+  worktreesLayer: Layer.Layer<Worktrees> = clockWorktrees,
 ) =>
   testLayer(agents, concurrency).pipe(Layer.provide(Layer.mergeAll(
-    clockWorktrees,
+    worktreesLayer,
     Layer.succeed(Report, {
       lastEvent: () => Effect.succeed(Option.none()),
       append,
@@ -714,6 +715,92 @@ const deadlineLayer = (
 const crashed = new AgentCrashed({ agent: "claude-code", exitCode: 3, lastEvent: Option.none() })
 const limitedTask = (id = "first-task", stallMs = 1000, maxMs = 5000) =>
   new Task({ ...task(id), stallTimeout: Duration.millis(stallMs), maxDuration: Duration.millis(maxMs) })
+
+const delayedAcquisition = (delay: Effect.Effect<void, GitError>) =>
+  Layer.effect(
+    Worktrees,
+    Effect.map(Worktrees, (worktrees) => ({
+      ...worktrees,
+      acquire: (...args: Parameters<Worktrees["Service"]["acquire"]>) =>
+        delay.pipe(Effect.andThen(worktrees.acquire(...args))),
+    })),
+  ).pipe(Layer.provide(clockWorktrees))
+
+for (const outcome of ["success", "timeout", "cancel", "git failure"] as const) {
+  it.effect(`execution budget excludes slow acquisition (${outcome})`, () => {
+    let calls = 0
+    return Effect.gen(function*() {
+      const runner = yield* Runner
+      const store = yield* StateStore
+      const collector = yield* collect(runner)
+      const fiber = yield* Effect.forkChild(runner.run(runState([limitedTask()])))
+      yield* TestClock.adjust(5000)
+      assert.strictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id]?._tag, "running")
+      assert.strictEqual(calls, 0)
+      if (outcome === "cancel") {
+        yield* Fiber.interrupt(fiber)
+        yield* Fiber.join(collector)
+        assert.strictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id]?._tag, "interrupted")
+        yield* TestClock.adjust(10000)
+        assert.strictEqual(calls, 0)
+        return
+      }
+      yield* TestClock.adjust(5000)
+      if (outcome === "git failure") {
+        const result = yield* Fiber.join(fiber)
+        yield* Fiber.join(collector)
+        assert.deepStrictEqual(result.status[task().id], {
+          _tag: "failed",
+          attempt: 1,
+          reason: "GitError: fixture acquire exited 17: locked",
+        })
+        assert.strictEqual(calls, 0)
+        return
+      }
+      assert.strictEqual(calls, 1)
+      yield* TestClock.adjust(outcome === "success" ? 3000 : 4999)
+      if (outcome === "timeout") {
+        assert.strictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id]?._tag, "running")
+        yield* TestClock.adjust(1)
+      }
+      const result = yield* Fiber.join(fiber)
+      yield* Fiber.join(collector)
+      if (outcome === "success") {
+        assert.deepStrictEqual(result.status[task().id], { _tag: "succeeded", durationMs: 13000 })
+      } else {
+        assert.deepStrictEqual(result.status[task().id], {
+          _tag: "failed",
+          attempt: 1,
+          reason: "AgentTimedOut: Exceeded 5000ms",
+        })
+      }
+      assert.strictEqual(calls, 1)
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(deadlineLayer(
+        fakeAgents(() => {
+          calls++
+          const active = Stream.fromEffect(
+            Effect.sleep(500).pipe(Effect.as<AgentEvent>({ _tag: "Text", text: "alive" })),
+          ).pipe(Stream.repeat(Schedule.forever))
+          return outcome === "success"
+            ? active.pipe(Stream.take(6), Stream.concat(Stream.succeed(completed)))
+            : active
+        }),
+        1,
+        () => Effect.void,
+        NodeServices.layer,
+        delayedAcquisition(
+          Effect.sleep(10000).pipe(Effect.andThen(
+            outcome === "git failure"
+              ? Effect.fail(new GitError({ command: "fixture acquire", exitCode: 17, stderr: "locked" }))
+              : Effect.void,
+          )),
+        ),
+      )),
+    )
+  })
+}
 
 it.effect("retries twice within exponential jitter bounds and records runner retry events", () => {
   let calls = 0

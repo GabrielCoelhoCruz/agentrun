@@ -433,197 +433,204 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                     })
                   )))
               })
-              if (state.setup !== undefined && !options.setupInAgent && !setupDone) {
-                yield* setup(task.id, state.setup, worktree.path)
-                setupDone = true
-                yield* checkpoint(task.id, {
-                  ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
-                  phase: "unfinished",
-                  setupCompleted: true,
-                })
-              }
-              const adapter = agents.get(task.agent)
-              if (Option.isNone(adapter)) {
-                return yield* Effect.die(`Missing agent adapter: ${task.agent} for task ${task.id}`)
-              }
-              const execute = Effect.suspend(() =>
-                Effect.gen(function*() {
-                  adapterAttempt++
-                  attemptCost = undefined
+              return yield* Effect.gen(function*() {
+                if (state.setup !== undefined && !options.setupInAgent && !setupDone) {
+                  yield* setup(task.id, state.setup, worktree.path)
+                  setupDone = true
                   yield* checkpoint(task.id, {
                     ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
                     phase: "unfinished",
-                    adapterAttempt,
+                    setupCompleted: true,
                   })
-                  let lastEventAt = yield* Clock.currentTimeMillis
-                  const consume = adapter.value.run({
-                    taskId: task.id,
-                    ...(task.tools === undefined ? {} : { tools: task.tools }),
-                    loadProjectSettings: options.loadProjectSettings === true,
-                    ...(options.setupInAgent && state.setup !== undefined && !setupDone ? { setup: state.setup } : {}),
-                    setupCompleted: () =>
+                }
+                const adapter = agents.get(task.agent)
+                if (Option.isNone(adapter)) {
+                  return yield* Effect.die(`Missing agent adapter: ${task.agent} for task ${task.id}`)
+                }
+                const execute = Effect.suspend(() =>
+                  Effect.gen(function*() {
+                    adapterAttempt++
+                    attemptCost = undefined
+                    yield* checkpoint(task.id, {
+                      ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
+                      phase: "unfinished",
+                      adapterAttempt,
+                    })
+                    let lastEventAt = yield* Clock.currentTimeMillis
+                    const consume = adapter.value.run({
+                      taskId: task.id,
+                      ...(task.tools === undefined ? {} : { tools: task.tools }),
+                      loadProjectSettings: options.loadProjectSettings === true,
+                      ...(options.setupInAgent && state.setup !== undefined && !setupDone
+                        ? { setup: state.setup }
+                        : {}),
+                      setupCompleted: () =>
+                        Effect.gen(function*() {
+                          setupDone = true
+                          yield* checkpoint(task.id, {
+                            ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
+                            phase: "unfinished",
+                            setupCompleted: true,
+                          })
+                        }).pipe(Effect.mapError(spawnError)),
+                      registerProcess: (pgid, processToken) =>
+                        SynchronizedRef.updateEffect(current, (previous) => {
+                          const located = worktrees.locate(task.id)
+                          const next = new RunState({
+                            ...previous,
+                            worktrees: {
+                              ...previous.worktrees,
+                              [task.id]: { ...located, pgid, processToken },
+                            },
+                          })
+                          return store.save(next).pipe(Effect.as(next))
+                        }).pipe(Effect.mapError((cause) => spawnError(cause))),
+                      prompt: task.prompt,
+                      cwd: worktree.path,
+                      model: Option.fromUndefinedOr(task.model),
+                      maxTurns: Option.fromUndefinedOr(task.maxTurns),
+                      maxBudgetUsd: Option.fromUndefinedOr(remainingBudget()),
+                    }).pipe(
+                      Stream.tapError((error) =>
+                        isTaskError(error) && !retryable(error) ? recordFailure(task.id, error) : Effect.void
+                      ),
+                      Stream.rechunk(1),
+                      Stream.runFoldEffect(
+                        (): { readonly last: Option.Option<AgentEvent>; readonly costUsd: number | undefined } => ({
+                          last: Option.none(),
+                          costUsd: undefined,
+                        }),
+                        (summary, event) =>
+                          Effect.gen(function*() {
+                            lastEventAt = yield* Clock.currentTimeMillis
+                            if (event._tag === "ToolCall") {
+                              toolsStarted = true
+                              yield* checkpoint(task.id, {
+                                ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
+                                phase: "unfinished",
+                                toolsStarted: true,
+                                durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
+                              })
+                            }
+                            if (event._tag === "Usage" && event.costUsd !== undefined) {
+                              attemptCost = (summary.costUsd ?? 0) + event.costUsd
+                              const data = (yield* SynchronizedRef.get(current)).taskReports?.[task.id]
+                              yield* checkpoint(task.id, {
+                                ...data,
+                                phase: "unfinished",
+                                costUsd: (priorCost ?? 0) + attemptCost,
+                                durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
+                              })
+                            }
+                            if (event._tag === "Completed") {
+                              attemptCost = event.costUsd ?? summary.costUsd
+                              const costUsd = attemptCost === undefined && priorCost === undefined
+                                ? undefined
+                                : (priorCost ?? 0) + (attemptCost ?? 0)
+                              yield* checkpoint(task.id, {
+                                ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
+                                phase: "completed",
+                                pendingEvent: event,
+                                result: event.result,
+                                durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
+                                ...(costUsd === undefined ? {} : { costUsd }),
+                              })
+                            }
+                            if (event._tag === "Failed") {
+                              yield* checkpoint(task.id, {
+                                ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
+                                phase: "failed",
+                                pendingEvent: event,
+                                failureReason: `AgentTaskFailed: ${event.reason}`,
+                                durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
+                              })
+                            }
+                            yield* report.append(state, task.id, event)
+                            if (event._tag === "Completed" || event._tag === "Failed") {
+                              const data = (yield* SynchronizedRef.get(current)).taskReports?.[task.id]
+                              yield* checkpoint(task.id, {
+                                ...data,
+                                phase: event._tag === "Completed" ? "completed" : "failed",
+                                pendingEvent: undefined,
+                              })
+                            }
+                            yield* PubSub.publish(pubsub, { _tag: "TaskAgentEvent", taskId: task.id, event })
+                            if (event._tag === "Failed") {
+                              return yield* new AgentTaskFailed({ agent: task.agent, reason: event.reason })
+                            }
+                            return {
+                              last: Option.some(event),
+                              costUsd: event._tag === "Usage" && event.costUsd !== undefined
+                                ? (summary.costUsd ?? 0) + event.costUsd
+                                : summary.costUsd,
+                            }
+                          }),
+                      ),
+                    )
+                    const stalled = Effect.gen(function*() {
+                      while (true) {
+                        const remaining = Duration.toMillis(task.stallTimeout)
+                          - ((yield* Clock.currentTimeMillis) - lastEventAt)
+                        if (remaining <= 0) {
+                          return yield* terminal(new AgentStalled({ agent: task.agent, idleFor: task.stallTimeout }))
+                        }
+                        yield* Effect.sleep(remaining)
+                      }
+                    })
+                    return yield* Effect.raceFirst(consume, stalled)
+                  }).pipe(
+                    Effect.tapError((error) =>
+                      isTaskError(error) && !retryable(error) ? recordFailure(task.id, error) : Effect.void
+                    ),
+                  )
+                ).pipe(Effect.scoped)
+                const summary = yield* execute.pipe(
+                  Effect.retry({
+                    schedule: Schedule.exponential("1 second").pipe(Schedule.jittered, Schedule.upTo({ times: 2 })),
+                    while: (error) =>
                       Effect.gen(function*() {
-                        setupDone = true
+                        if (!isTaskError(error) || !retryable(error)) return false
+                        if (attemptCost !== undefined) priorCost = (priorCost ?? 0) + attemptCost
+                        // A crashed try that reported no cost may have spent any part of the budget.
+                        if (
+                          task.maxBudgetUsd !== undefined && error._tag === "AgentCrashed" && attemptCost === undefined
+                        ) {
+                          return false
+                        }
+                        budgetSpent = (remainingBudget() ?? 1) <= 0
+                        if (budgetSpent) return false
                         yield* checkpoint(task.id, {
                           ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
                           phase: "unfinished",
-                          setupCompleted: true,
+                          durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
                         })
-                      }).pipe(Effect.mapError(spawnError)),
-                    registerProcess: (pgid, processToken) =>
-                      SynchronizedRef.updateEffect(current, (previous) => {
-                        const located = worktrees.locate(task.id)
-                        const next = new RunState({
-                          ...previous,
-                          worktrees: {
-                            ...previous.worktrees,
-                            [task.id]: { ...located, pgid, processToken },
-                          },
-                        })
-                        return store.save(next).pipe(Effect.as(next))
-                      }).pipe(Effect.mapError((cause) => spawnError(cause))),
-                    prompt: task.prompt,
-                    cwd: worktree.path,
-                    model: Option.fromUndefinedOr(task.model),
-                    maxTurns: Option.fromUndefinedOr(task.maxTurns),
-                    maxBudgetUsd: Option.fromUndefinedOr(remainingBudget()),
-                  }).pipe(
-                    Stream.tapError((error) =>
-                      isTaskError(error) && !retryable(error) ? recordFailure(task.id, error) : Effect.void
-                    ),
-                    Stream.rechunk(1),
-                    Stream.runFoldEffect(
-                      (): { readonly last: Option.Option<AgentEvent>; readonly costUsd: number | undefined } => ({
-                        last: Option.none(),
-                        costUsd: undefined,
+                        const event: AgentEvent = {
+                          _tag: "Retry",
+                          source: "runner",
+                          attempt: adapterAttempt + 1,
+                          reason: `${error._tag}: ${detail(error)}`,
+                        }
+                        yield* report.append(state, task.id, event)
+                        yield* PubSub.publish(pubsub, { _tag: "TaskAgentEvent", taskId: task.id, event })
+                        return true
                       }),
-                      (summary, event) =>
-                        Effect.gen(function*() {
-                          lastEventAt = yield* Clock.currentTimeMillis
-                          if (event._tag === "ToolCall") {
-                            toolsStarted = true
-                            yield* checkpoint(task.id, {
-                              ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
-                              phase: "unfinished",
-                              toolsStarted: true,
-                              durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
-                            })
-                          }
-                          if (event._tag === "Usage" && event.costUsd !== undefined) {
-                            attemptCost = (summary.costUsd ?? 0) + event.costUsd
-                            const data = (yield* SynchronizedRef.get(current)).taskReports?.[task.id]
-                            yield* checkpoint(task.id, {
-                              ...data,
-                              phase: "unfinished",
-                              costUsd: (priorCost ?? 0) + attemptCost,
-                              durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
-                            })
-                          }
-                          if (event._tag === "Completed") {
-                            attemptCost = event.costUsd ?? summary.costUsd
-                            const costUsd = attemptCost === undefined && priorCost === undefined
-                              ? undefined
-                              : (priorCost ?? 0) + (attemptCost ?? 0)
-                            yield* checkpoint(task.id, {
-                              ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
-                              phase: "completed",
-                              pendingEvent: event,
-                              result: event.result,
-                              durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
-                              ...(costUsd === undefined ? {} : { costUsd }),
-                            })
-                          }
-                          if (event._tag === "Failed") {
-                            yield* checkpoint(task.id, {
-                              ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
-                              phase: "failed",
-                              pendingEvent: event,
-                              failureReason: `AgentTaskFailed: ${event.reason}`,
-                              durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
-                            })
-                          }
-                          yield* report.append(state, task.id, event)
-                          if (event._tag === "Completed" || event._tag === "Failed") {
-                            const data = (yield* SynchronizedRef.get(current)).taskReports?.[task.id]
-                            yield* checkpoint(task.id, {
-                              ...data,
-                              phase: event._tag === "Completed" ? "completed" : "failed",
-                              pendingEvent: undefined,
-                            })
-                          }
-                          yield* PubSub.publish(pubsub, { _tag: "TaskAgentEvent", taskId: task.id, event })
-                          if (event._tag === "Failed") {
-                            return yield* new AgentTaskFailed({ agent: task.agent, reason: event.reason })
-                          }
-                          return {
-                            last: Option.some(event),
-                            costUsd: event._tag === "Usage" && event.costUsd !== undefined
-                              ? (summary.costUsd ?? 0) + event.costUsd
-                              : summary.costUsd,
-                          }
-                        }),
-                    ),
-                  )
-                  const stalled = Effect.gen(function*() {
-                    while (true) {
-                      const remaining = Duration.toMillis(task.stallTimeout)
-                        - ((yield* Clock.currentTimeMillis) - lastEventAt)
-                      if (remaining <= 0) {
-                        return yield* terminal(new AgentStalled({ agent: task.agent, idleFor: task.stallTimeout }))
-                      }
-                      yield* Effect.sleep(remaining)
-                    }
-                  })
-                  return yield* Effect.raceFirst(consume, stalled)
-                }).pipe(Effect.tapError((error) =>
-                  isTaskError(error) && !retryable(error) ? recordFailure(task.id, error) : Effect.void
-                ))
-              ).pipe(Effect.scoped)
-              const summary = yield* execute.pipe(
-                Effect.retry({
-                  schedule: Schedule.exponential("1 second").pipe(Schedule.jittered, Schedule.upTo({ times: 2 })),
-                  while: (error) =>
-                    Effect.gen(function*() {
-                      if (!isTaskError(error) || !retryable(error)) return false
-                      if (attemptCost !== undefined) priorCost = (priorCost ?? 0) + attemptCost
-                      // A crashed try that reported no cost may have spent any part of the budget.
-                      if (
-                        task.maxBudgetUsd !== undefined && error._tag === "AgentCrashed" && attemptCost === undefined
-                      ) {
-                        return false
-                      }
-                      budgetSpent = (remainingBudget() ?? 1) <= 0
-                      if (budgetSpent) return false
-                      yield* checkpoint(task.id, {
-                        ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
-                        phase: "unfinished",
-                        durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
-                      })
-                      const event: AgentEvent = {
-                        _tag: "Retry",
-                        source: "runner",
-                        attempt: adapterAttempt + 1,
-                        reason: `${error._tag}: ${detail(error)}`,
-                      }
-                      yield* report.append(state, task.id, event)
-                      yield* PubSub.publish(pubsub, { _tag: "TaskAgentEvent", taskId: task.id, event })
-                      return true
-                    }),
-                }),
-                Effect.mapError((error) =>
-                  budgetSpent ? new AgentTaskFailed({ agent: task.agent, reason: "error_max_budget_usd" }) : error
+                  }),
+                  Effect.mapError((error) =>
+                    budgetSpent ? new AgentTaskFailed({ agent: task.agent, reason: "error_max_budget_usd" }) : error
+                  ),
+                )
+                if (Option.isNone(summary.last) || summary.last.value._tag !== "Completed") {
+                  return yield* Effect.die(`Adapter ${task.agent} ended the stream without Completed or Failed`)
+                }
+                yield* deliver(task)
+              }).pipe(
+                Effect.raceFirst(
+                  Effect.sleep(task.maxDuration).pipe(
+                    Effect.andThen(terminal(new AgentTimedOut({ agent: task.agent, after: task.maxDuration }))),
+                  ),
                 ),
               )
-              if (Option.isNone(summary.last) || summary.last.value._tag !== "Completed") {
-                return yield* Effect.die(`Adapter ${task.agent} ended the stream without Completed or Failed`)
-              }
-              yield* deliver(task)
             }).pipe(
-              Effect.raceFirst(
-                Effect.sleep(task.maxDuration).pipe(
-                  Effect.andThen(terminal(new AgentTimedOut({ agent: task.agent, after: task.maxDuration }))),
-                ),
-              ),
               Effect.tapError((error) => isTaskError(error) ? recordFailure(task.id, error) : Effect.void),
             ),
           ).pipe(Effect.onExit((exit) =>

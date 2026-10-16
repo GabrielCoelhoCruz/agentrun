@@ -48,7 +48,7 @@ Recovery has these boundaries:
 - An existing valid state and matching reservation belong to `resume <id>`, even if every task is pending.
 - A live owner blocks another execution. A report can still describe completed work.
 - A reservation without valid state blocks automatic dispatch and resume. Preserve it for inspection and use a different ID for new work.
-- Git can create a branch or workspace before a failed `post-checkout` hook, checkout or LFS error, Git timeout, or task deadline.
+- Git can create a branch or workspace before a failed `post-checkout` hook, checkout or LFS error, Git timeout, or external cancellation.
   Resume requires a matching record, the exact base tip, and the single expected creation history entry.
   Recovery of an existing workspace also requires the expected Git identity and clean status including ignored files.
   Pending proof cannot distinguish hook output from later user files. Such files remain refused after a crash.

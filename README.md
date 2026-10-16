@@ -102,7 +102,7 @@ If both versions have touched the repository, inspect the histories before furth
 
 A creation receipt is the record that binds a run to its workspace and branch name.
 Git can create a branch or workspace and then fail.
-Triggers include a failed `post-checkout` hook, checkout or Git LFS errors, the sixty-second Git limit, and the task deadline.
+Triggers include a failed `post-checkout` hook, checkout or Git LFS errors, the sixty-second Git limit, and external cancellation.
 A pending receipt records the expected owner, path, branch and base before Git starts.
 Both receipt kinds are published from a complete temporary file through an exclusive link.
 A stop during writing cannot expose an empty or partial pending record.
@@ -185,7 +185,7 @@ Press Ctrl-C once to save interruption and clean up owned processes. The interru
 
 Transient spawn errors and crashes before the first tool call get at most three attempts, with jitter around one-second and two-second delays. Storage failures, provider task failures, protocol errors, setup errors, stall timeouts, and task deadlines do not automatically retry. Use `resume --retry-failed` only after inspecting the failure.
 
-Defaults are two concurrent tasks, five minutes without events, and sixty minutes per task. `maxDuration` covers acquisition, setup, provider attempts, backoff, and delivery. It starts cancellation; it does not bound total exit time. Cleanup retains the task permit and can take longer. Each Git command has a separate sixty-second limit.
+Defaults are two concurrent tasks, five minutes without events, and sixty minutes per task. `maxDuration` starts after worktree acquisition and covers setup, provider attempts, backoff, and delivery. Reported task duration also includes acquisition. It starts cancellation; it does not bound total exit time. Cleanup retains the task permit and can take longer. Each Git command has a separate sixty-second limit.
 
 ## Deliverables and limits
 
