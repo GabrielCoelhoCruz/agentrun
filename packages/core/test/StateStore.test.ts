@@ -55,6 +55,22 @@ it.live("reports an unknown id", () =>
       assert.strictEqual((yield* Effect.flip((yield* StateStore).load("unknown")))._tag, "RunNotFound")
     })
   ))
+it.live("loads complete state during concurrent atomic saves", () =>
+  testFile((repoRoot) =>
+    Effect.gen(function*() {
+      const store = yield* StateStore
+      const saved = state(repoRoot)
+      yield* store.save(saved)
+      const [, reads] = yield* Effect.all([
+        Effect.forEach(Array.from({ length: 512 }), () => store.save(saved)),
+        Effect.forEach(Array.from({ length: 256 }), () => store.load(saved.runId).pipe(Effect.result)),
+      ], { concurrency: 2 })
+      assert.strictEqual(reads.filter((result) => result._tag === "Failure").length, 0)
+      for (const result of reads) {
+        if (result._tag === "Success") assert.deepStrictEqual(result.success, saved)
+      }
+    })
+  ))
 for (const content of ["{\"version\":2}", "{broken"]) {
   it.live(`reports corrupt state ${content}`, () =>
     testFile((repoRoot) =>

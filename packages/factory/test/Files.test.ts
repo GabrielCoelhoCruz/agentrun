@@ -1,10 +1,20 @@
+import { Effect } from "effect"
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { expect, test } from "vitest"
-import { inside, readBytes, writeExclusive } from "../src/Files.js"
+import { inside, io, readBytes, writeExclusive } from "../src/Files.js"
+
+test("missing records retain the caller's error code", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-missing-record-"))
+  const file = join(directory, "owner.json")
+  await expect(Effect.runPromise(io("executor-ownership", () => readBytes(file)))).rejects.toThrow(
+    expect.objectContaining({ code: "executor-ownership" }),
+  )
+  expect(existsSync(file)).toBe(false)
+})
 
 test.each([false, true])(
   "exclusive retry preserves pre-existing temporary files (published: %s)",

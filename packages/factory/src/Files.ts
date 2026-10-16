@@ -39,7 +39,11 @@ export const readBytes = async (file: string, maximum = 16 * 1024 * 1024): Promi
   if (temporaryPath(file)) throw failure("artifact", `Cannot read a temporary artifact: ${file}`)
   return Effect.runPromise(
     OwnershipRecords.readBytes(file, maximum).pipe(
-      Effect.mapError(() => failure("artifact", `Expected a stable regular file of at most ${maximum} bytes: ${file}`)),
+      Effect.mapError((error) =>
+        error.code === "ENOENT"
+          ? Object.assign(new Error(`ENOENT: no such file: ${file}`), { code: "ENOENT" })
+          : failure("artifact", `Expected a stable regular file of at most ${maximum} bytes: ${file}`)
+      ),
     ),
   )
 }

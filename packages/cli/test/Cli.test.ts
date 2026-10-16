@@ -1791,24 +1791,29 @@ test("resume verifies the identity reloaded under the owner lock", async () => {
   writeFileSync(
     join(f.root, "crash.cjs"),
     `
-const fs = require('node:fs'); const original = fs.readFile; let reads = 0;
-const { syncBuiltinESMExports } = require('node:module');
-fs.readFile = function(...args) {
-  const callback = args.pop();
-  return original.call(this, ...args, (error, value) => {
-    if (!error && String(args[0]).endsWith('/${id}/state.json') && ++reads === 2) {
-      const saved = JSON.parse(value); saved.runId = 'different-c3d4';
-      const text = JSON.stringify(saved); value = Buffer.isBuffer(value) ? Buffer.from(text) : text;
-    }
-    callback(error, value);
-  });
+const fs = require('node:fs'); const original = fs.promises.open; let reads = 0;
+fs.promises.open = async function(...args) {
+  const handle = await original.apply(this, args);
+  if (String(args[0]).endsWith('/${id}/state.json') && ++reads === 2) {
+    const read = handle.read.bind(handle);
+    handle.read = async function(buffer, offset, ...rest) {
+      const result = await read(buffer, offset, ...rest);
+      if (result.bytesRead > 0) {
+        const text = buffer.toString('utf8', offset, offset + result.bytesRead);
+        buffer.write(text.replace('"${id}"', '"otherx-c3d4"'), offset);
+        fs.writeFileSync(process.env.TEST_RECORDS + '/identity-injected', 'second state read');
+      }
+      return result;
+    };
+  }
+  return handle;
 };
-syncBuiltinESMExports();
 `,
   )
   const c = child(f, ["resume", id, "--json"])
   expect(await c.done).toBe(2)
   expect(c.stderr()).toContain("identity differs")
+  expect(readFileSync(join(f.root, "identity-injected"), "utf8")).toBe("second state read")
   expect(readFileSync(statePath(f))).toEqual(before)
   expect(starts(f)).toBe(1)
 }, 30000)
