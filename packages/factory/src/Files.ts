@@ -1,3 +1,4 @@
+import { OwnershipRecords } from "@agentrun/core"
 import { Effect, Schema } from "effect"
 import { execFile } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
@@ -10,7 +11,6 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
@@ -27,23 +27,27 @@ export const canonical = (value: unknown): string =>
     typeof entry === "object" && entry !== null && !Array.isArray(entry)
       ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
       : entry)
-export const io = <A>(code: string, operation: () => A) =>
-  Effect.try({
-    try: operation,
+export const io = <A>(code: string, operation: () => A | Promise<A>) =>
+  Effect.tryPromise({
+    try: async (): Promise<A> => operation(),
     catch: (cause) =>
       cause instanceof FactoryError
         ? cause
         : failure(code, `${code}: ${cause instanceof Error ? cause.message : String(cause)}`),
   })
-export const readBytes = (file: string, maximum = 16 * 1024 * 1024): Buffer => {
+export const readBytes = async (file: string, maximum = 16 * 1024 * 1024): Promise<Buffer> => {
   if (temporaryPath(file)) throw failure("artifact", `Cannot read a temporary artifact: ${file}`)
-  const stat = lstatSync(file)
-  if (!stat.isFile() || stat.size > maximum) {
-    throw failure("artifact", `Expected a regular file of at most ${maximum} bytes: ${file}`)
-  }
-  return readFileSync(file)
+  return Effect.runPromise(
+    OwnershipRecords.readBytes(file, maximum).pipe(
+      Effect.mapError((error) =>
+        error.code === "ENOENT"
+          ? Object.assign(new Error(`ENOENT: no such file: ${file}`), { code: "ENOENT" })
+          : failure("artifact", `Expected a stable regular file of at most ${maximum} bytes: ${file}`)
+      ),
+    ),
+  )
 }
-export const readJson = (file: string): unknown => JSON.parse(readBytes(file).toString("utf8"))
+export const readJson = async (file: string): Promise<unknown> => JSON.parse((await readBytes(file)).toString("utf8"))
 export const syncDirectory = (directory: string) => {
   const fd = openSync(directory, constants.O_RDONLY)
   try {
@@ -71,14 +75,15 @@ export const safePath = (root: string, file: string) => {
   return target
 }
 // Publishes complete bytes only: link never replaces an existing file. Crashed writers' temporary files stay unreadable.
-export const writeExclusive = (file: string, bytes: string | Uint8Array, root = dirname(file)) => {
+export const writeExclusive = async (file: string, bytes: string | Uint8Array, root = dirname(file)) => {
   safePath(root, file)
   const directory = dirname(file)
-  const accept = () => {
+  const accept = async () => {
     safePath(root, file)
-    if (sha256(readBytes(file, 64 * 1024 * 1024)) !== sha256(bytes)) {
+    if (sha256(await readBytes(file, 64 * 1024 * 1024)) !== sha256(bytes)) {
       throw failure("artifact", `Existing artifact differs; preserve and inspect: ${file}`)
     }
+    safePath(root, file)
     syncDirectory(directory)
   }
   if (existsSync(file)) return accept()

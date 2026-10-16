@@ -375,11 +375,11 @@ const exportLocal = (store: Store) =>
     const prepared = state.exportPrepared
     if (prepared === undefined) return yield* failure("export", "Export preparation is missing")
     const owner = JSON.stringify({ workflow: state.run.id, manifestDigest: prepared.receipt.manifestDigest })
-    yield* io("export", () => {
+    yield* io("export", async () => {
       const directory = safePath(store.directory, prepared.receipt.directory)
       if (!existsSync(directory)) {
         const staging = join(store.directory, "export-staging")
-        writeExclusive(join(staging, "owner.json"), owner, store.directory)
+        await writeExclusive(join(staging, "owner.json"), owner, store.directory)
         mkdirSync(safePath(store.directory, join(store.directory, "exports")), { recursive: true, mode: 0o700 })
         safePath(store.directory, staging)
         safePath(store.directory, directory)
@@ -390,7 +390,7 @@ const exportLocal = (store: Store) =>
       const receipt = safePath(store.directory, join(directory, "owner.json"))
       if (
         !existsSync(receipt)
-        || readBytes(receipt).toString("utf8") !== owner
+        || (await readBytes(receipt)).toString("utf8") !== owner
       ) throw failure("export", "Existing export has no matching owner receipt. Preserve and inspect it.")
     })
     for (const file of [...prepared.files, { name: "manifest.json", digest: prepared.receipt.manifestDigest }]) {

@@ -216,7 +216,8 @@ const inspectExecutor = (store: Store, run: WorkflowRun, attempt: AgentAttempt) 
       }
       return undefined
     }
-    const owner = yield* io("executor-ownership", () => readBytes(join(reservation, "owner.json")).toString("utf8"))
+    const owner = yield* io("executor-ownership", async () =>
+      (await readBytes(join(reservation, "owner.json"))).toString("utf8"))
     if (
       owner !== JSON.stringify({ version: 1, runId: attempt.executorRunId, repoRoot: run.repoRoot })
     ) {
@@ -232,7 +233,9 @@ const inspectExecutor = (store: Store, run: WorkflowRun, attempt: AgentAttempt) 
     )
     const taskContent = Buffer.from(yield* store.artifact(attempt.taskArtifact)).toString("utf8")
     const expected = yield* TaskFile.parse({ path: "prepared task", content: taskContent, capabilities }).pipe(
-      Effect.mapError(() => failure("executor-state", "Prepared task is invalid")),
+      Effect.mapError(() =>
+        failure("executor-state", "Prepared task is invalid")
+      ),
     )
     const encode = Schema.encodeSync(Schema.toCodecJson(Task))
     if (
@@ -579,8 +582,8 @@ export const executeCheck = (store: Store, state: Projection, current: AttemptSt
           return yield* failure("check-producer", "Candidate changed an approved check producer")
         }
       }
-      yield* io("check-producer", () => {
-        if (sha256(readBytes(attempt.command.argv[0], 256 * 1024 * 1024)) !== environment.executableHash) {
+      yield* io("check-producer", async () => {
+        if (sha256(await readBytes(attempt.command.argv[0], 256 * 1024 * 1024)) !== environment.executableHash) {
           throw failure("check-producer", "Approved check executable changed")
         }
         const root = realpathSync(workspace.path)

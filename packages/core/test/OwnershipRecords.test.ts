@@ -127,6 +127,30 @@ const instrument = (action: (handle: Awaited<ReturnType<typeof fs.open>>) => voi
     return handle
   })
 }
+for (const phase of ["before-open", "during-read"] as const) {
+  test(`bounded bytes accept atomic replacement ${phase}`, async () => {
+    const replacement = join(directory, "replacement")
+    await fs.writeFile(replacement, "new bytes")
+    if (phase === "before-open") {
+      const open = fs.open.bind(fs)
+      vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+        await fs.rename(replacement, file)
+        return open(...args)
+      })
+    } else {
+      instrument((handle) => {
+        const read = handle.read.bind(handle)
+        vi.spyOn(handle, "read").mockImplementationOnce(async (...args: any[]) => {
+          await fs.rename(replacement, file)
+          return read(...args as Parameters<typeof read>)
+        })
+      })
+    }
+    expect((await Effect.runPromise(OwnershipRecords.readBytes(file))).toString()).toBe(
+      phase === "before-open" ? "new bytes" : expected,
+    )
+  })
+}
 test("handles short reads in the same fixed buffer and closes on success", async () => {
   let closed = 0
   const buffers = new Set<unknown>()
