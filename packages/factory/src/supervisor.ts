@@ -4,7 +4,7 @@ import { closeSync, openSync } from "node:fs"
 import { join } from "node:path"
 import { failure, ProcessResult } from "./Domain.js"
 import { io, sha256, writeExclusive } from "./Files.js"
-import { Launch } from "./Processes.js"
+import { Launch, stopGraceMs } from "./Processes.js"
 
 let running = false
 let complete = false
@@ -64,15 +64,30 @@ const serve = Effect.gen(function*() {
       spawn(launch.command.argv[0], launch.command.argv.slice(1), {
         cwd: launch.command.cwd,
         env: process.env,
+        detached: true,
         stdio: ["ignore", files.stdout, files.stderr],
       }))
+    // The command leads its own group, so a timeout signal never reaches this supervisor.
+    const signalCommand = (signal: NodeJS.Signals | 0) => {
+      if (child.pid === undefined) return false
+      try {
+        process.kill(-child.pid, signal)
+        return true
+      } catch {
+        return false
+      }
+    }
     let timedOut = false
+    let killAt = 0
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const terminate = () => {
+      killAt = Date.now() + stopGraceMs
+      signalCommand("SIGTERM")
+      killTimer = setTimeout(() => signalCommand("SIGKILL"), stopGraceMs)
+    }
     const timer = setTimeout(() => {
       timedOut = true
-      process.kill(-process.pid, "SIGTERM")
-      setTimeout(() => {
-        if (!complete) process.kill(-process.pid, "SIGKILL")
-      }, 2000).unref()
+      terminate()
     }, launch.timeoutMs)
     const result = yield* Effect.callback<{ exitCode: number | null; signal: string | null }, never>((resume) => {
       child.once("error", () => resume(Effect.succeed({ exitCode: -1, signal: null })))
@@ -81,6 +96,12 @@ const serve = Effect.gen(function*() {
         (exitCode, signal) => resume(Effect.succeed({ exitCode, signal: timedOut ? "TIMEOUT" : signal })),
       )
     }).pipe(Effect.ensuring(Effect.sync(() => clearTimeout(timer))))
+    // Processes left in the command's group stop before the receipt is written.
+    if (signalCommand(0)) {
+      if (killAt === 0) terminate()
+      while (signalCommand(0) && Date.now() < killAt + 2000) yield* Effect.sleep("50 millis")
+    }
+    clearTimeout(killTimer)
     return result
   }))
   const terminal: ProcessResult = {

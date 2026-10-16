@@ -1179,6 +1179,18 @@ ${boundary.endsWith("exit") ? "exit 23" : "exec node -e 'setInterval(()=>{},1000
     assertExited(check.pid)
     assertExited(check.child)
   })
+  await scenario("check-timeout-stubborn", async () => {
+    const c = setup("check-timeout-stubborn", "happy", (p) => {
+      p.checks[0].timeoutMs = 500
+    }, "timeout-stubborn")
+    assertBlocked(c.start(1), /result is missing/i)
+    const check = activeCheck(c)
+    assert.ok(check, "The timed-out check must have actually started")
+    const receipts = c.events().filter((event) => event.fact._tag === "ProcessCompleted")
+    assert.equal(receipts.at(-1)?.fact.result.signal, "TIMEOUT", JSON.stringify(receipts))
+    assertExited(check.pid)
+    assertExited(check.child)
+  })
   await scenario("fabricated-result", async () => {
     const c = setup("fabricated-result", "happy", () => {}, "record")
     const running = c.startAsync({ FACTORY_FIXTURE_CRASH: "AttemptPrepared", FACTORY_FIXTURE_CRASH_KIND: "check" })

@@ -10,6 +10,8 @@ import type { AttemptState, OwnedProcess } from "./Domain.js"
 import { io, readBytes, readJson, sha256 } from "./Files.js"
 import { blob, Store } from "./Store.js"
 
+// Longer than an executor needs to stop its own workers after SIGTERM.
+export const stopGraceMs = 10000
 export const Launch = Schema.Struct({
   attemptId: Id,
   token: Schema.String,
@@ -136,7 +138,7 @@ export const runProcess = (
         yield* Effect.sleep("50 millis")
       }
     })).pipe(Effect.timeoutOrElse({
-      duration: timeoutMs + 10000,
+      duration: timeoutMs + stopGraceMs + 10000,
       orElse: () =>
         Effect.fail(
           failure(

@@ -45,6 +45,17 @@ test("production CLI starts a second workflow beside the executor state", async 
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
 }, scenarioBudgetMs + 5000)
 
+test("production CLI records a timeout for a check that stops slowly", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-check-timeout-stubborn-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    "check-timeout-stubborn",
+  ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+}, scenarioBudgetMs + 5000)
+
 test("factory driver lists the complete installed matrix without running journeys", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-journey-list-"))
   const result = await promisify(execFile)(process.execPath, [
