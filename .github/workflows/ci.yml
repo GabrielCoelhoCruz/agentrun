@@ -97,11 +97,12 @@ jobs:
           path: ${{ runner.temp }}/factory-installed-proof.tar.gz
           if-no-files-found: warn
 
-  separated-user-proof:
+  container-proof:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"
+      PATH: /usr/sbin:/usr/bin:/sbin:/bin
     steps:
       - uses: actions/checkout@v7
         with:
@@ -110,33 +111,37 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - name: Prepare unprivileged fixture user
-        run: bash packages/factory/scripts/prepare-journey-user.sh
-      - name: Prove agent cannot alter the harness or publication
-        run: python3 packages/factory/scripts/real-journey-separated-e2e.py "$RUNNER_TEMP/separated-user-proof" agentrun-agent
-      - name: Stop fixture user before saving evidence
+          node-version: "24.21.0"
+      - name: Install and build trusted factory
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/sudo /usr/bin/ln -sf /opt/hostedtoolcache/node/24.21.0/x64/bin/node /usr/bin/node
+          /usr/bin/node /home/runner/setup-pnpm/node_modules/pnpm/bin/pnpm.cjs install --frozen-lockfile
+          /usr/bin/node /home/runner/setup-pnpm/node_modules/pnpm/bin/pnpm.cjs -r build
+      - name: Build agent image
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/docker build --file packages/factory/scripts/journey.Dockerfile --tag agentrun-journey:local .
+      - name: Prove each container boundary red and green
+        env:
+          AGENTRUN_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/python3 -I packages/factory/scripts/real-journey-separated-e2e.py "$RUNNER_TEMP/container-proof"
+      - name: Stop owned containers before saving evidence
         if: ${{ always() }}
         run: |
-          sudo pkill -KILL -u agentrun-agent || test "$?" -eq 1
-          status=0
-          pgrep -u agentrun-agent > /dev/null || status=$?
-          test "$status" -eq 1
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/python3 -I packages/factory/scripts/stop-journey-containers.py
       - name: Save fixture proof
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: separated-user-proof-${{ github.sha }}
+          name: container-proof-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/separated-user-proof/results.json
-            ${{ runner.temp }}/separated-user-proof/*/journey.log
-            ${{ runner.temp }}/separated-user-proof/*/providers.jsonl
-            ${{ runner.temp }}/separated-user-proof/*/public/*.json
-            ${{ runner.temp }}/separated-user-proof/*/public/*.txt
+            ${{ runner.temp }}/container-proof/results.json
+            ${{ runner.temp }}/container-proof/target.json
+            ${{ runner.temp }}/container-proof/journey/*.log
+            ${{ runner.temp }}/container-proof/journey/*/*.json
+            ${{ runner.temp }}/container-proof/journey/*/*.txt
           if-no-files-found: error

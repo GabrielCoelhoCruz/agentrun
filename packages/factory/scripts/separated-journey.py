@@ -1,4 +1,4 @@
-"""Trusted Linux harness. Provider and check code run under a different UID."""
+"""Trusted Linux harness. Agent and check code run only inside Docker."""
 
 import argparse
 import hashlib
@@ -6,13 +6,16 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import pwd
 import re
 import shutil
 import stat
 import subprocess
 import sys
-import time
+
+container_spec = importlib.util.spec_from_file_location("journey_container", Path(__file__).with_name("journey_container.py"))
+container_module = importlib.util.module_from_spec(container_spec)
+container_spec.loader.exec_module(container_module)
+Container = container_module.Container
 
 spec = importlib.util.spec_from_file_location("journey_evidence", Path(__file__).with_name("journey-evidence.py"))
 evidence = importlib.util.module_from_spec(spec)
@@ -43,7 +46,7 @@ def sha(value):
 
 def main():
     parser = argparse.ArgumentParser()
-    for name in ("factory", "out", "id", "agent-user"):
+    for name in ("factory", "out", "id"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--example", default="examples/factory/notes-ts")
     parser.add_argument("--check", default="")
@@ -51,9 +54,6 @@ def main():
     parser.add_argument("--budget", type=float, default=4)
     args = parser.parse_args()
     require(sys.platform == "linux")
-    account = pwd.getpwnam(args.agent_user)
-    uid = account.pw_uid
-    require(uid != 0 and uid != os.getuid())
     require(re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", args.id))
     factory = Path(args.factory).resolve()
     out = Path(args.out).absolute()
@@ -65,31 +65,12 @@ def main():
     work.chmod(0o755)
     agent = work / "agent"
     target = agent / "target"
-    tools = work / "tools"
-    control = work / "control"
-    for directory in (agent, tools, control):
-        directory.mkdir(mode=0o755)
-        directory.chmod(0o755)
-    helper = control / "journey-evidence.py"
-    shutil.copyfile(Path(__file__).with_name("journey-evidence.py"), helper)
-    helper.chmod(0o644)
-    # No provider-controlled PATH, Python imports, Node options, Git config or HOME
-    # are inherited by trusted commands. Every subprocess has closed extra FDs.
-    trusted_env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "LANG": "C.UTF-8",
+    agent.mkdir(mode=0o700)
+    trusted_env = {"PATH": container_module.PATH, "HOME": str(work), "LANG": "C.UTF-8",
                    "PYTHONDONTWRITEBYTECODE": "1", "GIT_CONFIG_NOSYSTEM": "1",
                    "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_LAZY_FETCH": "1"}
-    native_git = shutil.which("git", path=trusted_env["PATH"])
-    node = shutil.which("node", path=trusted_env["PATH"])
-    python = sys.executable
-    sudo = shutil.which("sudo", path=trusted_env["PATH"])
-    require(native_git and node and sudo)
-    # Resolve tools before the agent exists, then stop searching unrelated runner
-    # directories. A writable directory earlier in PATH must never replace chmod,
-    # pgrep, env, or a provider/check runtime after the provider has run.
-    trusted_env["PATH"] = os.pathsep.join(dict.fromkeys([
-        str(Path(node).parent), str(Path(python).parent), str(Path(native_git).parent),
-        str(Path(sudo).parent), "/usr/bin", "/bin",
-    ]))
+    native_git = "/usr/bin/git"
+    container = None
     records = ""
     states = {}
     channels = {}
@@ -108,55 +89,26 @@ def main():
         records += f"{name}={value}\n"
 
     def stop():
-        result = subprocess.run([sudo, "-n", "pkill", "-KILL", "-u", str(uid)], env=trusted_env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        require(result.returncode in (0, 1))
-        for _ in range(50):
-            result = subprocess.run(["pgrep", "-u", str(uid)], env=trusted_env,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if result.returncode == 1:
-                return
-            require(result.returncode == 0)
-            time.sleep(0.1)
-        raise RuntimeError("Agent processes remain")
+        if container is not None:
+            container.stop()
 
     def git(*argv):
         return trusted([native_git, "--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                         "-c", "core.attributesFile=/dev/null", "-c", "commit.gpgSign=false", "-c", "gc.auto=0",
                         "-c", "maintenance.auto=false", *map(str, argv)])
 
-    def run_agent(command, cwd, name, secret=True, extra=None):
-        env = {"HOME": str(agent / "home"), "TMPDIR": str(agent / "tmp"), "PATH": str(tools) + ":" + trusted_env["PATH"],
-               "LANG": "C.UTF-8", "USER": account.pw_name, "LOGNAME": account.pw_name,
-               "XDG_CONFIG_HOME": str(agent / "home/.config"), "XDG_CACHE_HOME": str(agent / "home/.cache"),
-               "CLAUDE_CONFIG_DIR": str(agent / "home/.claude"), "PI_CODING_AGENT_DIR": str(agent / "home/.pi"),
-               "PYTHONDONTWRITEBYTECODE": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
-               "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/dev/null",
-               "GIT_CONFIG_KEY_1": "core.fsmonitor", "GIT_CONFIG_VALUE_1": "false"}
-        if secret:
-            env["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
-            # Only the fixture proof enables trusted hooks. Paid runs set none.
-            if os.environ.get("FACTORY_JOURNEY_FIXTURE") == "1":
-                for key in ("NODE_OPTIONS", "FACTORY_FIXTURE_MODE", "FACTORY_FIXTURE_SOURCE", "FACTORY_FIXTURE_DURABLE",
-                            "FACTORY_FIXTURE_LOG", "FACTORY_FIXTURE_JOURNEY_ATTACK", "FACTORY_FIXTURE_FACTORY"):
-                    if key in os.environ:
-                        env[key] = os.environ[key]
-                env["FACTORY_FIXTURE_TARGET"] = str(target)
-        env.update(extra or {})
-        result = subprocess.run([sudo, "-n", "-u", account.pw_name, "env", "-i",
-                                 *[f"{key}={value}" for key, value in env.items()],
-                                 python, "-I", str(control / "agent-exec.py"), str(cwd), *command],
-                                env=trusted_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # Keep raw streams private; never execute or print their contents.
+    def run_agent(command, cwd, name, extra=None):
+        result = container.run(command, cwd, extra)
+        # Raw streams stay private. Paid output never reaches host logs.
         (work / name).write_bytes(evidence.redact(result.stdout))
         (work / (name + ".stderr")).write_bytes(evidence.redact(result.stderr))
-        if os.environ.get("FACTORY_JOURNEY_FIXTURE") == "1":
-            diagnostic = evidence.redact(result.stderr)
+        if os.environ.get("FACTORY_JOURNEY_FIXTURE") == "1" and result.returncode:
+            diagnostic = evidence.redact(result.stderr)[:4096]
             try:
                 evidence.check_secret(diagnostic)
             except evidence.EvidenceError:
-                diagnostic = b"Credential-bearing stderr withheld"
-            print(f"Fixture {name}: exit={result.returncode}; stderr={diagnostic[:4096].decode(errors='replace')!r}", file=sys.stderr)
+                diagnostic = b"Credential-bearing fixture stderr withheld"
+            print(f"Fixture {name}: exit={result.returncode}; stderr={diagnostic.decode(errors='replace')!r}", file=sys.stderr)
         return result.returncode if result.returncode >= 0 else 1
 
     try:
@@ -171,51 +123,10 @@ def main():
                 require(not path.is_symlink() and path.is_file() and path.stat().st_uid == os.getuid())
                 path.chmod(0o600)
                 channels[path] = path.read_bytes()
-        # Verify effective access as the agent, including real symlink targets
-        # and ancestors. This catches writable checkout parents and toolchains.
-        checkpoint = "permissions"
-        boundary = control / "boundary.py"
-        boundary.write_text('''import os, pathlib, sys
-for root in sys.argv[1:]:
-    paths = [pathlib.Path(root)]
-    if paths[0].is_dir():
-        paths += list(paths[0].rglob('*'))
-    for entry in paths:
-        resolved = entry.resolve()
-        for path in [resolved, *resolved.parents]:
-            try:
-                mode = path.stat().st_mode
-            except PermissionError:
-                continue
-            # Sticky world-writable ancestors cannot replace another user's entries.
-            sticky = path.is_dir() and mode & 0o1000 and path.stat().st_uid != os.getuid()
-            if os.access(path, os.W_OK) and not sticky:
-                print("Agent can write trusted path:", path, file=sys.stderr)
-                sys.exit(1)
-''')
-        boundary.chmod(0o644)
-        trusted([sudo, "-n", "-u", account.pw_name, "env", "-i", "PATH=" + trusted_env["PATH"],
-                 python, "-I", str(boundary), str(factory), node, native_git, python, sudo, str(control), str(tools),
-                 *map(str, channels)])
-        checkpoint = "sudo-authority"
-        # Agent must not have sudo authority, even through runner group membership.
-        result = subprocess.run([sudo, "-n", "-u", account.pw_name, sudo, "-n", "true"],
-                                env=trusted_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        require(result.returncode != 0)
-        require(subprocess.run(["pgrep", "-u", str(uid)], capture_output=True).returncode == 1)
         checkpoint = "setup"
-        trusted_values = {"nodeVersion": trusted([node, "-v"]).decode().strip(),
+        trusted_values = {"nodeVersion": None,
                           "pythonVersion": ".".join(map(str, sys.version_info[:3])),
                           "factoryHead": git("-C", factory, "rev-parse", "HEAD").decode().strip()}
-        launcher = control / "agent-exec.py"
-        launcher.write_text("import os, sys\nos.chdir(sys.argv[1])\nos.execvpe(sys.argv[2], sys.argv[2:], os.environ)\n")
-        launcher.chmod(0o644)
-        # Runner-owned shim is readable/executable but cannot be changed by agent.
-        shim = tools / "git"
-        import shlex
-        shim.write_text("#!/bin/sh\nexec " + shlex.quote(python) + " -I " + shlex.quote(str(helper)) +
-                        " git " + shlex.quote(native_git) + ' "$@"\n')
-        shim.chmod(0o755)
         example = Path(args.example)
         if not example.is_absolute():
             example = factory / example
@@ -233,14 +144,14 @@ for root in sys.argv[1:]:
         git("-C", target, "add", "-A")
         git("-C", target, "-c", "user.name=factory", "-c", "user.email=factory@localhost", "commit", "-qm", "chore: starter")
         base = git("-C", target, "rev-parse", "HEAD").decode().strip()
-        for directory in (agent / "home", agent / "tmp"):
-            directory.mkdir()
-        agent.chmod(0o700)
-        trusted([sudo, "-n", "chown", "-hR", f"{uid}:{account.pw_gid}", str(agent)])
-        bin_path = str(factory / "packages/factory/dist/bin.mjs")
+        container = Container(factory, work / "control", agent, os.environ)
+        container.start()
+        node = "/usr/local/bin/node"
+        trusted_values["nodeVersion"] = container.run([node, "-v"], "/work").stdout.decode().strip()
+        bin_path = "/factory/packages/factory/dist/bin.mjs"
         checkpoint = "factory-start"
         status = run_agent([node, bin_path, "start", "--profile", "factory.json", "--goal", args.goal,
-                            "--id", args.id, "--json"], target, "start.json")
+                            "--id", args.id, "--json"], "/work/target", "start.json")
         record("start", status)
         states["start.json"] = read_json(work / "start.json")
         state = states["start.json"]
@@ -257,22 +168,20 @@ for root in sys.argv[1:]:
         checkpoint = "decide"
         status = run_agent([node, bin_path, "decide", args.id, "--request", request_id, "--candidate", candidate,
                             "--evidence", evidence_digest, "--expected-version", str(version), "--action", "approve", "--json"],
-                           target, "decide.json")
+                           "/work/target", "decide.json")
         record("decide", status)
         require(status == 0)
         states["decide.json"] = read_json(work / "decide.json")
         require(states["decide.json"].get("stage") == "approved")
         checkpoint = "export"
-        status = run_agent([node, bin_path, "export", args.id, "--json"], target, "export.json")
+        status = run_agent([node, bin_path, "export", args.id, "--json"], "/work/target", "export.json")
         record("export", status)
         require(status == 0)
         states["export.json"] = read_json(work / "export.json")
         require(states["export.json"].get("stage") == "exported")
         checkpoint = "stop-and-copy"
-        # End the whole agent UID before any trusted read of its repository.
+        # Remove the whole PID namespace before reading agent repository bytes.
         stop()
-        trusted([sudo, "-n", "chown", "-hR", f"{os.getuid()}:{os.getgid()}", str(agent)])
-        trusted(["chmod", "-R", "u+rwX", str(agent)])
         objects = target / ".git/objects"
         require(not target.is_symlink() and not (target / ".git").is_symlink() and not objects.is_symlink())
         # Copy bytes only. Reject symlinks, alternates, special files and hardlinks;
@@ -333,13 +242,14 @@ for root in sys.argv[1:]:
         record("patch", "derived")
         for name in ("artifacts", "base-artifacts"):
             (verify / name).mkdir()
-        trusted([sudo, "-n", "chown", "-hR", f"{uid}:{account.pw_gid}", str(agent)])
+        container = Container(factory, work / "check-control", agent, {})
+        container.start(secret=False)
         checkpoint = "checks"
         for name, directory, commit, artifacts in [("independent-check", "src", candidate, "artifacts"),
                                                     ("negative-control", "base", base, "base-artifacts")]:
-            source = verify / directory
-            result = run_agent(check["argv"], source / check["cwd"], name + ".log", secret=False,
-                               extra={"FACTORY_ARTIFACT_DIR": str(verify / artifacts), "FACTORY_RESULT": str(verify / (name + ".json")),
+            source = Path("/work/verify") / directory
+            result = run_agent(check["argv"], str(source / check["cwd"]), name + ".log",
+                               extra={"FACTORY_ARTIFACT_DIR": "/work/verify/" + artifacts, "FACTORY_RESULT": "/work/verify/" + name + ".json",
                                       "FACTORY_ATTEMPT_ID": name, "FACTORY_CANDIDATE": commit, "FACTORY_CHECK_ID": check_id,
                                       "FACTORY_RUN_ID": args.id, "FACTORY_WORKSPACE": str(source)})
             record(name, result)
@@ -350,8 +260,6 @@ for root in sys.argv[1:]:
         # print exception messages, command arguments, or provider output.
         if os.environ.get("FACTORY_JOURNEY_FIXTURE") == "1":
             print(f"Fixture failure at {checkpoint}: {type(error).__name__}", file=sys.stderr)
-            if isinstance(error, subprocess.CalledProcessError) and checkpoint == "permissions":
-                print(error.stderr.decode(errors="replace"), file=sys.stderr)
         code = 1
     finally:
         stopped = False
@@ -380,9 +288,8 @@ for root in sys.argv[1:]:
                 (work / name).write_text(json.dumps(clean))
             evidence.summarize(work, out, code, records, locals().get("trusted_values", {}))
             evidence.write(out / "manifest-digests.json", json.dumps(manifest, indent=2) + "\n")
-            # Agent cannot write the parent or public directory. Root only removes
-            # this task's private tree, after its UID has no live processes.
-            trusted([sudo, "-n", "rm", "-rf", "--", str(work)])
+            # No agent process can change files during validation or cleanup.
+            shutil.rmtree(work)
             evidence.scan(out)
         except Exception:
             code = 1

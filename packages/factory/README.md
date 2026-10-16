@@ -204,28 +204,31 @@ Independent verification reads a fresh repository containing copied objects with
 It uses a private home directory and deletes the temporary repository, factory state, exports, and databases when it exits.
 Provider code can write raw data inside that temporary directory while the journey runs.
 
-The `Real provider journey` GitHub Actions workflow uses `--agent-user agentrun-agent` on Linux.
-Start it by hand from the Actions tab. The workflow creates a separate, unprivileged OS user for the agent.
-That user owns a private directory. The runner owns the checkout, built code, harness, helper, and Git shim.
-The workflow removes group and world write access from the checkout. The harness checks effective permissions,
-including symlink targets, toolchains, and parent directories, before starting the provider.
-The agent user has no sudo permission. Factory and check commands run through `sudo -u` and `env -i`
-with an explicit list of variables. Only factory commands receive the provider key.
-The harness closes extra file descriptors and captures both output streams.
-It stops every process owned by the agent user and verifies that none remain before importing Git objects.
+The `Real provider journey` GitHub Actions workflow uses `--container` on Linux.
+Start it by hand from the Actions tab. The workflow builds an image from official Node 24 and Python 3.12 images pinned by digest.
+Factory commands, provider code, and independent checks run as a non-root UID inside Docker.
+The root filesystem is read-only. Temporary files and HOME use tmpfs mounts.
+The container drops Linux capabilities, prevents privilege escalation, and limits processes to 256.
+Network access remains available for the provider.
+The container receives the key and an explicit list of environment variables. It receives no Actions variables or host PATH.
+Only the built factory and its dependencies are mounted read-only. One private work directory is mounted read-write.
+The source checkout, harness, host tools, Docker socket, and Actions command files are not mounted.
+The harness captures both streams privately and uses absolute host tools with a fixed system PATH.
+It removes the container and verifies removal before importing Git objects.
+This stops detached children as well as the main process.
 It rejects linked objects, alternates, special files, and candidate Git configuration.
 It validates JSON fields before using request IDs, versions, or commit hashes.
-It does not run factory code, helpers, checks, or Git tools from an agent-writable directory as the runner.
 
-In CI, independent checks run as the agent user on source rebuilt from the runner's copy of the Git objects.
-The check command comes from the original profile; the check files must match the starter.
-The public manifest describes the independently rebuilt source and patch. Its digests come from those bytes,
-rather than the agent's export receipt. Agent export paths and manifest digests are discarded.
-CI records `patch=derived`; local mode records `patch=equal` after comparing the export.
-The harness stops the agent user again after checks, including on failure.
-A separate workflow step verifies process cleanup before scanning or publishing.
-The Linux fixture job runs on pull requests without secrets. It tests the original tamper payload,
-checkout writes, ancestor environment reads, object links, and detached children.
+Independent checks run in a fresh container without the provider key.
+The runner rebuilds their source from copied Git objects with isolated Git configuration.
+The check command comes from the original profile; check files must match the starter.
+Published digests come from the independently rebuilt source and patch.
+Agent export paths and manifest digests are discarded. CI records `patch=derived`.
+A final workflow step removes containers labelled for this run and verifies removal before publication.
+The Linux fixture job uses a fake key. Each boundary probe runs intact, weakened, and intact again.
+It tests host tool writes, checkout writes, host process visibility, Actions file writes, and detached children.
+Positive controls run both examples through start, decision, export, and independent checks.
+The proof also rejects a corrupt public schema before restoring and accepting the valid record.
 It reads `ANTHROPIC_API_KEY` from the `real-provider` environment. Add a required reviewer to that environment before a paid run.
 Factory processes and their provider children do not receive Actions file-command paths, runtime tokens, or upload endpoints.
 Before upload, a separate step scans the final evidence and generates a fixed summary from the scanned result.
@@ -245,14 +248,14 @@ The agent under test must receive `ANTHROPIC_API_KEY` and has network access.
 A deliberately malicious agent can send that key over the network. Output filtering cannot prevent this.
 The CI workflow prevents accidental leakage into the public log, summary, and artifacts.
 It also prevents the trusted harness from executing agent-controlled code or trusting agent-controlled values
-beyond validated JSON records and copied Git objects. A separate OS user blocks reads of the runner's
-ancestor environment through `/proc` and writes to the runner's code and publication files.
+beyond validated JSON records and copied Git objects. A separate PID namespace hides host process environments.
+Mount boundaries prevent writes to the runner's code, tools, and publication files.
 
-Local macOS and Linux runs without `--agent-user` keep the developer's current user.
+Local macOS and Linux runs without `--container` keep the developer's current user.
 They do not publish to Actions and are not isolated from malicious code running under that same user.
 Use local mode only with trusted providers and disposable credentials.
 The local wrapper's scan and capture steps protect against accidental output leaks;
-they do not establish the CI user boundary.
+they do not establish the CI container boundary.
 For the remaining malicious-agent risk, use manual `workflow_dispatch` only and add a required reviewer to the `real-provider` environment.
 Use a dedicated key with a low spending cap, set the budget input, and rotate the key after a suspicious run.
 
@@ -265,8 +268,9 @@ node packages/factory/scripts/real-journey-e2e.mjs /path/to/new-fixture-proof
 The fixture provider echoes a fake key, adds raw and encoded tool text, and attempts to write to Actions publication paths.
 The proof checks the final artifact, the scrubbed child environment, and the trusted summary writer.
 The existing local proof keeps six adversarial journeys and 58 publication checks.
-The separate Linux proof runs `real-journey-separated-e2e.py <new-output> agentrun-agent`
-after the workflow creates the agent user and protects the checkout.
+The Linux proof runs `python3 -I packages/factory/scripts/real-journey-separated-e2e.py <new-output>`
+after building the factory and `agentrun-journey:local` with `packages/factory/scripts/journey.Dockerfile`.
+Its mutation flags require the fixed fake key and are unavailable from the journey CLI.
 It then adds encoded leaks and unsafe files and checks that publication fails without printing the key.
 
 Observed cost for notes-ts: $0.26 to $0.83 per run. These are observed values, not a limit. `--budget` sets the limit.

@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 60
     env:
       PYTHONDONTWRITEBYTECODE: "1"
+      PATH: /usr/sbin:/usr/bin:/sbin:/bin
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,34 +30,38 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version-file: .nvmrc
-          cache: pnpm
+          node-version: "24.21.0"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - name: Prepare unprivileged agent
-        run: bash packages/factory/scripts/prepare-journey-user.sh
+      - name: Install and build trusted factory
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/sudo /usr/bin/ln -sf /opt/hostedtoolcache/node/24.21.0/x64/bin/node /usr/bin/node
+          /usr/bin/node /home/runner/setup-pnpm/node_modules/pnpm/bin/pnpm.cjs install --frozen-lockfile
+          /usr/bin/node /home/runner/setup-pnpm/node_modules/pnpm/bin/pnpm.cjs -r build
+      - name: Build agent image
+        run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/docker build --file packages/factory/scripts/journey.Dockerfile --tag agentrun-journey:local .
       - name: Run journey
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EXAMPLE: ${{ inputs.example }}
           BUDGET: ${{ inputs.budget }}
         run: |
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
           [[ "$EXAMPLE" =~ ^[a-z0-9-]+$ ]] || { echo 'Invalid example'; exit 2; }
           [[ "$BUDGET" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo 'Invalid budget'; exit 2; }
-          bash packages/factory/scripts/real-journey.sh --factory "$GITHUB_WORKSPACE" \
+          /usr/bin/bash packages/factory/scripts/real-journey.sh --factory "$GITHUB_WORKSPACE" \
             --out "$RUNNER_TEMP/real-journey" --id "real-$GITHUB_RUN_ID" \
-            --example "examples/factory/$EXAMPLE" --budget "$BUDGET" --agent-user agentrun-agent
-      - name: Stop agent processes before publication
+            --example "examples/factory/$EXAMPLE" --budget "$BUDGET" --container
+      - name: Stop agent containers before publication
         id: stopped
         if: ${{ always() }}
         run: |
-          sudo pkill -KILL -u agentrun-agent || test "$?" -eq 1
-          status=0
-          pgrep -u agentrun-agent > /dev/null || status=$?
-          test "$status" -eq 1
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/python3 -I packages/factory/scripts/stop-journey-containers.py
           echo 'safe=true' >> "$GITHUB_OUTPUT"
       - name: Scan public evidence
         id: evidence
@@ -64,7 +69,8 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          python3 packages/factory/scripts/journey-evidence.py summary "$RUNNER_TEMP/real-journey" >> "$GITHUB_STEP_SUMMARY"
+          export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          /usr/bin/python3 -I packages/factory/scripts/journey-evidence.py summary "$RUNNER_TEMP/real-journey" >> "$GITHUB_STEP_SUMMARY"
           echo 'safe=true' >> "$GITHUB_OUTPUT"
       - name: Save public evidence
         if: ${{ always() && steps.evidence.outputs.safe == 'true' }}
