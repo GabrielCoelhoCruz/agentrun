@@ -8,8 +8,54 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  check:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+
+  # Test files run one at a time inside a job (maxWorkers: 1). The two slowest files get their own job;
+  # the rest job excludes exactly those two, so every test file runs in exactly one job.
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cli
+            args: packages/cli/test/Cli.test.ts
+          - name: factory-workflow
+            args: packages/factory/test/Workflow.test.ts
+          - name: rest
+            args: --exclude '**/Cli.test.ts' --exclude '**/Workflow.test.ts'
+    name: test (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run ${{ matrix.args }}
+
+  installed-proof:
     runs-on: ubuntu-latest
     env:
       PYTHONDONTWRITEBYTECODE: "1"
@@ -23,12 +69,11 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
       - run: pnpm build
       - name: Prove installed factory
         env:
-          AGENTRUN_CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-          AGENTRUN_CANDIDATE_BASE: ${{ github.event.pull_request.base.sha }}
+          AGENTRUN_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
+          AGENTRUN_PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
         run: node packages/factory/scripts/installed-e2e.mjs "$RUNNER_TEMP/factory-installed-proof"
       - name: Archive installed proof
         if: ${{ always() }}
