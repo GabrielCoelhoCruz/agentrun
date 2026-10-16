@@ -1,0 +1,60 @@
+name: Real provider journey
+
+on:
+  workflow_dispatch:
+    inputs:
+      example:
+        description: Example directory under examples/factory
+        type: string
+        default: notes-ts
+      budget:
+        description: Provider budget in USD
+        type: string
+        default: "4"
+
+permissions:
+  contents: read
+
+jobs:
+  journey:
+    runs-on: ubuntu-latest
+    environment: real-provider
+    timeout-minutes: 60
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run journey
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EXAMPLE: ${{ inputs.example }}
+          BUDGET: ${{ inputs.budget }}
+        run: |
+          [[ "$EXAMPLE" =~ ^[a-z0-9-]+$ ]] || { echo "invalid example: $EXAMPLE"; exit 2; }
+          [[ "$BUDGET" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "invalid budget: $BUDGET"; exit 2; }
+          bash packages/factory/scripts/real-journey.sh --factory "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/real-journey" --id "real-$GITHUB_RUN_ID" \
+            --example "examples/factory/$EXAMPLE" --budget "$BUDGET"
+      - name: Archive journey output
+        if: ${{ always() }}
+        run: |
+          if [ -d "$RUNNER_TEMP/real-journey" ]; then
+            tar -czf "$RUNNER_TEMP/real-journey.tar.gz" -C "$RUNNER_TEMP" real-journey
+          fi
+      - name: Save journey output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-journey-${{ github.run_id }}
+          path: ${{ runner.temp }}/real-journey.tar.gz
+          if-no-files-found: warn

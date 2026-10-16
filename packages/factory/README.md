@@ -160,3 +160,26 @@ node packages/factory/scripts/factory-e2e.mjs /path/to/installed/bin.mjs /path/t
 
 The driver uses deterministic SDK fixtures. It does not make paid provider calls.
 Each scenario saves commands, output, durable state, and artifacts. The exported TypeScript application repeats the restart journey from its delivered source.
+
+## Run a real-provider journey
+
+`scripts/real-journey.sh` repeats the TypeScript journey with the profile's real providers. These calls cost money.
+It copies an example into a new Git repository, starts the factory, approves the exact human request, and exports.
+It then compares `change.patch` with `git diff`, repeats the profile check on the exported `source.tar`, and runs the same check on the starter.
+The starter run must fail. The script prints the exit codes to `exits.txt` and ends with `RESULT PASS` or `RESULT FAIL`.
+
+On macOS or Linux, with Node 24 and Python 3 on `PATH` and provider authentication in the environment:
+
+```sh
+pnpm install --frozen-lockfile && pnpm build
+bash packages/factory/scripts/real-journey.sh --factory "$PWD" --out /path/to/new-output --id notes-real-001 --budget 4
+```
+
+`--example` selects another example directory, `--check` another profile check, and `--goal` another goal.
+The output directory also records the Node and Python versions and the factory commit.
+
+The `Real provider journey` GitHub Actions workflow runs the same script on Linux. Start it by hand from the Actions tab.
+It reads `ANTHROPIC_API_KEY` from the `real-provider` environment, so a required reviewer can approve each run before it spends.
+It saves the output directory as an artifact, also when the journey fails.
+
+Observed cost for notes-ts: $0.26 to $0.83 per run. These are observed values, not a limit. `--budget` sets the limit.
