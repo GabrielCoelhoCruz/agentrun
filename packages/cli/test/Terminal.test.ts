@@ -90,6 +90,16 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
         scenario === "interrupted" ? "interrupted" : scenario === "failed" ? "failed" : "succeeded",
       )
       if (scenario === "resume") expect(output).toContain("saved failure")
+      if (scenario === "resize") {
+        expect(readFileSync(join(root, "running.ansi"), "utf8")).toContain(
+          "task0 [running] Task 0 界 👩‍💻 long title for narrow terminals",
+        )
+        const finalLines = output.split("\x1b[?1049l")[1]?.replaceAll("\r", "").split("\n")
+        expect(finalLines?.slice(0, 2)).toEqual([
+          "agentrun: finished | 3/3 succee",
+          "task0 [succeeded] Task 0 界 ",
+        ])
+      }
     }
   }, harnessTimeoutMs + 5000)
 }
