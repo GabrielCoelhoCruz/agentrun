@@ -83,9 +83,14 @@ class Container:
             decoy = self.control / 'host-path'
             decoy.mkdir()
             options += ['--mount', f'type=bind,src={decoy},dst=/opt/pipx_bin']
-        for name in env:
-            options += ['--env', name]
-        result = subprocess.run(['/usr/bin/docker', *options, IMAGE], env={**self.env, **env}, capture_output=True)
+        for name, value in env.items():
+            # Keep the key out of argv. Other values belong only to the container;
+            # the host Docker client must retain its fixed PATH and private HOME.
+            options += ['--env', name if name == 'ANTHROPIC_API_KEY' else f'{name}={value}']
+        client_env = dict(self.env)
+        if secret:
+            client_env['ANTHROPIC_API_KEY'] = env['ANTHROPIC_API_KEY']
+        result = subprocess.run(['/usr/bin/docker', *options, IMAGE], env=client_env, capture_output=True)
         if result.returncode:
             raise RuntimeError('Cannot create agent container')
         self.started = True
