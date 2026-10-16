@@ -754,16 +754,16 @@ for (const outcome of ["success", "timeout", "cancel", "git failure", "hanging"]
         assert.strictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id]?._tag, "running")
         yield* TestClock.adjust(1)
       }
+      const result = yield* Fiber.join(fiber)
+      yield* Fiber.join(collector)
       if (outcome === "timeout" || outcome === "hanging") {
-        yield* Effect.yieldNow
-        assert.deepStrictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id], {
+        assert.deepStrictEqual(result.status[task().id], {
           _tag: "failed",
           attempt: 1,
           reason: "AgentTimedOut: Exceeded 5000ms",
         })
+        assert.deepStrictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id], result.status[task().id])
       }
-      const result = yield* Fiber.join(fiber)
-      yield* Fiber.join(collector)
       if (outcome === "success") {
         assert.deepStrictEqual(result.status[task().id], { _tag: "succeeded", durationMs: 4000 })
       } else if (outcome === "git failure") {
