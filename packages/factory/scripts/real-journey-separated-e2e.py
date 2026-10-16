@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import shlex
 import subprocess
 import sys
 
@@ -70,7 +71,15 @@ for attack in ["happy", "tamper", "checkout", "proc", "objects", "background"]:
     case.chmod(0o755)
     private = case / "agent-log"
     subprocess.run(["sudo", "install", "-d", "-m", "700", "-o", user, str(private)], check=True)
-    supplied = dict(os.environ, ANTHROPIC_API_KEY=key, NODE_OPTIONS="--import=" + hook.as_uri(),
+    writable_tools = case / "writable-tools"
+    writable_tools.mkdir()
+    writable_tools.chmod(0o755)
+    canary = writable_tools / "chmod"
+    canary.write_text("#!/bin/sh\nprintf 'PATH_INJECTION=executed\\n' >> " + shlex.quote(str(case / "GITHUB_ENV")) +
+                      "\nprintf 'executed\\n' > " + shlex.quote(str(case / "path-executed")) + '\nexec /usr/bin/chmod "$@"\n')
+    canary.chmod(0o755)
+    subprocess.run(["sudo", "chown", "-R", user, str(writable_tools)], check=True)
+    supplied = dict(os.environ, ANTHROPIC_API_KEY=key, PATH=str(writable_tools) + ":" + os.environ["PATH"], NODE_OPTIONS="--import=" + hook.as_uri(),
                     FACTORY_FIXTURE_MODE="happy", FACTORY_FIXTURE_SOURCE="server.ts",
                     FACTORY_FIXTURE_DURABLE=str(factory / "packages/factory/test/fixtures/server-durable.ts"),
                     FACTORY_FIXTURE_LOG=str(private / "providers.jsonl"),
@@ -97,6 +106,7 @@ for attack in ["happy", "tamper", "checkout", "proc", "objects", "background"]:
     checks = {"exit": run.returncode == expected,
               "fixed-log": run.stdout == ("RESULT PASS\n" if expected == 0 else "RESULT FAIL\n"),
               "no-key": key not in run.stdout + run.stderr and key.encode().hex() not in run.stdout + run.stderr,
+              "untrusted-path-not-executed": not (case / "path-executed").exists(),
               "probe-ran": '"kind":"attack-started"' in log,
               "processes-stopped": subprocess.run(["pgrep", "-u", str(uid)], capture_output=True).returncode == 1}
     for name, original in originals.items():

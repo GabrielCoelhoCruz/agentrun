@@ -83,6 +83,13 @@ def main():
     python = sys.executable
     sudo = shutil.which("sudo", path=trusted_env["PATH"])
     require(native_git and node and sudo)
+    # Resolve tools before the agent exists, then stop searching unrelated runner
+    # directories. A writable directory earlier in PATH must never replace chmod,
+    # pgrep, env, or a provider/check runtime after the provider has run.
+    trusted_env["PATH"] = os.pathsep.join(dict.fromkeys([
+        str(Path(node).parent), str(Path(python).parent), str(Path(native_git).parent),
+        str(Path(sudo).parent), "/usr/bin", "/bin",
+    ]))
     records = ""
     states = {}
     channels = {}
@@ -188,7 +195,7 @@ for root in sys.argv[1:]:
 ''')
         boundary.chmod(0o644)
         trusted([sudo, "-n", "-u", account.pw_name, "env", "-i", "PATH=" + trusted_env["PATH"],
-                 python, "-I", str(boundary), str(factory), node, native_git, python, str(control), str(tools),
+                 python, "-I", str(boundary), str(factory), node, native_git, python, sudo, str(control), str(tools),
                  *map(str, channels)])
         checkpoint = "sudo-authority"
         # Agent must not have sudo authority, even through runner group membership.
