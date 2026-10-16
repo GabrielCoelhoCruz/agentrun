@@ -125,6 +125,8 @@ A complete delivery is validated and reused. A proved completion checkpoint can 
 A reservation with missing state, missing creation proof, corrupt data, or an unknown tool outcome blocks automatic progress.
 Preserve those records and follow the status guidance. Do not remove corrupt state to make a workflow appear successful.
 
+File publication uses an exclusive temporary file and a hard link that cannot replace existing files. A retry accepts identical published bytes and refuses different bytes. Each writer removes only the temporary file it created. A crashed writer can leave a temporary file; readers reject temporary paths, and retries preserve these files. Export writes refuse symlinks within the run directory, including export and staging paths.
+
 Cancel records a request and checks current process ownership before sending signals. A cancelled attempt keeps its partial output.
 A saved PID alone is not ownership. Escaped daemons and hostile processes under the same OS account are outside this contract.
 

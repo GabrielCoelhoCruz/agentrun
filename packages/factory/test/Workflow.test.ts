@@ -9,6 +9,9 @@ import { expect, test } from "vitest"
 const scenarioBudgetMs = 300000 + 60000 + 60000
 
 test.each([
+  "export-preserves-user-partial",
+  "export-refuses-symlink-paths",
+  "export-refuses-symlink-staging",
   "foreign-export-owner",
   "missing-export-owner",
   "empty-export-owner",

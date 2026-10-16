@@ -9,7 +9,9 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs"
 import { dirname, join, resolve } from "node:path"
@@ -655,6 +657,59 @@ try {
       note(c, "ownership-proof", { ownership, directory, preserved: files })
     })
   }
+  await scenario("export-preserves-user-partial", async () => {
+    const c = setup("export-preserves-user-partial")
+    approve(c, c.start())
+    const exported = c.command(["export", c.id])
+    const directory = exported.export.directory
+    const userFile = join(directory, ".user-note.partial-0123456789abcdef")
+    writeFileSync(userFile, "user-owned bytes")
+    assert.equal(c.command(["export", c.id]).stage, "exported")
+    assert.equal(readFileSync(userFile, "utf8"), "user-owned bytes")
+    note(c, "user-file-proof", { userFile, preserved: true })
+  })
+  await scenario("export-refuses-symlink-paths", async () => {
+    const c = setup("export-refuses-symlink-paths")
+    approve(c, c.start())
+    const exported = c.command(["export", c.id])
+    const directory = exported.export.directory
+    const proof = []
+    for (const name of ["artifacts", "owner.json", "source.tar", ".", ".."]) {
+      const target = resolve(directory, name)
+      const outside = join(c.directory, `outside-${proof.length}`)
+      renameSync(target, outside)
+      symlinkSync(outside, target)
+      const digest = name === "artifacts"
+        ? readdirSync(outside).find((entry) => /^[a-f0-9]{64}$/.test(entry))
+        : undefined
+      const sentinel = digest === undefined ? undefined : join(outside, `.${digest}.partial-0123456789abcdef`)
+      if (sentinel !== undefined) writeFileSync(sentinel, "outside user bytes")
+      try {
+        const refused = c.run(process.execPath, [cli, "export", c.id, "--json"])
+        assert.equal(refused.code, 1, refused.stdout + refused.stderr)
+        assert.match(refused.stdout + refused.stderr, /symlink/i)
+        if (sentinel !== undefined) assert.equal(readFileSync(sentinel, "utf8"), "outside user bytes")
+        proof.push({ target, outside, code: refused.code, preserved: true })
+      } finally {
+        unlinkSync(target)
+        renameSync(outside, target)
+      }
+    }
+    assert.equal(c.command(["export", c.id]).stage, "exported")
+    note(c, "symlink-proof", proof)
+  })
+  await scenario("export-refuses-symlink-staging", async () => {
+    const c = setup("export-refuses-symlink-staging")
+    approve(c, c.start())
+    const outside = join(c.directory, "outside")
+    mkdirSync(outside)
+    symlinkSync(outside, join(c.stateDirectory, "export-staging"), "dir")
+    const refused = c.run(process.execPath, [cli, "export", c.id, "--json"])
+    assert.equal(refused.code, 1, refused.stdout + refused.stderr)
+    assert.match(refused.stdout + refused.stderr, /symlink/i)
+    assert.deepEqual(readdirSync(outside), [])
+    note(c, "staging-proof", { outside, code: refused.code, listed: readdirSync(outside) })
+  })
   for (const kind of ["task", "evidence"]) {
     await scenario(`crash-partial-${kind}`, async () => {
       const c = setup(`crash-partial-${kind}`)
@@ -673,9 +728,9 @@ try {
       const temporary = readdirSync(directory).filter((name) => /^\..+\.partial-[0-9a-f]{16}$/.test(name))
       assert.equal(temporary.length, 1)
       assertHuman(c.command(["resume", c.id]))
-      assert.deepEqual(readdirSync(directory).filter((name) => /^\..+\.partial-[0-9a-f]{16}$/.test(name)), [])
+      assert.deepEqual(readdirSync(directory).filter((name) => /^\..+\.partial-[0-9a-f]{16}$/.test(name)), temporary)
       assert.equal(c.records().filter((r) => r.kind === "provider").length, 2)
-      note(c, "retry-cleanup-proof", { kind, removed: temporary, listed: readdirSync(directory) })
+      note(c, "retry-preservation-proof", { kind, preserved: temporary, listed: readdirSync(directory) })
     })
   }
   for (const [name, write] of [["owner", "1"], ["source", "2"]]) {
@@ -697,7 +752,7 @@ try {
       assert.ok(manifest.files.some((file) => file.name === "source.tar"))
       for (const file of manifest.files) assert.equal(hash(readFileSync(join(directory, file.name))), file.digest)
       const listed = readdirSync(directory, { recursive: true }).map(String).sort()
-      assert.deepEqual(listed.filter((entry) => /partial/.test(entry)), [])
+      assert.equal(listed.filter((entry) => /partial/.test(entry)).length, 1)
       note(c, "partial-write-proof", { crashedWrite: name, listed })
     })
   }

@@ -10,18 +10,17 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 import { FactoryError, failure, RelativePath } from "./Domain.js"
 
 const exec = promisify(execFile)
 const partial = /^\.(.+)\.partial-[0-9a-f]{16}$/
-const temporaryPath = (file: string) => file.split(/[\\/]/).some((name) => partial.test(name))
+export const temporaryPath = (file: string) => file.split(/[\\/]/).some((name) => partial.test(name))
 export const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex")
 export const canonical = (value: unknown): string =>
   JSON.stringify(value, (_key, entry: unknown) =>
@@ -53,27 +52,49 @@ export const syncDirectory = (directory: string) => {
     closeSync(fd)
   }
 }
-// Publishes complete bytes only: the final path appears through link, which never replaces an existing file.
-export const writeExclusive = (file: string, bytes: string | Uint8Array) => {
+// Check the owned root and each existing component before filesystem changes.
+export const safePath = (root: string, file: string) => {
+  const directory = resolve(root)
+  const target = resolve(file)
+  const rel = relative(directory, target)
+  if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) {
+    throw failure("path", `Path is outside its owned directory: ${file}`)
+  }
+  let current = directory
+  for (const component of ["", ...(rel === "" ? [] : rel.split(sep))]) {
+    current = join(current, component)
+    const stat = lstatSync(current, { throwIfNoEntry: false })
+    if (stat === undefined) break
+    if (stat.isSymbolicLink()) throw failure("path", `Refusing symlink in owned path: ${current}`)
+    if (current !== target && !stat.isDirectory()) throw failure("path", `Expected a directory: ${current}`)
+  }
+  return target
+}
+// Publishes complete bytes only: link never replaces an existing file. Crashed writers' temporary files stay unreadable.
+export const writeExclusive = (file: string, bytes: string | Uint8Array, root = dirname(file)) => {
+  safePath(root, file)
   const directory = dirname(file)
   const accept = () => {
+    safePath(root, file)
     if (sha256(readBytes(file, 64 * 1024 * 1024)) !== sha256(bytes)) {
       throw failure("artifact", `Existing artifact differs; preserve and inspect: ${file}`)
     }
-    removePartials(directory, basename(file))
     syncDirectory(directory)
   }
   if (existsSync(file)) return accept()
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   const temporary = join(directory, `.${basename(file)}.partial-${randomBytes(8).toString("hex")}`)
+  safePath(root, temporary)
+  const fd = openSync(temporary, "wx", 0o600)
   try {
-    const fd = openSync(temporary, "wx", 0o600)
     try {
       writeFileSync(fd, bytes)
       fsyncSync(fd)
     } finally {
       closeSync(fd)
     }
+    safePath(root, temporary)
+    safePath(root, file)
     try {
       linkSync(temporary, file)
     } catch (cause) {
@@ -81,19 +102,10 @@ export const writeExclusive = (file: string, bytes: string | Uint8Array) => {
       throw cause
     }
   } finally {
+    safePath(root, temporary)
     rmSync(temporary, { force: true })
   }
-  removePartials(directory, basename(file))
   syncDirectory(directory)
-}
-// Removes files that a crashed writeExclusive left behind. Call only while holding the directory's writer lock.
-export const removePartials = (directory: string, name?: string) => {
-  for (const entry of readdirSync(directory, { recursive: name === undefined, withFileTypes: true })) {
-    const match = partial.exec(entry.name)
-    if (entry.isFile() && match !== null && (name === undefined || match[1] === name)) {
-      rmSync(join(entry.parentPath, entry.name))
-    }
-  }
 }
 export const inside = (root: string, name: string) => {
   Schema.decodeUnknownSync(RelativePath)(name)
