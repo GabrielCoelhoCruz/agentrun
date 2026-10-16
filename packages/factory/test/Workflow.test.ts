@@ -9,6 +9,31 @@ import { expect, test } from "vitest"
 const scenarioBudgetMs = 300000 + 60000 + 60000
 
 test.each([
+  "export-preserves-user-partial",
+  "export-refuses-symlink-paths",
+  "export-refuses-symlink-staging",
+  "foreign-export-owner",
+  "missing-export-owner",
+  "empty-export-owner",
+  "crash-partial-task",
+  "crash-partial-evidence",
+  "partial-artifact",
+])(
+  "production CLI protects ownership and temporary artifacts (%s)",
+  async (scenario) => {
+    const parent = await mkdtemp(join(tmpdir(), "factory-temporary-artifacts-e2e-"))
+    const result = await promisify(execFile)(process.execPath, [
+      fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+      fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+      join(parent, "proof"),
+      scenario,
+    ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+  },
+  scenarioBudgetMs + 5000,
+)
+
+test.each([
   "state-checkout-modified",
   "state-checkout-staged",
   "state-checkout-deleted",
@@ -56,6 +81,21 @@ test("production CLI accepts a review verdict wrapped in one JSON code fence", a
   ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
   expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
 }, scenarioBudgetMs + 5000)
+
+test.each(["owner", "source"])(
+  "production CLI export recovers after a crash in the middle of a file write (%s)",
+  async (file) => {
+    const parent = await mkdtemp(join(tmpdir(), "factory-partial-write-e2e-"))
+    const result = await promisify(execFile)(process.execPath, [
+      fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+      fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+      join(parent, "proof"),
+      `crash-partial-${file}`,
+    ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+  },
+  scenarioBudgetMs + 5000,
+)
 
 test("production CLI starts a second workflow beside the executor state", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-second-start-e2e-"))
