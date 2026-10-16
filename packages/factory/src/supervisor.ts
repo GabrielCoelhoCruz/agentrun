@@ -1,10 +1,12 @@
+import { stopProcessGroup } from "@agentrun/core"
 import { Clock, Effect, Schema } from "effect"
 import { spawn } from "node:child_process"
-import { closeSync, openSync } from "node:fs"
+import { closeSync, linkSync, openSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { failure, ProcessResult } from "./Domain.js"
-import { io, sha256, writeExclusive } from "./Files.js"
-import { Launch } from "./Processes.js"
+import { io, sha256, syncDirectory, writeExclusive } from "./Files.js"
+import { Launch, stopGraceMs } from "./Processes.js"
 
 let running = false
 let complete = false
@@ -61,26 +63,79 @@ const serve = Effect.gen(function*() {
         }),
     )
     const child = yield* io("process", () =>
-      spawn(launch.command.argv[0], launch.command.argv.slice(1), {
+      spawn(process.execPath, [
+        fileURLToPath(new URL("./command.mjs", import.meta.url)),
+        `agentrun-factory-${launch.token}`,
+      ], {
         cwd: launch.command.cwd,
         env: process.env,
-        stdio: ["ignore", files.stdout, files.stderr],
+        detached: true,
+        stdio: ["pipe", files.stdout, files.stderr, "ipc"],
       }))
+    child.on("error", () => {})
+    if (child.stdin === null) return yield* failure("process", "Command group has no launch gate")
+    const gate = child.stdin
+    gate.on("error", () => {})
+    if (child.pid === undefined) return yield* failure("process", "Command group did not start")
+    yield* io("process", () => {
+      const temporary = join(launch.directory, "command-group.pending")
+      writeExclusive(temporary, JSON.stringify({ ...identity, pgid: child.pid }))
+      linkSync(temporary, join(launch.directory, "command-group.json"))
+      syncDirectory(launch.directory)
+      unlinkSync(temporary)
+      syncDirectory(launch.directory)
+    })
+    // The command leads its own group, so a timeout signal never reaches this supervisor.
+    const signalCommand = (signal: NodeJS.Signals | 0) => {
+      if (child.pid === undefined) return false
+      try {
+        process.kill(-child.pid, signal)
+        return true
+      } catch {
+        return false
+      }
+    }
     let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      process.kill(-process.pid, "SIGTERM")
-      setTimeout(() => {
-        if (!complete) process.kill(-process.pid, "SIGKILL")
-      }, 2000).unref()
-    }, launch.timeoutMs)
+    let killAt = 0
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    const terminate = () => {
+      killAt = Date.now() + stopGraceMs
+      signalCommand("SIGTERM")
+      killTimer = setTimeout(() => signalCommand("SIGKILL"), stopGraceMs)
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
     const result = yield* Effect.callback<{ exitCode: number | null; signal: string | null }, never>((resume) => {
+      child.on("message", (message) => {
+        if (message === "started") {
+          timer = setTimeout(() => {
+            timedOut = true
+            terminate()
+          }, launch.timeoutMs)
+          return
+        }
+        const result = Schema.decodeUnknownSync(Schema.Struct({
+          exitCode: Schema.NullOr(Schema.Int),
+          signal: Schema.NullOr(Schema.String),
+        }))(message)
+        resume(Effect.succeed({ ...result, signal: timedOut ? "TIMEOUT" : result.signal }))
+      })
       child.once("error", () => resume(Effect.succeed({ exitCode: -1, signal: null })))
       child.once(
         "exit",
         (exitCode, signal) => resume(Effect.succeed({ exitCode, signal: timedOut ? "TIMEOUT" : signal })),
       )
+      gate.end(JSON.stringify(launch.command))
     }).pipe(Effect.ensuring(Effect.sync(() => clearTimeout(timer))))
+    // Processes left in the command's group stop before the receipt is written.
+    if (!timedOut) {
+      yield* stopProcessGroup(child.pid, launch.token, "factory").pipe(
+        Effect.mapError((error) => failure("process-ownership", String(error))),
+      )
+    } else if (signalCommand(0)) {
+      if (killAt === 0) terminate()
+      while (signalCommand(0) && Date.now() < killAt + 2000) yield* Effect.sleep("50 millis")
+    }
+    clearTimeout(killTimer)
     return result
   }))
   const terminal: ProcessResult = {

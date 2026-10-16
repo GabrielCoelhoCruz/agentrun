@@ -11,6 +11,7 @@ export default function build() {
     "src/index.ts",
     "src/bin.ts",
     "src/supervisor.ts",
+    "src/command.ts",
     "--format",
     "esm",
     "--dts",
