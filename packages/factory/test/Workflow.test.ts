@@ -23,6 +23,17 @@ test.each(["exit", "timeout"])(
   scenarioBudgetMs + 5000,
 )
 
+test("production CLI accepts a review verdict wrapped in one JSON code fence", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "factory-fenced-review-e2e-"))
+  const result = await promisify(execFile)(process.execPath, [
+    fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+    fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+    join(parent, "proof"),
+    "fenced-review",
+  ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+  expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+}, scenarioBudgetMs + 5000)
+
 test("factory driver lists the complete installed matrix without running journeys", async () => {
   const parent = await mkdtemp(join(tmpdir(), "factory-journey-list-"))
   const result = await promisify(execFile)(process.execPath, [

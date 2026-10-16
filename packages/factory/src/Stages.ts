@@ -131,6 +131,13 @@ export const prepareAgent = (store: Store, state: Projection, kind: "implement" 
             verdict: "accepted | revision-needed | human-needed",
             findings: [{ file: "changed path", line: 1, severity: "low | medium | high", message: "specific finding" }],
           },
+          resultRules: [
+            "Reply with exactly one JSON object in resultFormat and nothing else.",
+            "Use every key in resultFormat and no other key. version is the number 1.",
+            "accepted requires an empty findings list. Any finding requires revision-needed or human-needed.",
+            "revision-needed requires at least one finding.",
+            "Every finding names a file in the diff and a line that the diff adds or changes.",
+          ],
         }
         : {}),
     })
@@ -262,12 +269,17 @@ export const cleanupExecutor = (store: Store, run: WorkflowRun, attempt: AgentAt
     ),
   )
 
+// Models often wrap a JSON reply in one Markdown fence; the strict schema still decides the content.
+const unfence = (text: string) => /^\s*```(?:json)?\n([\s\S]*)\n```\s*$/.exec(text)?.[1] ?? text
+
 const validateReview = (run: WorkflowRun, inputSha: string, result: string) =>
   Effect.gen(function*() {
     const review = yield* io("review", () =>
-      Schema.decodeUnknownSync(Review, { onExcessProperty: "error" })(JSON.parse(result))).pipe(Effect.mapError(() =>
-        failure("review", "Review result is malformed; no acceptance was recorded")
-      ))
+      Schema.decodeUnknownSync(Review, { onExcessProperty: "error" })(JSON.parse(unfence(result)))).pipe(
+        Effect.mapError(() =>
+          failure("review", "Review result is malformed; no acceptance was recorded")
+        ),
+      )
     if (review.candidate !== inputSha || review.profileHash !== run.profileHash) {
       return yield* failure("review", "Review names a different candidate or profile")
     }
