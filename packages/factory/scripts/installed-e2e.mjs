@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
+import { availableParallelism } from "node:os"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -57,9 +58,7 @@ export const lockedDependencyOverrides = (snapshots) => {
   return overrides
 }
 
-export const runCommand = (evidence, name, executable, argv, cwd, timeout = 900000) => {
-  const started = new Date().toISOString()
-  const result = spawnSync(executable, argv, { cwd, encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 })
+const saveReceipt = (evidence, name, executable, argv, cwd, started, result) => {
   save(join(evidence, `${name}.json`), {
     executable,
     argv,
@@ -77,13 +76,92 @@ export const runCommand = (evidence, name, executable, argv, cwd, timeout = 9000
   return result.stdout
 }
 
+export const runCommand = (evidence, name, executable, argv, cwd, timeout = 900000) => {
+  const started = new Date().toISOString()
+  const result = spawnSync(executable, argv, { cwd, encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 })
+  return saveReceipt(evidence, name, executable, argv, cwd, started, result)
+}
+
+const runCommandAsync = (evidence, { name, executable, argv, cwd, timeout = 900000 }) =>
+  new Promise((done) => {
+    const started = new Date().toISOString()
+    const child = spawn(executable, argv, { cwd, stdio: ["ignore", "pipe", "pipe"], timeout, killSignal: "SIGTERM" })
+    let stdout = ""
+    let stderr = ""
+    let error
+    child.stdout.on("data", (data) => {
+      stdout += String(data)
+    })
+    child.stderr.on("data", (data) => {
+      stderr += String(data)
+    })
+    child.on("error", (cause) => {
+      error = cause
+    })
+    child.on("close", (status, signal) => {
+      done(() =>
+        saveReceipt(evidence, name, executable, argv, cwd, started, {
+          pid: child.pid,
+          status,
+          signal,
+          stdout,
+          stderr,
+          error,
+        })
+      )
+    })
+  })
+
+// Each journey owns its directory, HOME and TMPDIR, so journeys run as separate driver processes.
+// After the first failure no queued command starts, and the proof fails only after running ones settle.
+export const runConcurrently = async (evidence, commands, limit) => {
+  const outputs = []
+  const failures = []
+  let next = 0
+  const worker = async () => {
+    while (failures.length === 0 && next < commands.length) {
+      const index = next++
+      const finish = await runCommandAsync(evidence, commands[index])
+      try {
+        outputs[index] = finish()
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, commands.length) }, worker))
+  if (failures.length > 0) throw failures[0]
+  return outputs
+}
+
+export const mergeJourneyResults = (parts) => {
+  assert.ok(parts.length > 0, "Missing installed journey results")
+  const [{ cli, cliSha256 }] = parts
+  for (const part of parts) {
+    assert.equal(part.cli, cli, "Installed journeys used different CLI paths")
+    assert.equal(part.cliSha256, cliSha256, "Installed journeys used different CLI bytes")
+    assert.equal(part.paidProviderCalls, 0, "Installed journey made paid provider calls")
+  }
+  return { cli, cliSha256, paidProviderCalls: 0, outcomes: parts.flatMap((part) => part.outcomes) }
+}
+
+// On pull_request the checkout is a merge commit, so the tested commit and the pull request head differ.
+export const candidateIdentity = ({ head, parents, pullRequestHead, pullRequestBase }) => {
+  if (pullRequestHead === undefined) return { candidate: { head, parents }, pullRequest: null }
+  assert.ok(
+    pullRequestHead === head || parents.includes(pullRequestHead),
+    `Pull request head ${pullRequestHead} is neither the tested commit nor its parent`,
+  )
+  return { candidate: { head, parents }, pullRequest: { head: pullRequestHead, base: pullRequestBase ?? null } }
+}
+
 const distFiles = (directory) =>
   readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const file = join(directory, entry.name)
     return entry.isDirectory() ? distFiles(file) : [file]
   })
 
-const main = (directory, selected = "all") => {
+const main = async (directory, selected = "all") => {
   const evidence = resolve(directory)
   mkdirSync(evidence, { recursive: false })
   assert.ok(!inside(source, evidence), "Installed evidence must be outside the checkout")
@@ -91,10 +169,12 @@ const main = (directory, selected = "all") => {
   const head = git("source-head", "rev-parse", "HEAD")
   const branch = git("source-branch", "branch", "--show-current")
   const parents = git("source-parents", "show", "-s", "--format=%P", "HEAD").split(" ")
-  const candidate = {
-    head: process.env.AGENTRUN_CANDIDATE_HEAD ?? head,
-    base: process.env.AGENTRUN_CANDIDATE_BASE ?? null,
-  }
+  const { candidate, pullRequest } = candidateIdentity({
+    head,
+    parents,
+    pullRequestHead: process.env.AGENTRUN_PULL_REQUEST_HEAD || undefined,
+    pullRequestBase: process.env.AGENTRUN_PULL_REQUEST_BASE || undefined,
+  })
   assert.equal(git("source-status", "status", "--porcelain"), "", "Source checkout is dirty")
   const tracked = runCommand(evidence, "source-files", "git", ["ls-files", "-z"], source).split("\0").filter(Boolean)
   const sourceHashes = Object.fromEntries(tracked.map((file) => [join(source, file), hash(join(source, file))]))
@@ -103,6 +183,7 @@ const main = (directory, selected = "all") => {
     branch,
     parents,
     candidate,
+    pullRequest,
     node: process.version,
     platform: process.platform,
     files: sourceHashes,
@@ -184,6 +265,7 @@ const main = (directory, selected = "all") => {
     branch,
     parents,
     candidate,
+    pullRequest,
     node: process.version,
     files,
     bindings,
@@ -204,14 +286,37 @@ const main = (directory, selected = "all") => {
   const required = selected === "all" ? listed : selected.split(",")
   assert.ok(required.length > 0 && required.every((name) => listed.includes(name)), "Unknown selected journey")
   save(join(evidence, "expected-journeys.json"), required)
-  runCommand(evidence, "installed-journeys", process.execPath, [driver, cli, journeys, selected], source, 7200000)
-  const results = read(join(journeys, "results.json"))
+  mkdirSync(journeys)
+  const concurrency = availableParallelism()
+  const runs = [
+    ...required.map((name) => ({ name: `journey-${name}`, output: join(journeys, name), journey: name })),
+    ...Array.from({ length: 10 }, (_, index) => ({
+      name: `cancellation-${index + 1}`,
+      output: join(evidence, `cancellation-${index + 1}`),
+      journey: "cancel-agent",
+    })),
+  ]
+  await runConcurrently(
+    evidence,
+    runs.map(({ name, output, journey }) => ({
+      name,
+      executable: process.execPath,
+      argv: [driver, cli, output, journey],
+      cwd: source,
+    })),
+    concurrency,
+  )
+  const results = mergeJourneyResults(
+    runs.filter((run) => run.name.startsWith("journey-")).map((run) => read(join(run.output, "results.json"))),
+  )
+  save(join(journeys, "results.json"), results)
   verifyJourneys(results.outcomes, required)
-  for (let repeat = 1; repeat <= 10; repeat++) {
-    const output = join(evidence, `cancellation-${repeat}`)
-    runCommand(evidence, `cancellation-${repeat}`, process.execPath, [driver, cli, output, "cancel-agent"], source)
-    verifyJourneys(read(join(output, "results.json")).outcomes, ["cancel-agent"])
-  }
+  const cancellations = runs.filter((run) => run.name.startsWith("cancellation-"))
+  for (const { output } of cancellations) verifyJourneys(read(join(output, "results.json")).outcomes, ["cancel-agent"])
+  assert.equal(
+    mergeJourneyResults(cancellations.map(({ output }) => read(join(output, "results.json")))).cliSha256,
+    results.cliSha256,
+  )
   verifyHashes(files)
   const finalBindings = resolveModules("module-bindings-after")
   assert.deepEqual(finalBindings, bindings)
@@ -222,13 +327,15 @@ const main = (directory, selected = "all") => {
     branch,
     parents,
     candidate,
+    pullRequest,
     scenarios: results.outcomes.length,
-    cancellationRepeats: 10,
+    cancellationRepeats: cancellations.length,
+    concurrency,
     paidProviderCalls: 0,
   })
   console.log(readFileSync(join(evidence, "summary.json"), "utf8"))
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main(process.argv[2], process.argv[3])
+  await main(process.argv[2], process.argv[3])
 }

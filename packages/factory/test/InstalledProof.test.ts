@@ -8,7 +8,7 @@ const evaluate = (body: string) =>
     "--input-type=module",
     "-e",
     `import assert from 'node:assert/strict';
-   import { verifyHashes, verifyBindings, verifyJourneys, runCommand, lockedDependencyOverrides } from ${
+   import { verifyHashes, verifyBindings, verifyJourneys, runCommand, runConcurrently, mergeJourneyResults, candidateIdentity, lockedDependencyOverrides } from ${
       JSON.stringify(new URL("../scripts/installed-e2e.mjs", import.meta.url).href)
     };
    ${body}`,
@@ -93,5 +93,72 @@ test("installed proof keeps parent-specific transitive versions from the source 
       'parent@1.0.0(peer@1.0.0)': { dependencies: { child: '1.0.0' } },
       'parent@1.0.0(peer@2.0.0)': { dependencies: { child: '2.0.0' } },
     }), /conflicting/i);
+  `)).toBe("")
+})
+
+test("installed proof records the tested merge commit as the candidate and the pull request head apart", () => {
+  expect(evaluate(`
+    const merge = 'c'.repeat(40);
+    const parents = ['a'.repeat(40), 'b'.repeat(40)];
+    assert.deepEqual(candidateIdentity({ head: merge, parents, pullRequestHead: 'b'.repeat(40), pullRequestBase: 'd'.repeat(40) }), {
+      candidate: { head: merge, parents },
+      pullRequest: { head: 'b'.repeat(40), base: 'd'.repeat(40) },
+    });
+    assert.deepEqual(candidateIdentity({ head: merge, parents: ['a'.repeat(40)] }), {
+      candidate: { head: merge, parents: ['a'.repeat(40)] },
+      pullRequest: null,
+    });
+    assert.deepEqual(candidateIdentity({ head: merge, parents, pullRequestHead: merge }).candidate.head, merge);
+    assert.throws(() => candidateIdentity({ head: merge, parents, pullRequestHead: 'e'.repeat(40) }), /pull request head/i);
+  `)).toBe("")
+})
+
+test("installed proof runs journeys concurrently up to the limit and keeps every receipt", async () => {
+  expect(evaluate(`
+    import { mkdtempSync, readFileSync } from 'node:fs';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    const directory = mkdtempSync(join(tmpdir(), 'installed-pool-'));
+    const sleeper = (name) => ({ name, executable: process.execPath, argv: ['-e', 'setTimeout(() => console.log(process.argv[1]), 400)', name], cwd: directory });
+    const names = ['one', 'two', 'three', 'four', 'five'];
+    const outputs = await runConcurrently(directory, names.map(sleeper), 2);
+    assert.deepEqual(outputs.map((output) => output.trim()), names);
+    const spans = names.map((name) => JSON.parse(readFileSync(join(directory, name + '.json'), 'utf8')))
+      .map((receipt) => [Date.parse(receipt.started), Date.parse(receipt.ended)]);
+    const overlap = Math.max(...spans.map(([start]) => spans.filter(([s, e]) => s <= start && start < e).length));
+    assert.equal(overlap, 2);
+  `)).toBe("")
+})
+
+test("installed proof fails after running journeys settle and starts no queued journey", () => {
+  expect(evaluate(`
+    import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+    import { tmpdir } from 'node:os';
+    import { join } from 'node:path';
+    const directory = mkdtempSync(join(tmpdir(), 'installed-pool-fail-'));
+    const marker = join(directory, 'slow-finished');
+    const tasks = [
+      { name: 'failed', executable: process.execPath, argv: ['-e', 'console.error("cause-marker"); process.exit(23)'], cwd: directory },
+      { name: 'slow', executable: process.execPath, argv: ['-e', 'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], "done"), 500)', marker], cwd: directory },
+      { name: 'queued', executable: process.execPath, argv: ['-e', ''], cwd: directory },
+    ];
+    await assert.rejects(runConcurrently(directory, tasks, 2), /command failed: failed/i);
+    assert.equal(readFileSync(marker, 'utf8'), 'done');
+    const receipt = JSON.parse(readFileSync(join(directory, 'failed.json'), 'utf8'));
+    assert.equal(receipt.status, 23);
+    assert.match(receipt.stderr, /cause-marker/);
+    assert.equal(existsSync(join(directory, 'queued.json')), false);
+  `)).toBe("")
+})
+
+test("installed proof refuses journey results from a different CLI build", () => {
+  expect(evaluate(`
+    const part = (name, cliSha256) => ({ cli: '/consumer/bin.mjs', cliSha256, paidProviderCalls: 0, outcomes: [{ name, outcome: 'pass' }] });
+    assert.deepEqual(mergeJourneyResults([part('happy', 'a'), part('correct', 'a')]), {
+      cli: '/consumer/bin.mjs', cliSha256: 'a', paidProviderCalls: 0,
+      outcomes: [{ name: 'happy', outcome: 'pass' }, { name: 'correct', outcome: 'pass' }],
+    });
+    assert.throws(() => mergeJourneyResults([part('happy', 'a'), part('correct', 'b')]), /cli/i);
+    assert.throws(() => mergeJourneyResults([part('happy', 'a'), { ...part('correct', 'a'), paidProviderCalls: 1 }]), /paid/i);
   `)).toBe("")
 })
