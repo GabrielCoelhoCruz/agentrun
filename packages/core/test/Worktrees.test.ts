@@ -919,6 +919,31 @@ for (const mode of ["ignored", "untracked", "modified"] as const) {
     ))
 }
 
+it.live("fresh acquisition refuses a checkout hook that selects a foreign branch", () =>
+  withRepo((fixture) =>
+    Effect.gen(function*() {
+      yield* git(fixture.repoRoot, ["branch", "user-branch", fixture.baseSha])
+      const hook = fixture.path.join(fixture.repoRoot, ".git", "hooks", "post-checkout")
+      yield* fixture.fs.writeFileString(
+        hook,
+        "#!/bin/sh\nrm -- \"$0\"\ngit checkout user-branch\nprintf 'preserve user file\\n' > private.txt\n",
+      )
+      yield* fixture.fs.chmod(hook, 0o755)
+      const service = yield* Worktrees
+      const worktree = service.locate(task().id)
+      const error = yield* Effect.flip(Effect.scoped(service.acquire(task(), fixture.baseSha)))
+      assert.strictEqual(error.command, "worktree ownership")
+      assert.ok(error.stderr.includes("workspace Git identity differs"))
+      assert.strictEqual(yield* fixture.fs.exists(receiptFile(fixture, worktree)), false)
+      assert.strictEqual(yield* git(worktree.path, ["symbolic-ref", "HEAD"]), "refs/heads/user-branch")
+      assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", "user-branch"]), fixture.baseSha)
+      assert.strictEqual(
+        yield* fixture.fs.readFileString(fixture.path.join(worktree.path, "private.txt")),
+        "preserve user file\n",
+      )
+    })
+  ))
+
 it.live("review crash recovery preserves hook output whose source cannot be proved", () =>
   withRepo((fixture) =>
     Effect.gen(function*() {

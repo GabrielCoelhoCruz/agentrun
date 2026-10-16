@@ -253,6 +253,23 @@ process.stdin.once('data',()=>{
       })
     }
   })
+  const assertWorkspaceIdentity = Effect.fn("Worktrees.assertWorkspaceIdentity")(function*(worktree: Worktree) {
+    const identity = yield* git([
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+      "--symbolic-full-name",
+      "HEAD",
+    ], { cwd: worktree.path }).pipe(Effect.mapError(() => refusal(worktree, "workspace Git identity cannot be read")))
+    const [directory, branch] = identity.split("\n")
+    if (
+      directory === undefined || branch !== `refs/heads/${worktree.branch}`
+      || (yield* fs.realPath(directory).pipe(
+          Effect.mapError(() => refusal(worktree, "repository cannot be resolved")),
+        ))
+        !== commonDir
+    ) return yield* refusal(worktree, "workspace Git identity differs")
+  })
   const inspect = Effect.fn("Worktrees.inspect")(function*(worktree: Worktree, baseSha?: string, createdHere = false) {
     const expected = locate(worktree.taskId)
     if (worktree.path !== expected.path || worktree.branch !== expected.branch) {
@@ -287,21 +304,8 @@ process.stdin.once('data',()=>{
       return yield* refusal(worktree, "creation receipt is missing")
     }
     if (dir) {
-      const identity = yield* git([
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-common-dir",
-        "--symbolic-full-name",
-        "HEAD",
-      ], { cwd: worktree.path }).pipe(Effect.mapError(() => refusal(worktree, "workspace Git identity cannot be read")))
-      const [directory, branch] = identity.split("\n")
-      if (
-        directory === undefined || branch !== `refs/heads/${worktree.branch}` || branches.length !== 1
-        || (yield* fs.realPath(directory).pipe(
-            Effect.mapError(() => refusal(worktree, "repository cannot be resolved")),
-          ))
-          !== commonDir
-      ) return yield* refusal(worktree, "workspace Git identity differs")
+      if (branches.length !== 1) return yield* refusal(worktree, "workspace Git identity differs")
+      yield* assertWorkspaceIdentity(worktree)
     }
     if (pending && branches.length === 1 && baseSha !== undefined) {
       const ref = `refs/heads/${worktree.branch}`
@@ -426,7 +430,8 @@ process.stdin.once('data',()=>{
               ], repo).pipe(semaphore.withPermits(1))
             }
             yield* git(["worktree", "add", worktree.path, worktree.branch], repo).pipe(semaphore.withPermits(1))
-            yield* inspect(worktree, base, true)
+            // Creation succeeded in this call; only recovery needs to recheck the branch tip and witness.
+            yield* assertWorkspaceIdentity(worktree)
             yield* promote(worktree)
           }
           return worktree

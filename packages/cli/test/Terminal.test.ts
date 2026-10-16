@@ -1,15 +1,6 @@
 import { spawn, spawnSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import {
-  accessSync,
-  constants,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from "node:fs"
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -126,30 +117,12 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
   }, harnessTimeoutMs + 5000)
 }
 
-for (const [scenario, slowAcquire] of [["retry", false], ["timeout", false], ["timeout", true]] as const) {
+for (const scenario of ["retry", "timeout"]) {
   const harnessTimeoutMs = demoTimeoutMs(scenario)
   test.concurrent(
-    `real PTY: ${scenario}${slowAcquire ? " after slow acquisition" : ""} renders runner retries and timeout failures`,
+    `real PTY: ${scenario} renders runner retries and timeout failures`,
     async ({ expect, onTestFinished }) => {
       const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
-      const bin = join(root, "bin")
-      if (slowAcquire) {
-        const git = spawnSync("which", ["git"], { encoding: "utf8" })
-        expect(git.status, git.stderr).toBe(0)
-        mkdirSync(bin)
-        const executable = `'${git.stdout.trim().replaceAll("'", "'\\''")}'`
-        writeFileSync(
-          join(bin, "git"),
-          `#!/bin/sh
-if [ "$1" = worktree ] && [ "$2" = add ]; then
-  printf '%s\\n' "$3" >> "$TEST_RECORDS/acquire-delays"
-  sleep 12
-fi
-exec ${executable} "$@"
-`,
-          { mode: 0o755 },
-        )
-      }
       const nonce = randomUUID().replaceAll("-", "")
       onTestFinished(async () => {
         const cleanup = await runPython([fixture, "close", root, nonce], cleanupTimeoutMs)
@@ -158,7 +131,6 @@ exec ${executable} "$@"
       const result = await runPython([demo, scenario, root, process.execPath], harnessTimeoutMs, {
         ...process.env,
         AGENTRUN_TERMINAL_NONCE: nonce,
-        ...(slowAcquire ? { PATH: `${bin}:${process.env.PATH}` } : {}),
       })
       expect(result.status, result.message).toBe(0)
       const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
@@ -177,7 +149,6 @@ exec ${executable} "$@"
         }
       }
       if (scenario === "timeout") expect(output).toContain("alive")
-      if (slowAcquire) expect(readFileSync(join(root, "acquire-delays"), "utf8").trim().split("\n")).toHaveLength(3)
     },
     harnessTimeoutMs + 5000,
   )

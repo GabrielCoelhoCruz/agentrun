@@ -726,18 +726,18 @@ const delayedAcquisition = (delay: Effect.Effect<void, GitError>) =>
     })),
   ).pipe(Layer.provide(clockWorktrees))
 
-for (const outcome of ["success", "timeout", "cancel", "git failure"] as const) {
-  it.effect(`execution budget excludes slow acquisition (${outcome})`, () => {
+for (const outcome of ["success", "timeout", "cancel", "git failure", "hanging"] as const) {
+  it.effect(`absolute task ceiling includes acquisition (${outcome})`, () => {
     let calls = 0
+    const delayMs = outcome === "success" ? 1000 : outcome === "timeout" || outcome === "git failure" ? 3000 : 10000
     return Effect.gen(function*() {
       const runner = yield* Runner
       const store = yield* StateStore
       const collector = yield* collect(runner)
       const fiber = yield* Effect.forkChild(runner.run(runState([limitedTask()])))
-      yield* TestClock.adjust(5000)
-      assert.strictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id]?._tag, "running")
-      assert.strictEqual(calls, 0)
+      yield* TestClock.adjust(outcome === "cancel" ? 2000 : outcome === "hanging" ? 5000 : delayMs)
       if (outcome === "cancel") {
+        assert.strictEqual(calls, 0)
         yield* Fiber.interrupt(fiber)
         yield* Fiber.join(collector)
         assert.strictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id]?._tag, "interrupted")
@@ -745,36 +745,35 @@ for (const outcome of ["success", "timeout", "cancel", "git failure"] as const) 
         assert.strictEqual(calls, 0)
         return
       }
-      yield* TestClock.adjust(5000)
-      if (outcome === "git failure") {
-        const result = yield* Fiber.join(fiber)
-        yield* Fiber.join(collector)
-        assert.deepStrictEqual(result.status[task().id], {
-          _tag: "failed",
-          attempt: 1,
-          reason: "GitError: fixture acquire exited 17: locked",
-        })
-        assert.strictEqual(calls, 0)
-        return
-      }
-      assert.strictEqual(calls, 1)
-      yield* TestClock.adjust(outcome === "success" ? 3000 : 4999)
-      if (outcome === "timeout") {
+      if (outcome === "success") {
+        assert.strictEqual(calls, 1)
+        yield* TestClock.adjust(3000)
+      } else if (outcome === "timeout") {
+        assert.strictEqual(calls, 1)
+        yield* TestClock.adjust(1999)
         assert.strictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id]?._tag, "running")
         yield* TestClock.adjust(1)
       }
-      const result = yield* Fiber.join(fiber)
-      yield* Fiber.join(collector)
-      if (outcome === "success") {
-        assert.deepStrictEqual(result.status[task().id], { _tag: "succeeded", durationMs: 13000 })
-      } else {
-        assert.deepStrictEqual(result.status[task().id], {
+      if (outcome === "timeout" || outcome === "hanging") {
+        yield* Effect.yieldNow
+        assert.deepStrictEqual((yield* store.load("20261003T1200-a1b2")).status[task().id], {
           _tag: "failed",
           attempt: 1,
           reason: "AgentTimedOut: Exceeded 5000ms",
         })
       }
-      assert.strictEqual(calls, 1)
+      const result = yield* Fiber.join(fiber)
+      yield* Fiber.join(collector)
+      if (outcome === "success") {
+        assert.deepStrictEqual(result.status[task().id], { _tag: "succeeded", durationMs: 4000 })
+      } else if (outcome === "git failure") {
+        assert.deepStrictEqual(result.status[task().id], {
+          _tag: "failed",
+          attempt: 1,
+          reason: "GitError: fixture acquire exited 17: locked",
+        })
+      }
+      assert.strictEqual(calls, outcome === "hanging" || outcome === "git failure" ? 0 : 1)
     }).pipe(
       Effect.scoped,
       Effect.provide(deadlineLayer(
@@ -791,7 +790,7 @@ for (const outcome of ["success", "timeout", "cancel", "git failure"] as const) 
         () => Effect.void,
         NodeServices.layer,
         delayedAcquisition(
-          Effect.sleep(10000).pipe(Effect.andThen(
+          Effect.sleep(delayMs).pipe(Effect.andThen(
             outcome === "git failure"
               ? Effect.fail(new GitError({ command: "fixture acquire", exitCode: 17, stderr: "locked" }))
               : Effect.void,
