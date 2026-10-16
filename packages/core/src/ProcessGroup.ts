@@ -14,9 +14,9 @@ const processTable = Effect.fn("ProcessGroup.table")(function*(includeCommand = 
       exec(
         "ps",
         includeCommand
-          ? ["-axo", "pid=,ppid=,pgid=,stat=,command=", "-ww"]
-          : ["-axo", "pid=,ppid=,pgid=,stat="],
-        { timeout: 5000 },
+          ? ["-axo", "pid=,ppid=,pgid=,stat=,lstart=,command=", "-ww"]
+          : ["-axo", "pid=,ppid=,pgid=,stat=,lstart="],
+        { timeout: 5000, env: { ...process.env, LC_ALL: "C" } },
       ),
     catch: (cause) => error(`Could not read process table: ${subprocessFailure(cause, 5000)}`),
   })
@@ -25,13 +25,16 @@ const processTable = Effect.fn("ProcessGroup.table")(function*(includeCommand = 
     parent: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
     group: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
     state: Schema.NonEmptyString,
+    started: Schema.NonEmptyString,
     command: Schema.String,
   })))(
     table.stdout.replace(/\r?\n$/, "").split("\n").map((line) => {
-      const fields = /^[ \t]*(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]+([^ \t\r\n]+)(?:[ \t]+(.*))?$/.exec(line)
+      const fields =
+        /^[ \t]*(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]+([^ \t\r\n]+)[ \t]+(\w{3} +\w{3} +\d+ +\d{2}:\d{2}:\d{2} +\d{4})(?:[ \t]+(.*))?$/
+          .exec(line)
       if (fields === null) return undefined
-      const [, pid, parent, group, state, command = ""] = fields
-      return { pid: Number(pid), parent: Number(parent), group: Number(group), state, command }
+      const [, pid, parent, group, state, started, command = ""] = fields
+      return { pid: Number(pid), parent: Number(parent), group: Number(group), state, started, command }
     }),
   ).pipe(Effect.mapError(() => error("Invalid process table")))
   if (new Set(rows.map((row) => row.pid)).size !== rows.length) {
@@ -52,26 +55,26 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
     }
     const rows = yield* processTable(true)
     const members = rows.filter((row) => row.group === pgid)
-    if (members.length === 0) {
-      if (!(yield* isAlive(-pgid))) return
-      return yield* error("Live process group absent from process table; recovery refused")
-    }
-    if (members.every((row) => !running(row.state))) return
     const leader = rows.find((row) => row.pid === pgid && row.group === pgid)
-    if (leader === undefined || !leader.command.trim().split(/\s+/).includes(`agentrun-${kind}-${token}`)) {
-      return yield* error("Process group ownership changed; recovery refused")
-    }
-    const owned = new Set([pgid])
+    const unverified = members.length === 0
+      ? "Live process group absent from process table; recovery refused"
+      : leader === undefined || !leader.command.trim().split(/\s+/).includes(`agentrun-${kind}-${token}`)
+      ? "Process group ownership changed; recovery refused"
+      : undefined
+    // Both paths observe the same family; only verified ownership permits signals.
+    const maySignal = unverified === undefined
+    const owned = new Set([pgid, ...members.map((row) => row.pid)])
     let previousSize = 0
     while (previousSize !== owned.size) {
       previousSize = owned.size
       for (const row of rows) if (owned.has(row.parent)) owned.add(row.pid)
     }
+    const identities = new Map(rows.filter((row) => owned.has(row.pid)).map((row) => [row.pid, row.started]))
     const groups = new Set([pgid])
     for (const row of rows) {
       if (!owned.has(row.pid)) continue
       if (row.group <= 1 || !owned.has(row.group)) {
-        return yield* error("Descendant joined an unowned group; cleanup refused")
+        return yield* error(unverified ?? "Descendant joined an unowned group; cleanup refused")
       }
       groups.add(row.group)
     }
@@ -79,7 +82,7 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
     let firstSignal = true
     for (const signal of ["SIGTERM", "SIGKILL"] as const) {
       for (const group of groups) {
-        if (waitOnly.has(group)) continue
+        if (!maySignal || waitOnly.has(group)) continue
         const current = firstSignal ? rows : yield* processTable(true)
         firstSignal = false
         const members = current.filter((row) => row.group === group)
@@ -87,7 +90,7 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
           groups.delete(group)
           continue
         }
-        const original = rows.find((row) => row.pid === group && row.group === group)
+        const original = rows.find((row) => row.pid === group && row.group === group && owned.has(row.pid))
         const leader = current.find((row) => row.pid === group && row.group === group)
         if (original === undefined || leader === undefined || leader.command !== original.command) {
           waitOnly.add(group)
@@ -109,20 +112,40 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
       for (let attempt = 0; attempt < 40; attempt++) {
         const current = yield* processTable()
+        const alive = new Set(
+          current.filter((row) => identities.get(row.pid) === row.started && running(row.state))
+            .map((row) => row.pid),
+        )
+        let previousSize = -1
+        // A detached fork can lose ancestry before observation (#50); both paths need OS containment to prevent it.
+        while (previousSize !== alive.size) {
+          previousSize = alive.size
+          for (const row of current) {
+            if (running(row.state) && alive.has(row.parent) && !alive.has(row.pid)) {
+              alive.add(row.pid)
+              identities.set(row.pid, row.started)
+            }
+          }
+        }
+        for (const row of current) if (alive.has(row.pid) && row.group > 1) groups.add(row.group)
         for (const group of groups) {
           const members = current.filter((row) => row.group === group)
           if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
             groups.delete(group)
           }
         }
-        if (groups.size === 0) return
+        if (
+          groups.size === 0 && !current.some((row) => identities.get(row.pid) === row.started && running(row.state))
+        ) {
+          return
+        }
         yield* Effect.sleep("50 millis")
       }
     }
     return yield* error(
-      waitOnly.size > 0
+      unverified ?? (waitOnly.size > 0
         ? "Signal ownership or permission changed and process group exit was not verified; recovery refused"
-        : "Owned process group did not exit after SIGKILL; recovery refused",
+        : "Owned process group did not exit after SIGKILL; recovery refused"),
     )
   },
 )

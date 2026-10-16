@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import { spawn, spawnSync } from "node:child_process"
 import { once } from "node:events"
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { inspect } from "node:util"
@@ -67,7 +67,7 @@ test("owned cleanup accepts unrelated process-table rows with group zero", async
     join(directory, "ps"),
     `#!/bin/sh
 /bin/ps "$@"
-case "$1" in -axo) echo '999999 0 0 S';; esac
+case "$1" in -axo) echo '999999 0 0 S Thu Jan  1 00:00:00 1970';; esac
 `,
     { mode: 0o755 },
   )
@@ -90,7 +90,7 @@ test("a live group omitted from the process table refuses cleanup", async () => 
   writeFileSync(
     join(directory, "ps"),
     `#!/bin/sh
-if [ "$1" = -axo ]; then echo '999999 0 999999 S'; else /bin/ps "$@"; fi
+if [ "$1" = -axo ]; then echo '999999 0 999999 S Thu Jan  1 00:00:00 1970'; else /bin/ps "$@"; fi
 `,
     { mode: 0o755 },
   )
@@ -219,13 +219,17 @@ test.each([
   const sentinel = start()
   const done = once(child, "close")
   const sentinelDone = once(sentinel, "close")
-  const childRow = `${child.pid} ${process.pid} ${leader === "wrong-group" ? sentinel.pid : child.pid} S ${command}`
+  const childRow = `${child.pid} ${process.pid} ${
+    leader === "wrong-group" ? sentinel.pid : child.pid
+  } S Thu Jan  1 00:00:00 1970 ${command}`
   const sentinelRow = `${sentinel.pid} ${process.pid} ${
     leader === "missing" || leader === "wrong-group" ? child.pid : sentinel.pid
-  } S node agentrun-worker-${token}`
+  } S Thu Jan  1 00:00:00 1970 node agentrun-worker-${token}`
   const rows = [sentinelRow]
   if (leader !== "missing") rows.push(childRow)
-  if (leader === "duplicate") rows.push(`${child.pid} ${process.pid} ${child.pid} S node changed-command`)
+  if (leader === "duplicate") {
+    rows.push(`${child.pid} ${process.pid} ${child.pid} S Thu Jan  1 00:00:00 1970 node changed-command`)
+  }
   try {
     writeFileSync(
       join(directory, "ps"),
@@ -272,8 +276,8 @@ test("separate cleanup calls reject changed leader command evidence", async () =
         join(directory, "ps"),
         `#!/bin/sh
 case "$1" in
-  -axo) echo '${child.pid} ${process.pid} ${child.pid} S ${command}'
-         echo '999999 ${child.pid} 0 S';;
+  -axo) echo '${child.pid} ${process.pid} ${child.pid} S Thu Jan  1 00:00:00 1970 ${command}'
+         echo '999999 ${child.pid} 0 S Thu Jan  1 00:00:00 1970';;
   -p) echo '${command}';;
   *) exec /bin/ps "$@";;
 esac
@@ -354,6 +358,113 @@ process.stdin.on('end', () => child.kill('SIGKILL'))
   }
 })
 
+test.each([
+  { evidence: "missing command", outcome: "live", expected: "Failure" },
+  { evidence: "missing leader", outcome: "live", expected: "Failure" },
+  { evidence: "member with external parent", outcome: "live", expected: "Failure" },
+  { evidence: "missing command", outcome: "exits", expected: "Success" },
+  { evidence: "missing command", outcome: "reused PID", expected: "Failure" },
+])("unverified cleanup tracks a detached descendant ($evidence, $outcome)", async ({ evidence, outcome, expected }) => {
+  const directory = mkdtempSync(join(tmpdir(), "agentrun-unverified-descendant-"))
+  const release = join(directory, "release")
+  const nestedRelease = join(directory, "nested-release")
+  const initial = join(directory, "initial.txt")
+  const original = process.env.PATH
+  const realKill = process.kill.bind(process)
+  const signals: Array<{ pid: number; signal: string }> = []
+  const leader = spawn(process.execPath, [
+    "-e",
+    `
+const {spawn}=require('node:child_process');
+const {existsSync}=require('node:fs');
+const child=spawn(process.execPath,['-e',
+  "const {existsSync}=require('node:fs');process.send('ready');setInterval(()=>{if(existsSync(process.argv[1]))process.exit(0)},10)",
+  ${JSON.stringify(nestedRelease)},'agentrun-descendant-${token}'],
+  {detached:true,stdio:['ignore','ignore','ignore','ipc']});
+child.once('message',()=>{child.disconnect();child.unref();process.send(child.pid)});
+process.on('message',()=>{process.title='agentrun-exiting';process.send('obscured')});
+setInterval(()=>{if(existsSync(${JSON.stringify(release)}))process.exit(0)},10);
+`,
+    `agentrun-worker-${token}`,
+  ], { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] })
+  const done = once(leader, "close")
+  let nested: number | undefined
+  const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+    if (signal !== 0) signals.push({ pid, signal: String(signal) })
+    return realKill(pid, signal)
+  })
+  try {
+    ;[nested] = await once(leader, "message", { signal: AbortSignal.timeout(5000) })
+    expect(Number.isSafeInteger(nested)).toBe(true)
+    leader.send("obscure")
+    await once(leader, "message", { signal: AbortSignal.timeout(5000) })
+    writeFileSync(
+      join(directory, "ps"),
+      `#!${process.execPath}
+const {execFileSync}=require('node:child_process');
+const {writeFileSync}=require('node:fs');
+let table=execFileSync('/bin/ps',process.argv.slice(2),{encoding:'utf8'});
+if(process.argv.some(arg=>arg.includes('command='))){
+  if(${
+        JSON.stringify(evidence)
+      }==='missing leader')table=table.split('\\n').filter(line=>Number(line.trim().split(/\\s+/)[0])!==${leader.pid}).join('\\n');
+  if(${
+        JSON.stringify(evidence)
+      }==='member with external parent')table=table.replace(/^(\\s*)${nested}\\s+\\d+\\s+\\d+/m,'$1${nested} 1 ${leader.pid}');
+  writeFileSync(${JSON.stringify(initial)},table);
+  writeFileSync(${JSON.stringify(release)},'exit');
+  if(${JSON.stringify(outcome)}==='exits')writeFileSync(${JSON.stringify(nestedRelease)},'exit');
+}else if(${JSON.stringify(outcome)}==='reused PID'){
+  table=table.split('\\n').map(line=>Number(line.trim().split(/\\s+/)[0])===${nested}
+    ? line.replace(/\\w{3} +\\w{3} +\\d+ +\\d{2}:\\d{2}:\\d{2} +\\d{4}/,'Thu Jan  1 00:00:00 1970') : line).join('\\n');
+}
+process.stdout.write(table);
+`,
+      { mode: 0o755 },
+    )
+    process.env.PATH = `${directory}:${original}`
+    const result = await Effect.runPromiseExit(stopProcessGroup(leader.pid!, token))
+    await done
+    const snapshot = readFileSync(initial, "utf8")
+    expect(snapshot).toContain(`agentrun-descendant-${token}`)
+    expect(result._tag, inspect(result, { depth: 8 })).toBe(expected)
+    expect(signals).toEqual([])
+    if (expected === "Failure") {
+      expect(() => realKill(nested!, 0)).not.toThrow()
+      expect(() => realKill(leader.pid!, 0)).toThrow()
+    }
+    if (process.env.AGENTRUN_TEST_EVIDENCE) {
+      writeFileSync(
+        join(process.env.AGENTRUN_TEST_EVIDENCE, `descendant-${evidence}-${outcome}.json`),
+        JSON.stringify(
+          {
+            leader: leader.pid,
+            nested,
+            result: inspect(result, { depth: 8 }),
+            signals,
+            snapshot,
+          },
+          null,
+          2,
+        ),
+      )
+    }
+  } finally {
+    spy.mockRestore()
+    process.env.PATH = original
+    writeFileSync(release, "exit")
+    writeFileSync(nestedRelease, "exit")
+    if (nested !== undefined) {
+      const row = spawnSync("/bin/ps", ["-p", String(nested), "-o", "pgid=,command=", "-ww"], { encoding: "utf8" })
+      if (row.stdout.trim().split(/\s+/)[0] === String(nested) && row.stdout.includes(`agentrun-descendant-${token}`)) {
+        realKill(-nested, "SIGKILL")
+      }
+    }
+    await done
+    rmSync(directory, { recursive: true })
+  }
+}, 15000)
+
 const stubborn = async () => {
   const child = spawn(process.execPath, [
     "-e",
@@ -377,6 +488,63 @@ const dispose = async (child: ReturnType<typeof spawn>, done: Promise<unknown>) 
   }
   await done
 }
+
+test.each(["missing command", "missing leader", "missing group"])(
+  "cleanup waits without signalling when initial evidence has a %s during exit",
+  async (evidence) => {
+    const { child, done } = await stubborn()
+    const directory = mkdtempSync(join(tmpdir(), "agentrun-initial-exit-"))
+    const original = process.env.PATH
+    const observed = join(directory, "observed")
+    const realKill = process.kill.bind(process)
+    const signals: Array<string> = []
+    const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === -child.pid! && signal !== 0) signals.push(String(signal))
+      return realKill(pid, signal)
+    })
+    const rows = evidence === "missing command"
+      ? `${child.pid} ${process.pid} ${child.pid} S Thu Jan  1 00:00:00 1970 (node)`
+      : evidence === "missing leader"
+      ? `999999 ${child.pid} ${child.pid} S Thu Jan  1 00:00:00 1970 (node)`
+      : "999999 0 0 S Thu Jan  1 00:00:00 1970 (node)"
+    let released = false
+    const timer = setInterval(() => {
+      if (!released && existsSync(observed)) {
+        released = true
+        child.send("exit")
+      }
+    }, 20)
+    try {
+      writeFileSync(
+        join(directory, "ps"),
+        `#!/bin/sh
+case "$*" in
+  *command=*)
+    touch '${observed}'
+    echo '${rows}'
+    exit 0;;
+esac
+exec /bin/ps "$@"
+`,
+        { mode: 0o755 },
+      )
+      process.env.PATH = `${directory}:${original}`
+      const result = await Effect.runPromiseExit(stopProcessGroup(child.pid!, token))
+      expect(result._tag, inspect(result, { depth: 8 })).toBe("Success")
+      expect(released).toBe(true)
+      expect(signals).toEqual([])
+      await done
+      expect(() => realKill(child.pid!, 0)).toThrow()
+    } finally {
+      clearInterval(timer)
+      spy.mockRestore()
+      process.env.PATH = original
+      await dispose(child, done)
+      rmSync(directory, { recursive: true })
+    }
+  },
+  15000,
+)
 
 test("two concurrent cleaners settle the same real SIGTERM-ignoring group", async () => {
   for (let iteration = 0; iteration < 10; iteration++) {
@@ -452,7 +620,7 @@ test("changed leader evidence before escalation prevents another signal", async 
       signals.push(String(signal))
       writeFileSync(
         join(directory, "ps"),
-        `#!/bin/sh\necho '${child.pid} ${process.pid} ${child.pid} S node changed-command'\n`,
+        `#!/bin/sh\necho '${child.pid} ${process.pid} ${child.pid} S Thu Jan  1 00:00:00 1970 node changed-command'\n`,
         { mode: 0o755 },
       )
       process.env.PATH = `${directory}:${original}`
@@ -501,7 +669,7 @@ test("a group whose command disappears during exit needs no unproved escalation"
 case "$*" in
   *command=*)
     if [ -e '${signalled}' ]; then
-      echo '${child.pid} ${process.pid} ${child.pid} S (node)'
+      echo '${child.pid} ${process.pid} ${child.pid} S Thu Jan  1 00:00:00 1970 (node)'
       touch '${observed}'
       exit 0
     fi;;
