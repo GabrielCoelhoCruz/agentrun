@@ -2,6 +2,7 @@ import { Context, Effect, FileSystem, Layer, Option, Path, Ref, Schema } from "e
 import type { PlatformError } from "effect/PlatformError"
 import { RunNotFound, StateCorrupted } from "./domain/Errors.js"
 import { RunState } from "./domain/RunState.js"
+import * as OwnershipRecords from "./OwnershipRecords.js"
 
 export class StateStore extends Context.Service<StateStore, {
   readonly load: (runId: string) => Effect.Effect<RunState, StateCorrupted | RunNotFound>
@@ -19,14 +20,18 @@ export class StateStore extends Context.Service<StateStore, {
         const file = (runId: string) => path.join(runs, runId, "state.json")
         const load = Effect.fn("StateStore.load")(function*(runId: string) {
           const target = file(runId)
-          const content = yield* fs.readFileString(target).pipe(Effect.mapError((error) =>
-            error.reason._tag === "NotFound"
-              ? new RunNotFound({ runId })
-              : new StateCorrupted({ path: target, issue: error.message })
-          ))
+          const corrupted = () =>
+            new StateCorrupted({
+              path: target,
+              issue: "Expected a stable regular file within the bounded record limit",
+            })
+          if (!(yield* OwnershipRecords.exists(target).pipe(Effect.mapError(corrupted)))) {
+            return yield* new RunNotFound({ runId })
+          }
+          const bytes = yield* OwnershipRecords.readBytes(target, 16 * 1024 * 1024).pipe(Effect.mapError(corrupted))
+          const content = bytes.toString("utf8")
           const json = yield* Effect.try({
-            try: (): unknown =>
-              JSON.parse(content),
+            try: (): unknown => JSON.parse(content),
             catch: (error) => new StateCorrupted({ path: target, issue: String(error) }),
           })
           return yield* Schema.decodeUnknownEffect(codec)(json).pipe(
@@ -41,9 +46,9 @@ export class StateStore extends Context.Service<StateStore, {
           yield* fs.rename(`${target}.tmp`, target)
         })
         const latest = Effect.gen(function*() {
-          const entries = yield* fs.readDirectory(runs).pipe(Effect.catch((error) =>
-            error.reason._tag === "NotFound" ? Effect.succeed([]) : Effect.die(error)
-          ))
+          const entries = yield* fs.readDirectory(runs).pipe(
+            Effect.catch((error) => error.reason._tag === "NotFound" ? Effect.succeed([]) : Effect.die(error)),
+          )
           for (const id of entries.sort().reverse()) {
             if (yield* fs.exists(file(id)).pipe(Effect.orDie)) return Option.some(id)
           }

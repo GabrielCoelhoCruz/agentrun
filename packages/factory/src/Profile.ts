@@ -10,17 +10,17 @@ import { blob } from "./Store.js"
 import type { Blob } from "./Store.js"
 
 export const executorIdentity = () =>
-  io("executor", () => {
+  io("executor", async () => {
     const index = fileURLToPath(import.meta.resolve("agentrun"))
     const core = fileURLToPath(import.meta.resolve("@agentrun/core"))
-    const bins = [dirname(index), dirname(core)].flatMap((directory) =>
-      readdirSync(directory).filter((name) => name.endsWith(".mjs")).sort().map((name) => ({
-        name,
-        digest: sha256(readBytes(join(directory, name))),
-      }))
-    )
+    const bins = []
+    for (const directory of [dirname(index), dirname(core)]) {
+      for (const name of readdirSync(directory).filter((name) => name.endsWith(".mjs")).sort()) {
+        bins.push({ name, digest: sha256(await readBytes(join(directory, name))) })
+      }
+    }
     const bin = join(dirname(index), "bin.mjs")
-    readBytes(bin)
+    await readBytes(bin)
     return { bin, digest: sha256(JSON.stringify(bins)) }
   })
 
@@ -31,7 +31,7 @@ export const repository = (cwd: string) =>
     return yield* io("repository", () => ({ repoRoot: realpathSync(root), commonDir: realpathSync(common) }))
   })
 
-const resolveExecutable = (name: string, repoRoot: string) => {
+const resolveExecutable = async (name: string, repoRoot: string) => {
   const candidates = name.includes("/")
     ? [inside(repoRoot, name)]
     : (process.env.PATH ?? "").split(delimiter).map((directory) => join(directory, name))
@@ -40,7 +40,7 @@ const resolveExecutable = (name: string, repoRoot: string) => {
       accessSync(candidate, constants.X_OK)
       const executable = realpathSync(candidate)
       if (!lstatSync(executable).isFile()) continue
-      return { executable, executableHash: sha256(readBytes(executable, 256 * 1024 * 1024)) }
+      return { executable, executableHash: sha256(await readBytes(executable, 256 * 1024 * 1024)) }
     } catch {
       continue
     }
@@ -50,10 +50,10 @@ const resolveExecutable = (name: string, repoRoot: string) => {
 
 export const prepareProfile = (repoRoot: string, commonDir: string, file: string, goal: string, id: string) =>
   Effect.gen(function*() {
-    const parsed = yield* io("profile", () => {
+    const parsed = yield* io("profile", async () => {
       try {
         Schema.decodeUnknownSync(Id)(id)
-        const bytes = readBytes(inside(repoRoot, file), 1024 * 1024)
+        const bytes = await readBytes(inside(repoRoot, file), 1024 * 1024)
         const raw: unknown = JSON.parse(bytes.toString("utf8"))
         const profile = Schema.decodeUnknownSync(ProjectProfile, { onExcessProperty: "error" })(raw)
         if (goal.trim() === "") throw failure("profile", "Goal must not be empty", 2)

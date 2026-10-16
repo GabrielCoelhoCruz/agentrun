@@ -55,7 +55,7 @@ if (mode === "pause") {
 syncBuiltinESMExports()
 const { writeExclusive } = await import("../../src/Files.ts")
 try {
-  writeExclusive(join(directory, ...(mode === "swap" ? ["artifacts"] : []), "result.json"), "complete")
+  await writeExclusive(join(directory, ...(mode === "swap" ? ["artifacts"] : []), "result.json"), "complete")
   console.log(JSON.stringify({ ok: true }))
 } catch (error) {
   console.log(JSON.stringify({ ok: false, code: error.code, message: error.message }))

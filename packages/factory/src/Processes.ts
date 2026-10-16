@@ -39,10 +39,10 @@ const alive = (pid: number) =>
     }
   })
 export const receipt = (owned: OwnedProcess, attemptId: string) =>
-  io("process", () => {
+  io("process", async () => {
     const file = join(owned.directory, "result.json")
     if (!existsSync(file)) return undefined
-    const result = Schema.decodeUnknownSync(ProcessResult, { onExcessProperty: "error" })(readJson(file))
+    const result = Schema.decodeUnknownSync(ProcessResult, { onExcessProperty: "error" })(await readJson(file))
     if (
       result.pid !== owned.pid || result.token !== owned.token || result.commandHash !== owned.commandHash
       || result.attemptId !== attemptId
@@ -57,7 +57,7 @@ export const stop = (store: Store, attemptId: string, owned: OwnedProcess, reaso
         error,
       )
     ))
-    const commandGroup = yield* io("process-ownership", () => {
+    const commandGroup = yield* io("process-ownership", async () => {
       const file = join(owned.directory, "command-group.json")
       if (!existsSync(file)) {
         if (existsSync(join(owned.directory, "started.json")) && !existsSync(join(owned.directory, "result.json"))) {
@@ -65,7 +65,7 @@ export const stop = (store: Store, attemptId: string, owned: OwnedProcess, reaso
         }
         return undefined
       }
-      const group = Schema.decodeUnknownSync(CommandGroup, { onExcessProperty: "error" })(readJson(file))
+      const group = Schema.decodeUnknownSync(CommandGroup, { onExcessProperty: "error" })(await readJson(file))
       if (
         group.pid !== owned.pid || group.token !== owned.token || group.commandHash !== owned.commandHash
         || group.attemptId !== attemptId || group.pgid === owned.pid
@@ -93,10 +93,10 @@ export const collectProcess = (store: Store, current: AttemptState, result: Proc
     const owned = current.process
     if (owned === undefined) return yield* failure("process", "Process receipt has no registered owner")
     const blobs = yield* io("artifact", () =>
-      ["stdout.log", "stderr.log", "started.json", "result.json"].map((name) => ({
+      Promise.all(["stdout.log", "stderr.log", "started.json", "result.json"].map(async (name) => ({
         name,
-        value: blob(readBytes(join(owned.directory, name))),
-      })))
+        value: blob(await readBytes(join(owned.directory, name))),
+      }))))
     yield* store.append(
       {
         _tag: "ProcessCompleted",
@@ -108,7 +108,9 @@ export const collectProcess = (store: Store, current: AttemptState, result: Proc
           digest: value.digest,
         })),
       },
-      blobs.map(({ value }) => value),
+      blobs.map(({ value }) =>
+        value
+      ),
     )
   })
 

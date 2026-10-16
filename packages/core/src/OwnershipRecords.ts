@@ -19,9 +19,9 @@ export const BranchReceipt = Schema.Struct({
 // Contents and native error details are deliberately excluded from diagnostics.
 export class OwnershipRecordError extends Schema.TaggedError<OwnershipRecordError>()("OwnershipRecordError", {}) {}
 const refused = () => new OwnershipRecordError({})
-const valid = (stat: BigIntStats) => stat.isFile() && stat.size <= BigInt(limit)
-const same = (left: BigIntStats, right: BigIntStats) =>
-  valid(right) && left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+const valid = (stat: BigIntStats, maximum: number) => stat.isFile() && stat.size <= BigInt(maximum)
+const same = (left: BigIntStats, right: BigIntStats, maximum: number) =>
+  valid(right, maximum) && left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
   && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
 const attempt = <A>(run: () => Promise<A>) => Effect.tryPromise({ try: run, catch: refused })
 
@@ -37,10 +37,10 @@ export const exists = (file: string) =>
 export const validateGenerated = (content: string): Effect.Effect<void, OwnershipRecordError> =>
   Buffer.byteLength(content, "utf8") <= limit ? Effect.void : Effect.fail(refused())
 
-export const read = Effect.fn("OwnershipRecords.read")(
-  function*(file: string, schema: typeof RunReservation | typeof BranchReceipt, expected: string) {
+export const readBytes = Effect.fn("OwnershipRecords.readBytes")(
+  function*(file: string, maximum = limit) {
     const before = yield* attempt(() => fs.lstat(file, { bigint: true }))
-    if (!valid(before)) return yield* refused()
+    if (!valid(before, maximum)) return yield* refused()
     // Acquisition is uninterruptible so a late open cannot leak its handle.
     const handle = yield* Effect.acquireRelease(
       attempt(() =>
@@ -48,19 +48,27 @@ export const read = Effect.fn("OwnershipRecords.read")(
       ),
       (handle) => attempt(() => handle.close()).pipe(Effect.orDie),
     )
-    if (!same(before, yield* attempt(() => handle.stat({ bigint: true })))) return yield* refused()
-    const buffer = Buffer.alloc(limit + 1)
+    if (!same(before, yield* attempt(() => handle.stat({ bigint: true })), maximum)) return yield* refused()
+    const buffer = Buffer.alloc(Math.min(maximum, Math.max(limit, Number(before.size))) + 1)
     let offset = 0
     while (offset < buffer.length) {
       const { bytesRead } = yield* attempt(() => handle.read(buffer, offset, buffer.length - offset, offset))
       if (bytesRead === 0) break
       offset += bytesRead
     }
-    if (offset > limit || BigInt(offset) !== before.size) return yield* refused()
-    if (!same(before, yield* attempt(() => handle.stat({ bigint: true })))) return yield* refused()
-    if (!same(before, yield* attempt(() => fs.lstat(file, { bigint: true })))) return yield* refused()
+    if (offset > maximum || BigInt(offset) !== before.size) return yield* refused()
+    if (!same(before, yield* attempt(() => handle.stat({ bigint: true })), maximum)) return yield* refused()
+    if (!same(before, yield* attempt(() => fs.lstat(file, { bigint: true })), maximum)) return yield* refused()
+    return buffer.subarray(0, offset)
+  },
+  Effect.scoped,
+)
+
+export const read = Effect.fn("OwnershipRecords.read")(
+  function*(file: string, schema: typeof RunReservation | typeof BranchReceipt, expected: string) {
+    const bytes = yield* readBytes(file)
     const content = yield* Effect.try({
-      try: () => new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, offset)),
+      try: () => new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes),
       catch: refused,
     })
     const json = yield* Effect.try({ try: (): unknown => JSON.parse(content), catch: refused })
@@ -68,5 +76,4 @@ export const read = Effect.fn("OwnershipRecords.read")(
     if (content !== expected) return yield* refused()
     return content
   },
-  Effect.scoped,
 )

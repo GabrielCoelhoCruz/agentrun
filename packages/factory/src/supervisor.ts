@@ -77,9 +77,9 @@ const serve = Effect.gen(function*() {
     const gate = child.stdin
     gate.on("error", () => {})
     if (child.pid === undefined) return yield* failure("process", "Command group did not start")
-    yield* io("process", () => {
+    yield* io("process", async () => {
       const temporary = join(launch.directory, "command-group.pending")
-      writeExclusive(temporary, JSON.stringify({ ...identity, pgid: child.pid }))
+      await writeExclusive(temporary, JSON.stringify({ ...identity, pgid: child.pid }))
       linkSync(temporary, join(launch.directory, "command-group.json"))
       syncDirectory(launch.directory)
       unlinkSync(temporary)

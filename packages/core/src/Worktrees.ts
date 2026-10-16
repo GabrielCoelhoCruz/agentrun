@@ -79,7 +79,10 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
       if (typeof lease !== "number" || !Number.isSafeInteger(lease) || !entry.endsWith(".json")) {
         return yield* processError("Invalid Git process journal")
       }
-      const token = yield* fs.readFileString(file).pipe(Effect.mapError(processError))
+      const bytes = yield* OwnershipRecords.readBytes(file).pipe(
+        Effect.mapError(() => processError("Expected a stable regular file within the bounded record limit")),
+      )
+      const token = bytes.toString("utf8")
       yield* stopProcessGroup(lease, token, "git").pipe(Effect.mapError(processError))
       yield* fs.remove(file).pipe(Effect.mapError(processError))
     }
