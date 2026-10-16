@@ -111,6 +111,24 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
       for (let attempt = 0; attempt < 40; attempt++) {
         const current = yield* processTable()
+        if (unverified !== undefined) {
+          const alive = new Set(
+            current.filter((row) => identities.get(row.pid) === row.started && running(row.state))
+              .map((row) => row.pid),
+          )
+          let previousSize = -1
+          // A detached child whose parent exits between snapshots can lose its ancestry before observation.
+          // Verified cleanup has the same race (#50); closing it needs OS containment, not more polling.
+          while (previousSize !== alive.size) {
+            previousSize = alive.size
+            for (const row of current) {
+              if (running(row.state) && alive.has(row.parent) && !alive.has(row.pid)) {
+                alive.add(row.pid)
+                identities.set(row.pid, row.started)
+              }
+            }
+          }
+        }
         for (const group of groups) {
           const members = current.filter((row) => row.group === group)
           if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
