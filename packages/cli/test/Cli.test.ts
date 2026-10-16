@@ -1468,11 +1468,10 @@ for (const dirty of [false, true]) {
       expect(alive(owned.child)).toBe(false)
       expect(existsSync(lockPath(f))).toBe(false)
       expect(existsSync(join(f.repo, ".agentrun/runs", state(f).runId, "report.json"))).toBe(true)
-      const resumed = child(f, ["resume", "--json"])
-      expect(await resumed.done).toBe(1)
-      expect(resumed.stderr()).not.toMatch(/[Oo]wnership/)
-      expect(resumed.stderr()).toContain("Run has failed or unfinished tasks")
-      expect(existsSync(partial)).toBe(dirty)
+      const refused = child(f, ["resume", "--json"])
+      expect(await refused.done).toBe(1)
+      expect(refused.stderr()).toMatch(/[Oo]wnership/)
+      expect(existsSync(partial)).toBe(true)
       if (dirty) expect(readFileSync(join(partial, "partial-user-work"), "utf8")).toBe("preserve this\n")
       expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
     } finally {
@@ -1845,7 +1844,7 @@ test("restricted settings and setup fail preflight without run or worker effects
 }, 30000)
 
 for (const mode of ["failed retry", "interrupted", "linked checkout"] as const) {
-  test(`ownership keeps the suffix branch of a failed creation after ${mode}`, async () => {
+  test(`ownership refuses foreign suffix delivery after ${mode}`, async () => {
     const f = fixture(1, "report-nochange")
     const id = "first-0001"
     const branch = "agentrun/task0-0001"
@@ -1869,19 +1868,19 @@ for (const mode of ["failed retry", "interrupted", "linked checkout"] as const) 
     const second = mode === "linked checkout" ? { ...f, repo: join(f.root, "linked") } : f
     if (second !== f) git(f.repo, ["worktree", "add", "-b", "linked", second.repo, "HEAD"])
     writeFileSync(join(second.repo, "SECOND.md"), "## task0: Foreign delivery\nreport-bytes\n")
+    expect(await child(second, ["run", "SECOND.md", "--run-id", "second-0001", "--json"]).done).toBe(0)
     const before = readFileSync(file)
     const refs = git(f.repo, ["show-ref"])
-    const foreign = child(second, ["run", "SECOND.md", "--run-id", "second-0001", "--json"])
-    expect(await foreign.done).toBe(2)
-    expect(foreign.stderr()).toMatch(/[Cc]ollision/)
-    expect(existsSync(join(second.repo, ".agentrun/runs/second-0001"))).toBe(false)
-    expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
+    const otherReport = readFileSync(join(second.repo, ".agentrun/runs/second-0001/report.json"))
+    const resumed = child(f, ["resume", id, ...(mode === "interrupted" ? [] : ["--retry-failed"]), "--json"])
+    expect(await resumed.done).toBe(1)
+    expect(resumed.stderr()).toMatch(/[Oo]wnership/)
+    expect(resumed.stderr()).toMatch(/[Pp]reserve|[Ii]nspect/)
+    expect(starts(f)).toBe(1)
     expect(readFileSync(file)).toEqual(before)
     expect(git(f.repo, ["show-ref"])).toBe(refs)
-    const resumed = child(f, ["resume", id, ...(mode === "interrupted" ? [] : ["--retry-failed"]), "--json"])
-    expect(await resumed.done).toBe(0)
-    expect(starts(f)).toBe(1)
-    expect(git(f.repo, ["branch", "--list", branch])).toContain(branch)
+    expect(readFileSync(join(second.repo, ".agentrun/runs/second-0001/report.json"))).toEqual(otherReport)
+    expect(existsSync(initial.worktrees.task0.path)).toBe(false)
   }, 30000)
 }
 
@@ -1937,7 +1936,7 @@ test("ownership gives actionable empty reservation refusal without changing its 
   expect(git(f.repo, ["branch", "--list", "agentrun/*"])).toBe("")
 }, 30000)
 
-test("ownership resumes creation interrupted while Git runs", async () => {
+test("ownership preserves creation interrupted before proof is saved", async () => {
   const f = fixture(1)
   hangingGit(f, "acquire")
   const running = child(f, ["run", "TASKS.md", "--run-id", "partial-0042", "--json"])
@@ -1948,10 +1947,14 @@ test("ownership resumes creation interrupted while Git runs", async () => {
   expect(saved.status.task0?._tag).toBe("interrupted")
   const worktree = saved.worktrees.task0!
   expect(existsSync(worktree.path)).toBe(true)
-  writeFileSync(join(worktree.path, "keep"), "partial work")
+  writeFileSync(join(worktree.path, "keep"), "unproved work")
+  const before = readFileSync(statePath(f))
+  const tip = git(f.repo, ["rev-parse", worktree.branch])
   const resumed = child(f, ["resume", saved.runId, "--json"])
-  expect(await resumed.done).toBe(0)
-  expect(state(f).status.task0?._tag).toBe("succeeded")
-  expect(git(f.repo, ["show", `${worktree.branch}:keep`])).toBe("partial work")
-  expect(existsSync(join(f.root, "starts-task0"))).toBe(true)
+  expect(await resumed.done).toBe(1)
+  expect(resumed.stderr()).toMatch(/[Oo]wnership/)
+  expect(readFileSync(statePath(f))).toEqual(before)
+  expect(git(f.repo, ["rev-parse", worktree.branch])).toBe(tip)
+  expect(readFileSync(join(worktree.path, "keep"), "utf8")).toBe("unproved work")
+  expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
 }, 30000)

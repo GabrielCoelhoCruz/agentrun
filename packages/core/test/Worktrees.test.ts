@@ -513,23 +513,3 @@ it.live("ownership refuses a replacement repository at the owned workspace path"
       assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", worktree.branch]), fixture.baseSha)
     })
   ))
-
-it.live("a creation that stops after Git starts stays resumable", () =>
-  withRepo((fixture) =>
-    Effect.gen(function*() {
-      const service = yield* Worktrees
-      const located = service.locate(task().id)
-      // A failing post-checkout hook makes `git worktree add` exit non-zero after it creates the branch and directory.
-      const hook = fixture.path.join(fixture.repoRoot, ".git", "hooks", "post-checkout")
-      yield* fixture.fs.writeFileString(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 })
-      const error = yield* Effect.flip(Effect.scoped(service.acquire(task(), fixture.baseSha)))
-      assert.strictEqual(error._tag, "GitError")
-      assert.strictEqual(yield* fixture.fs.exists(located.path), true)
-      assert.strictEqual(yield* git(fixture.repoRoot, ["rev-parse", located.branch]), fixture.baseSha)
-      yield* fixture.fs.remove(hook)
-      const actions = yield* service.reconcile(state(fixture, located, { _tag: "interrupted", attempt: 1 }))
-      assert.deepStrictEqual(actions, [{ _tag: "Resumable", taskId: located.taskId }])
-      const worktree = yield* Effect.scoped(service.acquire(task(), fixture.baseSha))
-      assert.deepStrictEqual(worktree, located)
-    })
-  ))
