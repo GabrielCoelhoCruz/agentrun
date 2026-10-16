@@ -49,6 +49,7 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
   function*(pgid: number, token?: string, kind: "worker" | "git" | "factory" = "worker") {
     const error = (cause: unknown) => systemError({ _tag: "Unknown", module: "ProcessGroup", method: "stop", cause })
     if (!Number.isSafeInteger(pgid) || pgid <= 1) return yield* error("Invalid process group")
+    // If the group has already exited, no snapshot is taken. A detached daemon can survive (#58).
     if (!(yield* isAlive(-pgid))) return
     if (token === undefined || !/^[a-f0-9]{32}$/.test(token)) {
       return yield* error("Live process group has no verified ownership token; recovery refused")
@@ -85,8 +86,8 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
           .map((row) => row.pid),
       )
       let previousSize = -1
-      // A detached child can lose ancestry between snapshots. Polling cannot recover that link (#50).
-      // OS containment or a launch contract that preserves ancestry is separate work.
+      // A process can fork a detached child on SIGTERM, then exit before the first poll or between later snapshots.
+      // The child can first appear with parent PID 1; polling cannot recover its ancestry. See #58.
       while (previousSize !== alive.size) {
         previousSize = alive.size
         for (const row of current) {
