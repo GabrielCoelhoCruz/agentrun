@@ -105,6 +105,7 @@ export const proveFreshResolve = (evidence, dependencies) => {
   for (const directory of [consumer, home, cache]) mkdirSync(directory)
   save(join(consumer, "package.json"), {
     name: "factory-fresh-resolve-proof",
+    packageManager: read(join(source, "package.json")).packageManager,
     private: true,
     type: "module",
     dependencies,
@@ -114,6 +115,7 @@ export const proveFreshResolve = (evidence, dependencies) => {
   assert.equal(existsSync(join(consumer, "pnpm-lock.yaml")), false)
   const env = { ...process.env, HOME: home, XDG_CACHE_HOME: cache, npm_config_cache: join(cache, "npm") }
   const run = (name, executable, argv) => runCommand(evidence, name, executable, argv, consumer, 900000, env)
+  run("fresh-package-manager", "pnpm", ["--version"])
   run("fresh-install", "pnpm", ["install", "--ignore-scripts", "--store-dir", join(cache, "pnpm")])
   run("fresh-dependencies", "pnpm", ["list", "--depth", "Infinity", "--json"])
   const output = run("fresh-import", process.execPath, [
