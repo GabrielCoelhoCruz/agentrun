@@ -34,21 +34,32 @@ jobs:
           python-version: "3.12"
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - name: Prepare unprivileged agent
+        run: |
+          sudo useradd --no-create-home --user-group --shell /usr/sbin/nologin agentrun-agent
+          chmod -R go-w "$GITHUB_WORKSPACE"
+          chmod go-w "$GITHUB_WORKSPACE/.." "$GITHUB_WORKSPACE/../.." "$RUNNER_TEMP"
       - name: Run journey
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EXAMPLE: ${{ inputs.example }}
           BUDGET: ${{ inputs.budget }}
         run: |
-          trap ': > "$GITHUB_STEP_SUMMARY"' EXIT
           [[ "$EXAMPLE" =~ ^[a-z0-9-]+$ ]] || { echo 'Invalid example'; exit 2; }
           [[ "$BUDGET" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo 'Invalid budget'; exit 2; }
           bash packages/factory/scripts/real-journey.sh --factory "$GITHUB_WORKSPACE" \
             --out "$RUNNER_TEMP/real-journey" --id "real-$GITHUB_RUN_ID" \
-            --example "examples/factory/$EXAMPLE" --budget "$BUDGET"
+            --example "examples/factory/$EXAMPLE" --budget "$BUDGET" --agent-user agentrun-agent
+      - name: Stop agent processes before publication
+        id: stopped
+        if: ${{ always() }}
+        run: |
+          sudo pkill -KILL -u agentrun-agent || test "$?" -eq 1
+          if pgrep -u agentrun-agent > /dev/null; then exit 1; fi
+          echo 'safe=true' >> "$GITHUB_OUTPUT"
       - name: Scan public evidence
         id: evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.stopped.outputs.safe == 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |

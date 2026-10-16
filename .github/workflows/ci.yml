@@ -96,3 +96,47 @@ jobs:
           name: factory-installed-proof-${{ github.sha }}
           path: ${{ runner.temp }}/factory-installed-proof.tar.gz
           if-no-files-found: warn
+
+  separated-user-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Prepare unprivileged fixture user
+        run: |
+          sudo useradd --no-create-home --user-group --shell /usr/sbin/nologin agentrun-agent
+          chmod -R go-w "$GITHUB_WORKSPACE"
+          chmod go-w "$GITHUB_WORKSPACE/.." "$GITHUB_WORKSPACE/../.." "$RUNNER_TEMP"
+      - name: Prove agent cannot alter the harness or publication
+        run: python3 packages/factory/scripts/real-journey-separated-e2e.py "$RUNNER_TEMP/separated-user-proof" agentrun-agent
+      - name: Stop fixture user before saving evidence
+        if: ${{ always() }}
+        run: |
+          sudo pkill -KILL -u agentrun-agent || test "$?" -eq 1
+          if pgrep -u agentrun-agent > /dev/null; then exit 1; fi
+      - name: Save fixture proof
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: separated-user-proof-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/separated-user-proof/results.json
+            ${{ runner.temp }}/separated-user-proof/*/journey.log
+            ${{ runner.temp }}/separated-user-proof/*/providers.jsonl
+            ${{ runner.temp }}/separated-user-proof/*/public/*.json
+            ${{ runner.temp }}/separated-user-proof/*/public/*.txt
+          if-no-files-found: error

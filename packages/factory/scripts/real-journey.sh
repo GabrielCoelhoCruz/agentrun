@@ -6,7 +6,7 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 usage: real-journey.sh --factory <checkout> --out <new-dir> --id <workflow-id>
-                       [--example <dir>] [--check <check-id>] [--goal <text>] [--budget <usd>]
+                       [--example <dir>] [--check <check-id>] [--goal <text>] [--budget <usd>] [--agent-user <user>]
 
   --factory  agentrun checkout with a built packages/factory/dist/bin.mjs
   --out      new output directory for public evidence only
@@ -18,6 +18,17 @@ usage: real-journey.sh --factory <checkout> --out <new-dir> --id <workflow-id>
 EOF
   exit 2
 }
+
+# CI requires OS user separation. Local runs keep the developer's user.
+for argument in "$@"; do
+  if [ "$argument" = --agent-user ]; then
+    exec python3 -I "$(dirname "$0")/separated-journey.py" "$@"
+  fi
+done
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+  echo 'CI requires --agent-user' >&2
+  exit 2
+fi
 
 factory=""
 out=""
