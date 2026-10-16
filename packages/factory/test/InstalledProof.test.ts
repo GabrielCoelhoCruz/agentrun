@@ -1,4 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { createRequire } from "node:module"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { expect, test } from "vitest"
 
@@ -161,4 +165,38 @@ test("installed proof refuses journey results from a different CLI build", () =>
     assert.throws(() => mergeJourneyResults([part('happy', 'a'), part('correct', 'b')]), /cli/i);
     assert.throws(() => mergeJourneyResults([part('happy', 'a'), { ...part('correct', 'a'), paidProviderCalls: 1 }]), /paid/i);
   `)).toBe("")
+})
+
+test("CI archive keeps fresh resolve evidence and excludes installed modules and caches", () => {
+  const { parse } = createRequire(new URL("../../core/package.json", import.meta.url))("yaml")
+  const workflow = parse(readFileSync(new URL("../../../.github/workflows/ci.yml", import.meta.url), "utf8"))
+  const archive = workflow.jobs["installed-proof"].steps.find((step: { readonly name?: string }) =>
+    step.name === "Archive installed proof"
+  )
+  const root = mkdtempSync(join(tmpdir(), "installed-archive-"))
+  const keep = [
+    "fresh-import.json",
+    "fresh-dependencies.json",
+    "fresh-package-manager.json",
+    "fresh-consumer/package.json",
+    "fresh-consumer/pnpm-lock.yaml",
+    "tarballs/agentrun-core-0.1.0.tgz",
+  ]
+  for (
+    const file of [
+      ...keep,
+      "fresh-consumer/node_modules/runtime/index.js",
+      "consumer/node_modules/runtime/index.js",
+      "fresh-cache/pnpm/package.bin",
+      "fresh-home/.cache/node/corepack/pnpm.cjs",
+    ]
+  ) {
+    const target = join(root, "factory-installed-proof", file)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, "evidence")
+  }
+  execFileSync("bash", ["-e", "-c", archive.run], { env: { ...process.env, RUNNER_TEMP: root } })
+  const files = execFileSync("tar", ["-tzf", join(root, "factory-installed-proof.tar.gz")], { encoding: "utf8" })
+    .trim().split("\n").filter((file) => !file.endsWith("/"))
+  expect(files.sort()).toEqual(keep.map((file) => `factory-installed-proof/${file}`).sort())
 })
