@@ -79,11 +79,33 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       groups.add(row.group)
     }
     const waitOnly = new Set<number>()
+    const observe = (current: typeof rows) => {
+      const alive = new Set(
+        current.filter((row) => identities.get(row.pid) === row.started && running(row.state))
+          .map((row) => row.pid),
+      )
+      let previousSize = -1
+      // A detached child can lose ancestry between snapshots. Polling cannot recover that link (#50).
+      // OS containment or a launch contract that preserves ancestry is separate work.
+      while (previousSize !== alive.size) {
+        previousSize = alive.size
+        for (const row of current) {
+          if (running(row.state) && alive.has(row.parent) && !alive.has(row.pid)) {
+            alive.add(row.pid)
+            identities.set(row.pid, row.started)
+          }
+        }
+      }
+      for (const row of current) if (alive.has(row.pid) && row.group > 1) groups.add(row.group)
+      return alive
+    }
     let firstSignal = true
     for (const signal of ["SIGTERM", "SIGKILL"] as const) {
       for (const group of groups) {
         if (!maySignal || waitOnly.has(group)) continue
         const current = firstSignal ? rows : yield* processTable(true)
+        // Retain descendants before a signal can remove their parent from the next snapshot.
+        observe(current)
         firstSignal = false
         const members = current.filter((row) => row.group === group)
         if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
@@ -92,7 +114,11 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
         }
         const original = rows.find((row) => row.pid === group && row.group === group && owned.has(row.pid))
         const leader = current.find((row) => row.pid === group && row.group === group)
-        if (original === undefined || leader === undefined || leader.command !== original.command) {
+        // A late group has no initial ownership proof; tracking alone does not permit a signal.
+        if (
+          original === undefined || leader === undefined || leader.started !== original.started
+          || leader.command !== original.command
+        ) {
           waitOnly.add(group)
           continue
         }
@@ -112,33 +138,14 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
       for (let attempt = 0; attempt < 40; attempt++) {
         const current = yield* processTable()
-        const alive = new Set(
-          current.filter((row) => identities.get(row.pid) === row.started && running(row.state))
-            .map((row) => row.pid),
-        )
-        let previousSize = -1
-        // A detached fork can lose ancestry before observation (#50); both paths need OS containment to prevent it.
-        while (previousSize !== alive.size) {
-          previousSize = alive.size
-          for (const row of current) {
-            if (running(row.state) && alive.has(row.parent) && !alive.has(row.pid)) {
-              alive.add(row.pid)
-              identities.set(row.pid, row.started)
-            }
-          }
-        }
-        for (const row of current) if (alive.has(row.pid) && row.group > 1) groups.add(row.group)
+        const alive = observe(current)
         for (const group of groups) {
           const members = current.filter((row) => row.group === group)
           if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
             groups.delete(group)
           }
         }
-        if (
-          groups.size === 0 && !current.some((row) => identities.get(row.pid) === row.started && running(row.state))
-        ) {
-          return
-        }
+        if (groups.size === 0 && alive.size === 0) return
         yield* Effect.sleep("50 millis")
       }
     }
