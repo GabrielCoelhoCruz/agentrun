@@ -55,4 +55,19 @@ fs.rename = (source, destination, callback) =>
     }
     callback(error)
   })
+let descriptorWrites = 0
+const writeFile = fs.writeFileSync
+fs.writeFileSync = (target, data, ...rest) => {
+  if (
+    process.env.FACTORY_FIXTURE_CRASH === "partial-write" && typeof target === "number"
+    && !existsSync(process.env.FACTORY_FIXTURE_CRASH_MARKER)
+    && ++descriptorWrites === Number(process.env.FACTORY_FIXTURE_CRASH_WRITE)
+  ) {
+    const bytes = Buffer.from(data)
+    fs.writeSync(target, bytes, 0, Math.floor(bytes.length / 2))
+    writeFile(process.env.FACTORY_FIXTURE_CRASH_MARKER, String(process.pid))
+    process.kill(process.pid, "SIGKILL")
+  }
+  return writeFile(target, data, ...rest)
+}
 syncBuiltinESMExports()

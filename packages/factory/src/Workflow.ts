@@ -1,11 +1,21 @@
 import { RunLock } from "@agentrun/core"
 import { Effect, Schema } from "effect"
-import { existsSync, mkdirSync, readdirSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs"
 import { join } from "node:path"
 import { sourceArchive } from "./Archive.js"
 import { Candidate, FactoryError, failure, HumanAction, Id } from "./Domain.js"
 import type { Artifact, HumanDecision, HumanRequest, Projection } from "./Domain.js"
-import { gitBytes, inside, io, readBytes, sha256, syncDirectory, writeExclusive } from "./Files.js"
+import {
+  gitBytes,
+  inside,
+  io,
+  readBytes,
+  safePath,
+  sha256,
+  syncDirectory,
+  temporaryPath,
+  writeExclusive,
+} from "./Files.js"
 import { stop } from "./Processes.js"
 import { executorIdentity, prepareProfile, repository } from "./Profile.js"
 import {
@@ -366,23 +376,31 @@ const exportLocal = (store: Store) =>
     if (prepared === undefined) return yield* failure("export", "Export preparation is missing")
     const owner = JSON.stringify({ workflow: state.run.id, manifestDigest: prepared.receipt.manifestDigest })
     yield* io("export", () => {
-      const directory = prepared.receipt.directory
+      const directory = safePath(store.directory, prepared.receipt.directory)
       if (!existsSync(directory)) {
-        mkdirSync(join(store.directory, "exports"), { recursive: true, mode: 0o700 })
-        mkdirSync(directory, { mode: 0o700 })
-        writeExclusive(join(directory, "owner.json"), owner)
+        const staging = join(store.directory, "export-staging")
+        writeExclusive(join(staging, "owner.json"), owner, store.directory)
+        mkdirSync(safePath(store.directory, join(store.directory, "exports")), { recursive: true, mode: 0o700 })
+        safePath(store.directory, staging)
+        safePath(store.directory, directory)
+        renameSync(staging, directory)
         syncDirectory(join(store.directory, "exports"))
-      } else if (
-        !existsSync(join(directory, "owner.json"))
-        || readBytes(join(directory, "owner.json")).toString("utf8") !== owner
+        syncDirectory(store.directory)
+      }
+      const receipt = safePath(store.directory, join(directory, "owner.json"))
+      if (
+        !existsSync(receipt)
+        || readBytes(receipt).toString("utf8") !== owner
       ) throw failure("export", "Existing export has no matching owner receipt. Preserve and inspect it.")
     })
     for (const file of [...prepared.files, { name: "manifest.json", digest: prepared.receipt.manifestDigest }]) {
       const bytes = yield* store.artifact(file.digest)
-      yield* io("export", () => writeExclusive(inside(prepared.receipt.directory, file.name), bytes))
+      yield* io("export", () => writeExclusive(inside(prepared.receipt.directory, file.name), bytes, store.directory))
     }
     yield* io("export", () => {
-      const top = readdirSync(prepared.receipt.directory).sort()
+      const top = readdirSync(safePath(store.directory, prepared.receipt.directory)).filter((name) =>
+        !temporaryPath(name)
+      ).sort()
       const expected = [
         ...new Set(["owner.json", "manifest.json", ...prepared.files.map((file) => file.name.split("/")[0] ?? "")]),
       ].sort()
