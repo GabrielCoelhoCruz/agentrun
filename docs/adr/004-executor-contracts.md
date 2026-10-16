@@ -2,7 +2,7 @@
 
 Status: accepted. Date: 2026-10-07.
 Updates SPEC B2, B5, B6, B8, D3, D19, D20, and D22.
-Clarifies D4, D13, D15, D18, and D21. The factory coordinator remains outside v1 scope.
+Clarifies D4, D13, D15, D18, and D21. The factory coordinator remains outside the executor v1 scope.
 
 ## Start once and reconcile by exact ID
 
@@ -115,4 +115,5 @@ It verifies the patch digest and applies its own expected write policy.
 The mutable branch tip is not the candidate identity.
 These are future coordination requirements, not new global rejection rules for existing v1 tasks.
 
-npm remains unpublished. This change adds no factory package, project profile, scheduler, or publication action.
+npm remains unpublished. This executor decision adds no factory package, project profile, scheduler, or publication action.
+The separate [factory workflow](../../packages/factory/README.md) uses these executor contracts.

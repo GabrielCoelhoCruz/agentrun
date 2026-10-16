@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "project": "notes-ts",
+  "base": "HEAD",
+  "roles": {
+    "implement": {
+      "agent": "claude-code",
+      "instructions": "roles/implement.md"
+    },
+    "review": {
+      "agent": "claude-code",
+      "instructions": "roles/review.md"
+    }
+  },
+  "checks": [
+    {
+      "id": "restart",
+      "argv": ["node", "checks/restart.mjs"],
+      "cwd": ".",
+      "files": ["checks/restart.mjs"],
+      "requiredEnv": [],
+      "timeoutMs": 30000
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "persisted-note",
+      "description": "A note can be read after the server stops and starts again.",
+      "check": "restart"
+    }
+  ],
+  "limits": {
+    "corrections": 2,
+    "durationMs": 3600000
+  }
+}
