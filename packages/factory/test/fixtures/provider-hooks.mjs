@@ -51,9 +51,23 @@ export function query({ prompt, options }) {
   assert.equal(options.permissionMode, 'dontAsk');
   const prior = existsSync(process.env.FACTORY_FIXTURE_LOG)
     ? readFileSync(process.env.FACTORY_FIXTURE_LOG, 'utf8').trim().split('\\n').filter(Boolean).map(JSON.parse) : [];
+  if (process.env.FACTORY_FIXTURE_PUBLICATION_ATTACK === '1') {
+    const encoded = Buffer.from(process.env.ANTHROPIC_API_KEY).toString('base64');
+    appendFileSync(join(process.env.HOME, '..', 'toolchain.txt'), 'PROVIDER_FREE_TEXT' + encoded + '\\n');
+    const channels = Object.keys(process.env).filter(name => /^(GITHUB_|ACTIONS_|GH_|RUNNER_|INPUT_)/.test(name));
+    record({ kind: 'publication-environment', channels });
+    for (const name of ['GITHUB_STEP_SUMMARY', 'GITHUB_OUTPUT', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE']) {
+      if (process.env[name]) appendFileSync(process.env[name], encoded + '\\n');
+    }
+  }
   record({ kind: 'provider', stage: task.stage, attemptId: task.attemptId, inputSha: task.inputSha, pid: process.pid, cwd: options.cwd, review, maxBudgetUsd: options.maxBudgetUsd });
   return Object.assign((async function* () {
     yield { type: 'system', subtype: 'init', session_id: 'local-fixture' };
+    if (process.env.FACTORY_FIXTURE_ECHO_SECRET === '1') {
+      assert.ok(process.env.ANTHROPIC_API_KEY);
+      record({ kind: 'secret-echo', stage: task.stage });
+      yield { type: 'assistant', message: { content: [{ type: 'text', text: process.env.ANTHROPIC_API_KEY }] } };
+    }
     if (!review) {
       yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'fixture-write', name: 'Write', input: {} }] } };
       if (mode === 'cancel-agent' || mode === 'crash-tools') {
@@ -102,7 +116,7 @@ export function query({ prompt, options }) {
         writeFileSync(join(options.cwd, process.env.FACTORY_FIXTURE_CHECK_FILE), python ? 'raise SystemExit(0)\\n' : 'process.exit(0)\\n');
       }
     }
-    let result = 'Implementation complete';
+    let result = process.env.FACTORY_FIXTURE_ECHO_SECRET === '1' ? process.env.ANTHROPIC_API_KEY : 'Implementation complete';
     if (review) {
       let verdict = 'accepted';
       let findings = [];
