@@ -93,6 +93,7 @@ class Container:
         result = subprocess.run(['/usr/bin/docker', *options, IMAGE], env=client_env, capture_output=True)
         if result.returncode:
             raise RuntimeError('Cannot create agent container')
+        self.identifier = result.stdout.decode().strip()
         self.started = True
         if self.docker('start', self.name).returncode:
             raise RuntimeError('Cannot start agent container')

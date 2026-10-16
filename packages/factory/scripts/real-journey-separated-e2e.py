@@ -94,7 +94,7 @@ for case in ['host-path', 'checkout', 'host-pid', 'channels', 'background']:
             if case != 'background' or phase != 'red':
                 container.stop()
             passed = check(case, result, before, container, alive)
-            row = {'container': container.name, 'case': case, 'phase': phase, 'observed': result, 'boundary_passed': passed,
+            row = {'container': container.name, 'containerId': container.identifier, 'case': case, 'phase': phase, 'observed': result, 'boundary_passed': passed,
                    'expected': phase != 'red', 'passed': passed == (phase != 'red')}
             if case == 'checkout':
                 row['hashes'] = {'before': before, 'after': {'checkout': tree_hash(factory), 'build': tree_hash(container.build)}}
