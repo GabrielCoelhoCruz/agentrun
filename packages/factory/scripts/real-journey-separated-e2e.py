@@ -26,9 +26,12 @@ spec = importlib.util.spec_from_file_location('journey_container', Path(__file__
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 key = 'fake-review-key-0123456789-abcdefgh'
-# Include every step PATH and Ubuntu sudo secure_path directory, even if absent.
-host_dirs = sorted(set(os.environ['PATH'].split(':') + ['/usr/local/sbin', '/usr/local/bin',
-                   '/usr/sbin', '/usr/bin', '/sbin', '/bin', '/opt/pipx_bin', '/usr/local/.ghcup/bin']))
+# Preserve the runner's original PATH before the step fixes its own PATH.
+# Ask sudo for the actual secure_path without executing a searched command.
+secure_path = subprocess.check_output(['/usr/bin/sudo', '-n', '/usr/bin/printenv', 'PATH'],
+                                      env={'PATH': module.PATH}, text=True).strip()
+host_dirs = sorted(set(os.environ.get('FACTORY_PROOF_HOST_PATH', os.environ['PATH']).split(':')
+                       + secure_path.split(':') + ['/opt/pipx_bin', '/usr/local/.ghcup/bin']))
 results = []
 
 

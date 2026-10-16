@@ -126,6 +126,7 @@ jobs:
         env:
           AGENTRUN_PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          export FACTORY_PROOF_HOST_PATH="$PATH"
           export PATH=/usr/sbin:/usr/bin:/sbin:/bin
           /usr/bin/python3 -I packages/factory/scripts/real-journey-separated-e2e.py "$RUNNER_TEMP/container-proof"
       - name: Stop owned containers before saving evidence
