@@ -116,8 +116,8 @@ jobs:
         run: |
           export PATH=/usr/sbin:/usr/bin:/sbin:/bin
           /usr/bin/sudo /usr/bin/ln -sf /opt/hostedtoolcache/node/24.21.0/x64/bin/node /usr/bin/node
-          /usr/bin/node /home/runner/setup-pnpm/node_modules/pnpm/bin/pnpm.cjs install --frozen-lockfile
-          /usr/bin/node /home/runner/setup-pnpm/node_modules/pnpm/bin/pnpm.cjs -r build
+          /home/runner/setup-pnpm/node_modules/.bin/pnpm install --frozen-lockfile
+          /home/runner/setup-pnpm/node_modules/.bin/pnpm -r build
       - name: Build agent image
         run: |
           export PATH=/usr/sbin:/usr/bin:/sbin:/bin
