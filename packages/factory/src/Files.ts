@@ -128,30 +128,33 @@ export const writeExclusive = async (file: string, bytes: string | Uint8Array, r
       if (stat?.isFile() && stat.dev === identity.dev && stat.ino === identity.ino) unlinkSync(path)
     }
     let published = false
-    try {
+    const checkPublishedParents = () => {
       try {
-        writeFileSync(fd, bytes)
-        fsyncSync(fd)
         checkParents()
-        safePath(root, temporary)
-        try {
-          linkSync(temporary, file)
-          published = true
-        } catch (cause) {
-          if ((cause as NodeJS.ErrnoException).code === "EEXIST") return await accept()
-          throw cause
-        }
-        checkParents()
-        syncDirectory(directory)
-      } finally {
-        checkParents()
-        safePath(root, temporary)
-        removeOwnLink(temporary)
+      } catch (cause) {
+        // Path-based checks narrow the race; Node has no atomic directory-relative unlink.
+        if (published) removeOwnLink(file)
+        throw cause
       }
-    } catch (cause) {
-      // Path-based checks narrow the race; Node has no atomic directory-relative unlink.
-      if (published) removeOwnLink(file)
-      throw cause
+    }
+    try {
+      writeFileSync(fd, bytes)
+      fsyncSync(fd)
+      checkParents()
+      safePath(root, temporary)
+      try {
+        linkSync(temporary, file)
+        published = true
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === "EEXIST") return await accept()
+        throw cause
+      }
+      checkPublishedParents()
+      syncDirectory(directory)
+    } finally {
+      checkPublishedParents()
+      safePath(root, temporary)
+      removeOwnLink(temporary)
     }
   } finally {
     closeSync(fd)

@@ -137,6 +137,22 @@ test("exclusive write syncs publication while the complete temporary file still 
   expect(readdirSync(directory)).toEqual(["result.json"])
 })
 
+test.each([
+  ["fail-directory-sync", "EIO"],
+  ["fail-temporary-unlink", "EBUSY"],
+])("exclusive write preserves an accepted artifact after %s", async (mode, code) => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-published-error-"))
+  const result = writer(directory, mode)
+  expect(result.status, result.stderr + result.stdout).toBe(1)
+  expect(result.stdout).toContain(JSON.stringify({ read: "complete", accepted: true }))
+  expect(result.stdout).toContain(`"code":"${code}"`)
+  const file = join(directory, "result.json")
+  expect(existsSync(file)).toBe(true)
+  expect(readFileSync(file, "utf8")).toBe("complete")
+  await writeExclusive(file, "complete")
+  expect(readFileSync(file, "utf8")).toBe("complete")
+})
+
 test.each(["root", "ancestor", "parent"])(
   "exclusive write rolls back its link when the %s becomes a symlink at publication",
   (component) => {

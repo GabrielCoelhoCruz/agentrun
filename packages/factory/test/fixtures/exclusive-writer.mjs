@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process"
 import crypto from "node:crypto"
 import fs from "node:fs"
 import { registerHooks, syncBuiltinESMExports } from "node:module"
@@ -38,6 +39,27 @@ if (mode === "observe-sync") {
       published: fs.readFileSync(join(directory, "result.json"), "utf8"),
       temporary: temporary === undefined ? null : fs.readFileSync(join(directory, temporary), "utf8"),
     }))
+  }
+}
+if (mode === "fail-directory-sync" || mode === "fail-temporary-unlink") {
+  const failAfterAcceptance = (code) => {
+    const read = fs.readFileSync(join(directory, "result.json"), "utf8")
+    const other = spawnSync(process.execPath, [process.argv[1], directory, "accept"], {
+      encoding: "utf8",
+      timeout: 30000,
+    })
+    console.log(JSON.stringify({ read, accepted: other.status === 0 }))
+    throw Object.assign(new Error(`injected ${code}`), { code })
+  }
+  if (mode === "fail-directory-sync") {
+    const fsync = fs.fsyncSync
+    fs.fsyncSync = (fd) => fs.fstatSync(fd).isDirectory() ? failAfterAcceptance("EIO") : fsync(fd)
+  } else {
+    const unlink = fs.unlinkSync
+    fs.unlinkSync = (path) =>
+      basename(path).startsWith(".result.json.partial-")
+        ? failAfterAcceptance("EBUSY")
+        : unlink(path)
   }
 }
 if (mode.startsWith("publish-")) {
