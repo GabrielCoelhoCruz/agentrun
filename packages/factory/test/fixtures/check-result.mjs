@@ -18,6 +18,9 @@ if (mode === "cancel-check" || mode === "timeout") {
 if (mode === "missing-result") process.exit(0)
 const artifact = join(process.env.FACTORY_ARTIFACT_DIR, "observation.txt")
 writeFileSync(artifact, "The configured producer executed.\n")
+if (mode === "partial-artifact") {
+  writeFileSync(join(process.env.FACTORY_ARTIFACT_DIR, ".observation.txt.partial-0123456789abcdef"), "incomplete")
+}
 if (mode === "linked-artifact") {
   const outside = join(dirname(process.env.FACTORY_ARTIFACT_DIR), "outside")
   mkdirSync(outside)
@@ -37,6 +40,8 @@ writeFileSync(
       artifacts: [
         mode === "missing-artifact"
           ? "missing.txt"
+          : mode === "partial-artifact"
+          ? ".observation.txt.partial-0123456789abcdef"
           : mode === "linked-artifact"
           ? "linked/observation.txt"
           : "observation.txt",

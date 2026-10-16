@@ -1,6 +1,6 @@
 import { RunLock } from "@agentrun/core"
 import { Effect, Schema } from "effect"
-import { existsSync, mkdirSync, readdirSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, renameSync } from "node:fs"
 import { join } from "node:path"
 import { sourceArchive } from "./Archive.js"
 import { Candidate, FactoryError, failure, HumanAction, Id } from "./Domain.js"
@@ -367,16 +367,19 @@ const exportLocal = (store: Store) =>
     const owner = JSON.stringify({ workflow: state.run.id, manifestDigest: prepared.receipt.manifestDigest })
     yield* io("export", () => {
       const directory = prepared.receipt.directory
-      if (existsSync(directory)) removePartials(directory)
-      if (!existsSync(directory) || readdirSync(directory).length === 0) {
+      if (!existsSync(directory)) {
+        const staging = join(store.directory, "export-staging")
+        writeExclusive(join(staging, "owner.json"), owner)
         mkdirSync(join(store.directory, "exports"), { recursive: true, mode: 0o700 })
-        mkdirSync(directory, { recursive: true, mode: 0o700 })
-        writeExclusive(join(directory, "owner.json"), owner)
+        renameSync(staging, directory)
         syncDirectory(join(store.directory, "exports"))
-      } else if (
+        syncDirectory(store.directory)
+      }
+      if (
         !existsSync(join(directory, "owner.json"))
         || readBytes(join(directory, "owner.json")).toString("utf8") !== owner
       ) throw failure("export", "Existing export has no matching owner receipt. Preserve and inspect it.")
+      removePartials(directory)
     })
     for (const file of [...prepared.files, { name: "manifest.json", digest: prepared.receipt.manifestDigest }]) {
       const bytes = yield* store.artifact(file.digest)

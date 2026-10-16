@@ -8,6 +8,28 @@ import { expect, test } from "vitest"
 
 const scenarioBudgetMs = 300000 + 60000 + 60000
 
+test.each([
+  "foreign-export-owner",
+  "missing-export-owner",
+  "empty-export-owner",
+  "crash-partial-task",
+  "crash-partial-evidence",
+  "partial-artifact",
+])(
+  "production CLI protects ownership and temporary artifacts (%s)",
+  async (scenario) => {
+    const parent = await mkdtemp(join(tmpdir(), "factory-temporary-artifacts-e2e-"))
+    const result = await promisify(execFile)(process.execPath, [
+      fileURLToPath(new URL("../scripts/factory-e2e.mjs", import.meta.url)),
+      fileURLToPath(new URL("../dist/bin.mjs", import.meta.url)),
+      join(parent, "proof"),
+      scenario,
+    ], { timeout: scenarioBudgetMs, maxBuffer: 1024 * 1024 })
+    expect(JSON.parse(result.stdout)).toMatchObject({ result: "passed", scenarios: 1, paidProviderCalls: 0 })
+  },
+  scenarioBudgetMs + 5000,
+)
+
 test.each(["exit", "timeout"])(
   "production CLI retains process-table diagnostics during correction (%s)",
   async (mode) => {

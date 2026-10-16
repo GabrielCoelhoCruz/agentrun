@@ -20,6 +20,8 @@ import { promisify } from "node:util"
 import { FactoryError, failure, RelativePath } from "./Domain.js"
 
 const exec = promisify(execFile)
+const partial = /^\.(.+)\.partial-[0-9a-f]{16}$/
+const temporaryPath = (file: string) => file.split(/[\\/]/).some((name) => partial.test(name))
 export const sha256 = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex")
 export const canonical = (value: unknown): string =>
   JSON.stringify(value, (_key, entry: unknown) =>
@@ -35,6 +37,7 @@ export const io = <A>(code: string, operation: () => A) =>
         : failure(code, `${code}: ${cause instanceof Error ? cause.message : String(cause)}`),
   })
 export const readBytes = (file: string, maximum = 16 * 1024 * 1024): Buffer => {
+  if (temporaryPath(file)) throw failure("artifact", `Cannot read a temporary artifact: ${file}`)
   const stat = lstatSync(file)
   if (!stat.isFile() || stat.size > maximum) {
     throw failure("artifact", `Expected a regular file of at most ${maximum} bytes: ${file}`)
@@ -50,16 +53,17 @@ export const syncDirectory = (directory: string) => {
     closeSync(fd)
   }
 }
-const partial = /^\..+\.partial-[0-9a-f]{16}$/
 // Publishes complete bytes only: the final path appears through link, which never replaces an existing file.
 export const writeExclusive = (file: string, bytes: string | Uint8Array) => {
+  const directory = dirname(file)
   const accept = () => {
     if (sha256(readBytes(file, 64 * 1024 * 1024)) !== sha256(bytes)) {
       throw failure("artifact", `Existing artifact differs; preserve and inspect: ${file}`)
     }
+    removePartials(directory, basename(file))
+    syncDirectory(directory)
   }
   if (existsSync(file)) return accept()
-  const directory = dirname(file)
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   const temporary = join(directory, `.${basename(file)}.partial-${randomBytes(8).toString("hex")}`)
   try {
@@ -79,16 +83,21 @@ export const writeExclusive = (file: string, bytes: string | Uint8Array) => {
   } finally {
     rmSync(temporary, { force: true })
   }
+  removePartials(directory, basename(file))
   syncDirectory(directory)
 }
 // Removes files that a crashed writeExclusive left behind. Call only while holding the directory's writer lock.
-export const removePartials = (directory: string) => {
-  for (const entry of readdirSync(directory, { recursive: true, withFileTypes: true })) {
-    if (entry.isFile() && partial.test(entry.name)) rmSync(join(entry.parentPath, entry.name))
+export const removePartials = (directory: string, name?: string) => {
+  for (const entry of readdirSync(directory, { recursive: name === undefined, withFileTypes: true })) {
+    const match = partial.exec(entry.name)
+    if (entry.isFile() && match !== null && (name === undefined || match[1] === name)) {
+      rmSync(join(entry.parentPath, entry.name))
+    }
   }
 }
 export const inside = (root: string, name: string) => {
   Schema.decodeUnknownSync(RelativePath)(name)
+  if (temporaryPath(name)) throw failure("artifact", `Cannot use a temporary artifact path: ${name}`)
   const file = resolve(root, name)
   const rel = relative(root, file)
   if (isAbsolute(rel) || rel === ".." || rel.startsWith("../")) {

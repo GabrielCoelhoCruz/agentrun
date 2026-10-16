@@ -551,6 +551,7 @@ try {
       "omitted-criterion",
       "missing-artifact",
       "linked-artifact",
+      "partial-artifact",
     ]
   ) {
     await scenario(mode, async () => {
@@ -562,6 +563,7 @@ try {
         "omitted-criterion": /omitted or repeated an acceptance criterion/i,
         "missing-artifact": /artifact.*ENOENT|regular file/i,
         "linked-artifact": /artifact.*outside/i,
+        "partial-artifact": /temporary/i,
       }
       assertBlocked(c.start(1), expected[mode])
       assert.equal(readFileSync(c.env.FACTORY_FIXTURE_CHECK_LOG, "utf8").trim().split("\n").length, 1)
@@ -619,6 +621,61 @@ try {
         assertHuman(resumed)
         assert.equal(c.records().filter((r) => r.kind === "provider").length, 2)
       }
+    })
+  }
+  for (const ownership of ["foreign", "missing", "empty"]) {
+    await scenario(`${ownership}-export-owner`, async () => {
+      const c = setup(`${ownership}-export-owner`)
+      approve(c, c.start())
+      const crashed = c.run(process.execPath, [cli, "export", c.id, "--json"], {
+        FACTORY_FIXTURE_CRASH: "ExportPrepared",
+      })
+      assert.equal(crashed.signal, "SIGKILL", crashed.stderr)
+      const directory = c.events().find((e) => e.fact._tag === "ExportPrepared").fact.receipt.directory
+      mkdirSync(directory, { recursive: true })
+      const files = ownership === "empty"
+        ? []
+        : [".source.tar.partial-0123456789abcdef", "artifacts/.digest.partial-0123456789abcdef", "preserve.txt"]
+      if (ownership !== "empty") mkdirSync(join(directory, "artifacts"))
+      if (ownership === "foreign") files.push("owner.json")
+      for (const file of files) {
+        writeFileSync(join(directory, file), file === "owner.json" ? "{\"workflow\":\"foreign\"}" : "preserve")
+      }
+      c.command(["export", c.id], 1)
+      assert.deepEqual(
+        readdirSync(directory, { recursive: true }).map(String).sort(),
+        [...files, ...(ownership === "empty" ? [] : ["artifacts"])].sort(),
+      )
+      for (const file of files) {
+        assert.equal(
+          readFileSync(join(directory, file), "utf8"),
+          file === "owner.json" ? "{\"workflow\":\"foreign\"}" : "preserve",
+        )
+      }
+      note(c, "ownership-proof", { ownership, directory, preserved: files })
+    })
+  }
+  for (const kind of ["task", "evidence"]) {
+    await scenario(`crash-partial-${kind}`, async () => {
+      const c = setup(`crash-partial-${kind}`)
+      if (kind === "evidence") {
+        const running = c.startAsync({ FACTORY_FIXTURE_CRASH: "CheckRecorded" })
+        assert.equal((await running.completed).signal, "SIGKILL")
+      }
+      const extra = {
+        FACTORY_FIXTURE_CRASH: "partial-write",
+        FACTORY_FIXTURE_CRASH_WRITE: "1",
+        FACTORY_FIXTURE_CRASH_MARKER: join(c.directory, "partial-crashed"),
+      }
+      const crashed = await (kind === "task" ? c.startAsync(extra) : c.launch(["resume", c.id], extra)).completed
+      assert.equal(crashed.signal, "SIGKILL", crashed.stderr)
+      const directory = join(c.stateDirectory, kind === "task" ? "inputs" : "inputs/evidence")
+      const temporary = readdirSync(directory).filter((name) => /^\..+\.partial-[0-9a-f]{16}$/.test(name))
+      assert.equal(temporary.length, 1)
+      assertHuman(c.command(["resume", c.id]))
+      assert.deepEqual(readdirSync(directory).filter((name) => /^\..+\.partial-[0-9a-f]{16}$/.test(name)), [])
+      assert.equal(c.records().filter((r) => r.kind === "provider").length, 2)
+      note(c, "retry-cleanup-proof", { kind, removed: temporary, listed: readdirSync(directory) })
     })
   }
   for (const [name, write] of [["owner", "1"], ["source", "2"]]) {
