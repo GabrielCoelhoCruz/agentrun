@@ -463,7 +463,7 @@ process.stdout.write(table);
     await done
     rmSync(directory, { recursive: true })
   }
-}, 15000)
+}, 60000)
 
 const stubborn = async () => {
   const child = spawn(process.execPath, [

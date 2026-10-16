@@ -49,6 +49,7 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
   function*(pgid: number, token?: string, kind: "worker" | "git" | "factory" = "worker") {
     const error = (cause: unknown) => systemError({ _tag: "Unknown", module: "ProcessGroup", method: "stop", cause })
     if (!Number.isSafeInteger(pgid) || pgid <= 1) return yield* error("Invalid process group")
+    // If the group has already exited, no snapshot is taken. A detached daemon can survive (#58).
     if (!(yield* isAlive(-pgid))) return
     if (token === undefined || !/^[a-f0-9]{32}$/.test(token)) {
       return yield* error("Live process group has no verified ownership token; recovery refused")
@@ -79,11 +80,33 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       groups.add(row.group)
     }
     const waitOnly = new Set<number>()
+    const observe = (current: typeof rows) => {
+      const alive = new Set(
+        current.filter((row) => identities.get(row.pid) === row.started && running(row.state))
+          .map((row) => row.pid),
+      )
+      let previousSize = -1
+      // A process can fork a detached child on SIGTERM, then exit before the first poll or between later snapshots.
+      // The child can first appear with parent PID 1; polling cannot recover its ancestry. See #58.
+      while (previousSize !== alive.size) {
+        previousSize = alive.size
+        for (const row of current) {
+          if (running(row.state) && alive.has(row.parent) && !alive.has(row.pid)) {
+            alive.add(row.pid)
+            identities.set(row.pid, row.started)
+          }
+        }
+      }
+      for (const row of current) if (alive.has(row.pid) && row.group > 1) groups.add(row.group)
+      return alive
+    }
     let firstSignal = true
     for (const signal of ["SIGTERM", "SIGKILL"] as const) {
       for (const group of groups) {
         if (!maySignal || waitOnly.has(group)) continue
         const current = firstSignal ? rows : yield* processTable(true)
+        // Retain descendants before a signal can remove their parent from the next snapshot.
+        observe(current)
         firstSignal = false
         const members = current.filter((row) => row.group === group)
         if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
@@ -92,7 +115,11 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
         }
         const original = rows.find((row) => row.pid === group && row.group === group && owned.has(row.pid))
         const leader = current.find((row) => row.pid === group && row.group === group)
-        if (original === undefined || leader === undefined || leader.command !== original.command) {
+        // A late group has no initial ownership proof; tracking alone does not permit a signal.
+        if (
+          original === undefined || leader === undefined || leader.started !== original.started
+          || leader.command !== original.command
+        ) {
           waitOnly.add(group)
           continue
         }
@@ -112,33 +139,14 @@ export const stopProcessGroup = Effect.fn("stopProcessGroup")(
       }
       for (let attempt = 0; attempt < 40; attempt++) {
         const current = yield* processTable()
-        const alive = new Set(
-          current.filter((row) => identities.get(row.pid) === row.started && running(row.state))
-            .map((row) => row.pid),
-        )
-        let previousSize = -1
-        // A detached fork can lose ancestry before observation (#50); both paths need OS containment to prevent it.
-        while (previousSize !== alive.size) {
-          previousSize = alive.size
-          for (const row of current) {
-            if (running(row.state) && alive.has(row.parent) && !alive.has(row.pid)) {
-              alive.add(row.pid)
-              identities.set(row.pid, row.started)
-            }
-          }
-        }
-        for (const row of current) if (alive.has(row.pid) && row.group > 1) groups.add(row.group)
+        const alive = observe(current)
         for (const group of groups) {
           const members = current.filter((row) => row.group === group)
           if (members.every((row) => !running(row.state)) && (members.length > 0 || !(yield* isAlive(-group)))) {
             groups.delete(group)
           }
         }
-        if (
-          groups.size === 0 && !current.some((row) => identities.get(row.pid) === row.started && running(row.state))
-        ) {
-          return
-        }
+        if (groups.size === 0 && alive.size === 0) return
         yield* Effect.sleep("50 millis")
       }
     }
