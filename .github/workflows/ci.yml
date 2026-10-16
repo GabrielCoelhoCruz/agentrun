@@ -15,6 +15,7 @@ concurrency:
 jobs:
   static:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -30,6 +31,7 @@ jobs:
   # the rest job excludes exactly those two, so every test file runs in exactly one job.
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     strategy:
@@ -60,6 +62,7 @@ jobs:
 
   installed-proof:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
