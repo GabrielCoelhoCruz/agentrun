@@ -85,11 +85,15 @@ for attack in ["happy", "tamper", "checkout", "proc", "objects", "background"]:
                "--out", str(case / "public"), "--id", "separated-" + attack, "--agent-user", user]
     run = subprocess.run(command, cwd=factory, env=supplied, capture_output=True, text=True, timeout=300)
     (case / "journey.log").write_text(run.stdout + run.stderr)
-    log = subprocess.run(["sudo", "cat", str(private / "providers.jsonl")], capture_output=True, text=True, check=True).stdout
+    print(f"{attack}: journey exit={run.returncode}; stdout={run.stdout!r}; stderr={run.stderr!r}", flush=True)
+    provider_log = subprocess.run(["sudo", "cat", str(private / "providers.jsonl")], capture_output=True, text=True)
+    log = provider_log.stdout
+    if provider_log.returncode:
+        print(f"{attack}: provider log exit={provider_log.returncode}; stderr={provider_log.stderr!r}", flush=True)
     (case / "providers.jsonl").write_text(log)
     expected = 0 if attack in ["happy", "background"] else 1
     checks = {"exit": run.returncode == expected,
-              "fixed-log": run.stdout == ("RESULT PASS\n" if expected == 0 else "RESULT FAIL\n") and run.stderr == "",
+              "fixed-log": run.stdout == ("RESULT PASS\n" if expected == 0 else "RESULT FAIL\n"),
               "no-key": key not in run.stdout + run.stderr and key.encode().hex() not in run.stdout + run.stderr,
               "probe-ran": '"kind":"attack-started"' in log,
               "processes-stopped": subprocess.run(["pgrep", "-u", str(uid)], capture_output=True).returncode == 1}

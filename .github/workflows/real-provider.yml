@@ -38,7 +38,12 @@ jobs:
         run: |
           sudo useradd --no-create-home --user-group --shell /usr/sbin/nologin agentrun-agent
           chmod -R go-w "$GITHUB_WORKSPACE"
-          chmod go-w "$GITHUB_WORKSPACE/.." "$GITHUB_WORKSPACE/../.." "$RUNNER_TEMP"
+          directory="$GITHUB_WORKSPACE"
+          while [ "$directory" != / ]; do
+            if [ -O "$directory" ]; then chmod go-w "$directory"; fi
+            directory=$(dirname "$directory")
+          done
+          chmod go-w "$RUNNER_TEMP"
       - name: Run journey
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -55,7 +60,9 @@ jobs:
         if: ${{ always() }}
         run: |
           sudo pkill -KILL -u agentrun-agent || test "$?" -eq 1
-          if pgrep -u agentrun-agent > /dev/null; then exit 1; fi
+          status=0
+          pgrep -u agentrun-agent > /dev/null || status=$?
+          test "$status" -eq 1
           echo 'safe=true' >> "$GITHUB_OUTPUT"
       - name: Scan public evidence
         id: evidence

@@ -87,6 +87,7 @@ def main():
     manifest = {"manifestDigest": None, "fileDigests": []}
     candidate = None
     verified = False
+    checkpoint = "publication-files"
 
     def trusted(command, **kwargs):
         return subprocess.run(command, env=trusted_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -143,7 +144,11 @@ def main():
 
     try:
         # Snapshot every publication file, including an existing summary.
-        for name in ("GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STEP_SUMMARY"):
+        channel_names = {"GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STEP_SUMMARY"}
+        channel_names.update(name for name, value in os.environ.items()
+                             if name.startswith("GITHUB_") and value.startswith("/")
+                             and (Path(value).is_file() or Path(value).is_symlink()))
+        for name in sorted(channel_names):
             if name in os.environ:
                 path = Path(os.environ[name])
                 require(not path.is_symlink() and path.is_file() and path.stat().st_uid == os.getuid())
@@ -151,6 +156,7 @@ def main():
                 channels[path] = path.read_bytes()
         # Verify effective access as the agent, including real symlink targets
         # and ancestors. This catches writable checkout parents and toolchains.
+        checkpoint = "permissions"
         boundary = control / "boundary.py"
         boundary.write_text('''import os, pathlib, sys
 for root in sys.argv[1:]:
@@ -164,17 +170,20 @@ for root in sys.argv[1:]:
             # Sticky world-writable ancestors cannot replace another user's entries.
             sticky = path.is_dir() and mode & 0o1000 and path.stat().st_uid != os.getuid()
             if os.access(path, os.W_OK) and not sticky:
+                print("Agent can write trusted path:", path, file=sys.stderr)
                 sys.exit(1)
 ''')
         boundary.chmod(0o644)
         trusted([sudo, "-n", "-u", account.pw_name, "env", "-i", "PATH=" + trusted_env["PATH"],
                  python, "-I", str(boundary), str(factory), node, native_git, python, str(control), str(tools),
                  *map(str, channels)])
+        checkpoint = "sudo-authority"
         # Agent must not have sudo authority, even through runner group membership.
         result = subprocess.run([sudo, "-n", "-u", account.pw_name, sudo, "-n", "true"],
                                 env=trusted_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         require(result.returncode != 0)
         require(subprocess.run(["pgrep", "-u", str(uid)], capture_output=True).returncode == 1)
+        checkpoint = "setup"
         trusted_values = {"nodeVersion": trusted([node, "-v"]).decode().strip(),
                           "pythonVersion": ".".join(map(str, sys.version_info[:3])),
                           "factoryHead": git("-C", factory, "rev-parse", "HEAD").decode().strip()}
@@ -209,11 +218,13 @@ for root in sys.argv[1:]:
         agent.chmod(0o700)
         trusted([sudo, "-n", "chown", "-R", f"{uid}:{account.pw_gid}", str(agent)])
         bin_path = str(factory / "packages/factory/dist/bin.mjs")
+        checkpoint = "factory-start"
         status = run_agent([node, bin_path, "start", "--profile", "factory.json", "--goal", args.goal,
                             "--id", args.id, "--json"], target, "start.json")
         record("start", status)
         states["start.json"] = read_json(work / "start.json")
         state = states["start.json"]
+        checkpoint = "request"
         request = member(state, "request")
         candidate = member(state, "candidate").get("commit")
         request_id = request.get("id")
@@ -223,6 +234,7 @@ for root in sys.argv[1:]:
         require(evidence.digest(candidate, 40) and evidence.digest(evidence_digest))
         require(isinstance(request_id, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,200}", request_id))
         require(evidence.integer(version, 1000000) is not None)
+        checkpoint = "decide"
         status = run_agent([node, bin_path, "decide", args.id, "--request", request_id, "--candidate", candidate,
                             "--evidence", evidence_digest, "--expected-version", str(version), "--action", "approve", "--json"],
                            target, "decide.json")
@@ -230,11 +242,13 @@ for root in sys.argv[1:]:
         require(status == 0)
         states["decide.json"] = read_json(work / "decide.json")
         require(states["decide.json"].get("stage") == "approved")
+        checkpoint = "export"
         status = run_agent([node, bin_path, "export", args.id, "--json"], target, "export.json")
         record("export", status)
         require(status == 0)
         states["export.json"] = read_json(work / "export.json")
         require(states["export.json"].get("stage") == "exported")
+        checkpoint = "stop-and-copy"
         # End the whole agent UID before any trusted read of its repository.
         stop()
         trusted([sudo, "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(agent)])
@@ -283,6 +297,7 @@ for root in sys.argv[1:]:
                 digests.append({"name": name, "digest": sha(data)})
             return digests
 
+        checkpoint = "materialize"
         verify = agent / "verify"
         verify.mkdir()
         files = checkout(candidate, verify / "src")
@@ -299,6 +314,7 @@ for root in sys.argv[1:]:
         for name in ("artifacts", "base-artifacts"):
             (verify / name).mkdir()
         trusted([sudo, "-n", "chown", "-R", f"{uid}:{account.pw_gid}", str(agent)])
+        checkpoint = "checks"
         for name, directory, commit, artifacts in [("independent-check", "src", candidate, "artifacts"),
                                                     ("negative-control", "base", base, "base-artifacts")]:
             source = verify / directory
@@ -309,8 +325,13 @@ for root in sys.argv[1:]:
             record(name, result)
         require("independent-check=0\n" in records and "negative-control=0\n" not in records)
         code = 0
-    except Exception:
-        # Errors can contain agent text or credentials. Emit only the fixed result.
+    except Exception as error:
+        # Diagnostics are enabled only for the fake-key fixture proof. Do not
+        # print exception messages, command arguments, or provider output.
+        if os.environ.get("FACTORY_JOURNEY_FIXTURE") == "1":
+            print(f"Fixture failure at {checkpoint}: {type(error).__name__}", file=sys.stderr)
+            if isinstance(error, subprocess.CalledProcessError) and checkpoint == "permissions":
+                print(error.stderr.decode(errors="replace"), file=sys.stderr)
         code = 1
     finally:
         stopped = False
