@@ -177,7 +177,8 @@ The installed proof runs every TypeScript journey and the Python journeys that r
 
 `scripts/real-journey.sh` repeats the TypeScript journey with the profile's real providers. These calls cost money.
 It copies an example into a new Git repository, starts the factory, approves the exact human request, and exports.
-It then compares `change.patch` with `git diff`, repeats the profile check on the exported `source.tar`, and runs the same check on the starter.
+Local mode compares `change.patch` with `git diff` and repeats the profile check on the exported `source.tar`.
+CI rebuilds the source and patch from copied Git objects. Both modes run the same check on the starter.
 The starter run must fail. The script prints the exit codes to `exits.txt` and ends with `RESULT PASS` or `RESULT FAIL`.
 
 On macOS or Linux, with Node 24 and Python 3 on `PATH` and provider authentication in the environment:
@@ -218,6 +219,7 @@ In CI, independent checks run as the agent user on source rebuilt from the runne
 The check command comes from the original profile; the check files must match the starter.
 The public manifest describes the independently rebuilt source and patch. Its digests come from those bytes,
 rather than the agent's export receipt. Agent export paths and manifest digests are discarded.
+CI records `patch=derived`; local mode records `patch=equal` after comparing the export.
 The harness stops the agent user again after checks, including on failure.
 A separate workflow step verifies process cleanup before scanning or publishing.
 The Linux fixture job runs on pull requests without secrets. It tests the original tamper payload,

@@ -24,6 +24,8 @@ jobs:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -35,15 +37,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Prepare unprivileged agent
-        run: |
-          sudo useradd --no-create-home --user-group --shell /usr/sbin/nologin agentrun-agent
-          chmod -R a+rX,go-w "$GITHUB_WORKSPACE"
-          directory="$GITHUB_WORKSPACE"
-          while [ "$directory" != / ]; do
-            if [ -O "$directory" ]; then chmod go-w,o+x "$directory"; fi
-            directory=$(dirname "$directory")
-          done
-          chmod go-w,o+x "$RUNNER_TEMP"
+        run: bash packages/factory/scripts/prepare-journey-user.sh
       - name: Run journey
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

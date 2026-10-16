@@ -316,7 +316,7 @@ for root in sys.argv[1:]:
         manifest_bytes = json.dumps({"base": base, "candidate": candidate, "files": files,
                                      "patchDigest": sha(patch)}, sort_keys=True, separators=(",", ":")).encode()
         manifest = {"manifestDigest": sha(manifest_bytes), "fileDigests": [file["digest"] for file in files]}
-        record("patch", "equal")
+        record("patch", "derived")
         for name in ("artifacts", "base-artifacts"):
             (verify / name).mkdir()
         trusted([sudo, "-n", "chown", "-R", f"{uid}:{account.pw_gid}", str(agent)])

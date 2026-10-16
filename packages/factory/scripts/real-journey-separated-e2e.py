@@ -110,6 +110,7 @@ for attack in ["happy", "tamper", "checkout", "proc", "objects", "background"]:
     checks["report"] = (public / "report.txt").read_text() == ("RESULT PASS\n" if expected == 0 else "RESULT FAIL\n")
     if expected == 0:
         exits = (public / "exits.txt").read_text()
+        checks["patch-rebuilt"] = "patch=derived\n" in exits
         checks["independent-and-negative"] = "independent-check=0\nnegative-control=1\n" in exits
     results.append({"attack": attack, "command": command, "cwd": str(factory), "exit": run.returncode,
                     "expected": expected, "checks": checks, "passed": all(checks.values())})

@@ -107,7 +107,7 @@ def parse_exits(text):
     for line in text.splitlines():
         if not line:
             continue
-        match = re.fullmatch(r"(start|decide|export|independent-check|negative-control)=([0-9]{1,3}|missing-source)|patch=(equal|DIFFERENT)", line)
+        match = re.fullmatch(r"(start|decide|export|independent-check|negative-control)=([0-9]{1,3}|missing-source)|patch=(equal|DIFFERENT|derived)", line)
         if not match:
             raise EvidenceError("Invalid exit record")
         name, value = line.split("=", 1)
