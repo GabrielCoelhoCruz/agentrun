@@ -45,16 +45,18 @@ jobs:
           bash packages/factory/scripts/real-journey.sh --factory "$GITHUB_WORKSPACE" \
             --out "$RUNNER_TEMP/real-journey" --id "real-$GITHUB_RUN_ID" \
             --example "examples/factory/$EXAMPLE" --budget "$BUDGET"
-      - name: Archive journey output
+      - name: Scan public evidence
+        id: evidence
         if: ${{ always() }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          if [ -d "$RUNNER_TEMP/real-journey" ]; then
-            tar -czf "$RUNNER_TEMP/real-journey.tar.gz" -C "$RUNNER_TEMP" real-journey
-          fi
-      - name: Save journey output
-        if: ${{ always() }}
+          python3 packages/factory/scripts/journey-evidence.py scan "$RUNNER_TEMP/real-journey"
+          echo 'safe=true' >> "$GITHUB_OUTPUT"
+      - name: Save public evidence
+        if: ${{ always() && steps.evidence.outputs.safe == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: real-journey-${{ github.run_id }}
-          path: ${{ runner.temp }}/real-journey.tar.gz
-          if-no-files-found: warn
+          path: ${{ runner.temp }}/real-journey/
+          if-no-files-found: error

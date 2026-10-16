@@ -176,10 +176,27 @@ bash packages/factory/scripts/real-journey.sh --factory "$PWD" --out /path/to/ne
 ```
 
 `--example` selects another example directory, `--check` another profile check, and `--goal` another goal.
-The output directory also records the Node and Python versions and the factory commit.
+The output directory contains only public evidence: exit codes, toolchain versions, the factory commit,
+start/decide/export summaries, manifest digests, the check result summary, and a report.
+Each file is limited to 64 KiB. Summaries omit goals, paths, review messages, and provider text.
+The script redacts the exact `ANTHROPIC_API_KEY` value from captured command output before writing it.
+It uses a private home directory and deletes the temporary repository, factory state, exports, and databases when it exits.
+Provider code can write raw data inside that temporary directory while the journey runs.
 
 The `Real provider journey` GitHub Actions workflow runs the same script on Linux. Start it by hand from the Actions tab.
 It reads `ANTHROPIC_API_KEY` from the `real-provider` environment, so a required reviewer can approve each run before it spends.
-It saves the output directory as an artifact, also when the journey fails.
+Before upload, a separate step reads `ANTHROPIC_API_KEY` from its environment and scans each evidence file for its exact value.
+The step also rejects extra files, links, and files over 64 KiB. A failed scan blocks upload and fails the job.
+Only the approved evidence is uploaded, including when the journey fails.
+Provider transcripts, prompts, agent logs, target repositories, factory state, and databases are excluded.
+
+After `pnpm build`, prove this boundary without paid calls:
+
+```sh
+node packages/factory/scripts/real-journey-e2e.mjs /path/to/new-fixture-proof
+```
+
+The fixture provider echoes a fake key. The proof checks that the key does not remain in the output,
+then deliberately adds leaking files and checks that the upload scan fails without printing the key.
 
 Observed cost for notes-ts: $0.26 to $0.83 per run. These are observed values, not a limit. `--budget` sets the limit.

@@ -52,6 +52,11 @@ export function query({ prompt, options }) {
   record({ kind: 'provider', stage: task.stage, attemptId: task.attemptId, inputSha: task.inputSha, pid: process.pid, cwd: options.cwd, review, maxBudgetUsd: options.maxBudgetUsd });
   return Object.assign((async function* () {
     yield { type: 'system', subtype: 'init', session_id: 'local-fixture' };
+    if (process.env.FACTORY_FIXTURE_ECHO_SECRET === '1') {
+      assert.ok(process.env.ANTHROPIC_API_KEY);
+      record({ kind: 'secret-echo', stage: task.stage });
+      yield { type: 'assistant', message: { content: [{ type: 'text', text: process.env.ANTHROPIC_API_KEY }] } };
+    }
     if (!review) {
       yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'fixture-write', name: 'Write', input: {} }] } };
       if (mode === 'cancel-agent' || mode === 'crash-tools') {
@@ -98,7 +103,7 @@ export function query({ prompt, options }) {
       }
       if (mode === 'changed-check') writeFileSync(join(options.cwd, 'checks/restart.mjs'), 'process.exit(0)\\n');
     }
-    let result = 'Implementation complete';
+    let result = process.env.FACTORY_FIXTURE_ECHO_SECRET === '1' ? process.env.ANTHROPIC_API_KEY : 'Implementation complete';
     if (review) {
       let verdict = 'accepted';
       let findings = [];

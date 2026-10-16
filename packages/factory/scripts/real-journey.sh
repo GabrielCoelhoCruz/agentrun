@@ -9,7 +9,7 @@ usage: real-journey.sh --factory <checkout> --out <new-dir> --id <workflow-id>
                        [--example <dir>] [--check <check-id>] [--goal <text>] [--budget <usd>]
 
   --factory  agentrun checkout with a built packages/factory/dist/bin.mjs
-  --out      new output directory for the target repository and evidence
+  --out      new output directory for public evidence only
   --id       workflow id
   --example  example project, relative to the checkout or absolute (default: examples/factory/notes-ts)
   --check    profile check to repeat on the export (default: the first acceptance criterion's check)
@@ -52,20 +52,44 @@ bin=$factory/packages/factory/dist/bin.mjs
 [ -f "$example/factory.json" ] || { echo "missing $example/factory.json" >&2; exit 2; }
 [ ! -e "$out" ] || { echo "$out already exists" >&2; exit 2; }
 
+umask 077
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
-target=$out/target
-verify=$out/verify
-exits=$out/exits.txt
-mkdir -p "$verify/artifacts" "$verify/base-artifacts" "$verify/src" "$verify/base"
+work=$(mktemp -d "${TMPDIR:-/tmp}/real-journey.XXXXXXXX")
+helper=$factory/packages/factory/scripts/journey-evidence.py
+target=$work/target
+verify=$work/verify
+exits=$work/exits.txt
+# shellcheck disable=SC2329 # Invoked by the EXIT trap.
+finish() {
+  local code=$?
+  trap - EXIT
+  python3 "$helper" summarize "$work" "$out" "$code" || code=1
+  # Factory state can contain provider transcripts. Never retain or upload it.
+  rm -rf "$work"
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    if ! python3 "$helper" scan "$out"; then
+      code=1
+      echo 'RESULT FAIL' > "$out/report.txt"
+    fi
+  fi
+  cat "$out/exits.txt" "$out/report.txt"
+  exit "$code"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Keep executor worktrees and provider caches within the private directory too.
+export HOME="$work/home" TMPDIR="$work/tmp"
+export XDG_CONFIG_HOME="$HOME/.config" CLAUDE_CONFIG_DIR="$HOME/.claude" PI_CODING_AGENT_DIR="$HOME/.pi"
+mkdir -p "$HOME" "$TMPDIR" "$verify/artifacts" "$verify/base-artifacts" "$verify/src" "$verify/base"
 
 {
   echo "node $(node -v)"
   python3 --version
   echo "factory $(git -C "$factory" rev-parse HEAD)"
-} | tee "$out/toolchain.txt"
-git -C "$factory" rev-parse HEAD > "$out/factory-head.txt"
-git -C "$factory" status --short > "$out/factory-dirty.txt"
+} > "$work/toolchain.txt"
+git -C "$factory" rev-parse HEAD > "$work/factory-head.txt"
 
 cp -R "$example" "$target"
 python3 - "$target/factory.json" "$budget" <<'PY'
@@ -96,7 +120,6 @@ check_argv=()
 while IFS= read -r -d '' arg; do check_argv+=("$arg"); done < <(
   python3 -c 'import json, sys; sys.stdout.write("".join(a + "\0" for a in json.loads(sys.argv[1])["argv"]))' "$check_spec"
 )
-echo "check $check_id: ${check_argv[*]} (cwd $check_cwd)" | tee -a "$out/toolchain.txt"
 
 git -C "$target" init -q -b main
 git -C "$target" add -A
@@ -104,11 +127,11 @@ git -C "$target" -c user.name=factory -c user.email=factory@localhost commit -qm
 base=$(git -C "$target" rev-parse HEAD)
 
 status=0
-(cd "$target" && node "$bin" start --profile factory.json --goal "$goal" --id "$id" --json) \
-  > "$out/start.json" 2> "$out/start.stderr" || status=$?
+python3 "$helper" capture "$work/start.json" "$target" \
+  node "$bin" start --profile factory.json --goal "$goal" --id "$id" --json || status=$?
 echo "start=$status" > "$exits"
 
-read -r stage candidate request evidence version approvable < <(python3 - "$out/start.json" <<'PY'
+read -r stage candidate request evidence version approvable < <(python3 - "$work/start.json" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -119,24 +142,21 @@ approvable = "yes" if "approve" in (r.get("allowedActions") or []) else "no"
 print(d.get("stage", "-"), (d.get("candidate") or {}).get("commit", "-"), r.get("id", "-"), r.get("evidenceDigest", "-"), r.get("expectedVersion", "-"), approvable)
 PY
 )
-echo "stage=$stage candidate=$candidate approvable=$approvable" >> "$exits"
 if [ "$stage" != human ] || [ "$approvable" != yes ] || ! grep -qx 'start=0' "$exits"; then
-  cat "$exits"
-  echo "RESULT FAIL at $stage"
   exit 1
 fi
 
 status=0
-(cd "$target" && node "$bin" decide "$id" --request "$request" --candidate "$candidate" --evidence "$evidence" \
-  --expected-version "$version" --action approve --json) > "$out/decide.json" 2> "$out/decide.stderr" || status=$?
+python3 "$helper" capture "$work/decide.json" "$target" \
+  node "$bin" decide "$id" --request "$request" --candidate "$candidate" --evidence "$evidence" \
+  --expected-version "$version" --action approve --json || status=$?
 echo "decide=$status" >> "$exits"
 status=0
-(cd "$target" && node "$bin" export "$id" --json) > "$out/export.json" 2> "$out/export.stderr" || status=$?
+python3 "$helper" capture "$work/export.json" "$target" node "$bin" export "$id" --json || status=$?
 echo "export=$status" >> "$exits"
-exported=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["export"]["directory"])' "$out/export.json" 2>/dev/null || echo "")
+exported=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["export"]["directory"])' "$work/export.json" 2>/dev/null || echo "")
 
-git -C "$target" diff --binary "$base" "$candidate" > "$verify/git.patch"
-if [ -n "$exported" ] && cmp -s "$verify/git.patch" "$exported/change.patch"; then
+if [ -n "$exported" ] && git -C "$target" diff --binary "$base" "$candidate" | cmp -s - "$exported/change.patch"; then
   echo "patch=equal" >> "$exits"
 else
   echo "patch=DIFFERENT" >> "$exits"
@@ -145,9 +165,10 @@ fi
 # Repeat the check on the exported source and on the starter. The starter run is the negative control.
 run_check() {
   local source=$1 artifacts=$2 result=$3 attempt=$4 commit=$5 log=$6 code=0
-  (cd "$source/$check_cwd" && env -u NODE_OPTIONS FACTORY_ARTIFACT_DIR="$artifacts" FACTORY_RESULT="$result" \
+  python3 "$helper" capture "$log" "$source/$check_cwd" \
+    env -u NODE_OPTIONS -u ANTHROPIC_API_KEY FACTORY_ARTIFACT_DIR="$artifacts" FACTORY_RESULT="$result" \
     FACTORY_ATTEMPT_ID="$attempt" FACTORY_CANDIDATE="$commit" FACTORY_CHECK_ID="$check_id" \
-    FACTORY_RUN_ID="$id" FACTORY_WORKSPACE="$source" "${check_argv[@]}") > "$log" 2>&1 || code=$?
+    FACTORY_RUN_ID="$id" FACTORY_WORKSPACE="$source" "${check_argv[@]}" || code=$?
   echo "$code"
 }
 if [ -n "$exported" ] && tar -xf "$exported/source.tar" -C "$verify/src"; then
@@ -157,20 +178,9 @@ else
 fi
 git -C "$target" archive "$base" | tar -x -C "$verify/base"
 echo "negative-control=$(run_check "$verify/base" "$verify/base-artifacts" "$verify/base-result.json" negative "$base" "$verify/base.out")" >> "$exits"
-python3 - "$out/export.json" >> "$exits" <<'PY'
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-    print("cost", d.get("costUsd"), "review", json.dumps(d.get("review")))
-except Exception:
-    print("cost unknown review unknown")
-PY
-
-cat "$exits"
 if grep -qx 'decide=0' "$exits" && grep -qx 'export=0' "$exits" && grep -qx 'patch=equal' "$exits" \
   && grep -qx 'independent-check=0' "$exits" && ! grep -qx 'negative-control=0' "$exits"; then
-  echo "RESULT PASS"
+  exit 0
 else
-  echo "RESULT FAIL"
   exit 1
 fi
