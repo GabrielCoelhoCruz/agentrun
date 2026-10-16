@@ -1107,3 +1107,65 @@ it.effect("refuses an unsupported saved tool profile before worktree or provider
     assert.deepStrictEqual(yield* (yield* StateStore).latest, Option.none())
   }).pipe(Effect.provide(deadlineLayer(agents)), Effect.scoped)
 })
+
+const budgetTask = () => new Task({ ...task(), maxBudgetUsd: 1 })
+const spend = (costUsd: number): AgentEvent => ({ _tag: "Usage", inputTokens: 1, outputTokens: 1, costUsd })
+
+const runBudgeted = (tries: ReadonlyArray<Stream.Stream<AgentEvent, AgentError>>) => {
+  const budgets: Array<Option.Option<number>> = []
+  return Effect.gen(function*() {
+    const runner = yield* Runner
+    const collector = yield* collect(runner)
+    const fiber = yield* Effect.forkChild(runner.run(runState([budgetTask()])))
+    yield* TestClock.adjust(0)
+    yield* TestClock.adjust(4000)
+    const result = yield* Fiber.join(fiber)
+    yield* Fiber.join(collector)
+    return { result, budgets }
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(deadlineLayer(fakeAgents((input) => {
+      budgets.push(input.maxBudgetUsd)
+      return tries[budgets.length - 1] ?? Stream.die("unexpected adapter try")
+    }))),
+  )
+}
+
+it.effect("each adapter retry gets the budget left after earlier tries and the total counts every try", () =>
+  Effect.gen(function*() {
+    const { result, budgets } = yield* runBudgeted([
+      Stream.succeed(spend(0.25)).pipe(Stream.concat(Stream.fail(crashed))),
+      Stream.succeed(spend(0.5)).pipe(Stream.concat(Stream.fail(crashed))),
+      Stream.succeed<AgentEvent>({ ...completed, costUsd: 0.125 }),
+    ])
+    assert.deepStrictEqual(budgets, [Option.some(1), Option.some(0.75), Option.some(0.25)])
+    const status = result.status[task().id]
+    assert.ok(status?._tag === "succeeded")
+    assert.strictEqual(status.costUsd, 0.875)
+  }))
+
+it.effect("fails with the budget error instead of retrying when earlier tries spent the whole budget", () =>
+  Effect.gen(function*() {
+    const { result, budgets } = yield* runBudgeted([
+      Stream.succeed(spend(0.5)).pipe(Stream.concat(Stream.fail(crashed))),
+      Stream.succeed(spend(0.5)).pipe(Stream.concat(Stream.fail(crashed))),
+    ])
+    assert.deepStrictEqual(budgets, [Option.some(1), Option.some(0.5)])
+    assert.deepStrictEqual(result.status[task().id], {
+      _tag: "failed",
+      attempt: 1,
+      reason: "AgentTaskFailed: error_max_budget_usd",
+    })
+    assert.strictEqual(result.taskReports?.[task().id]?.costUsd, 1)
+  }))
+
+it.effect("does not retry a crash of unknown cost when a budget is set", () =>
+  Effect.gen(function*() {
+    const { result, budgets } = yield* runBudgeted([Stream.fail(crashed)])
+    assert.deepStrictEqual(budgets, [Option.some(1)])
+    assert.deepStrictEqual(result.status[task().id], {
+      _tag: "failed",
+      attempt: 1,
+      reason: "AgentCrashed: claude-code exited 3",
+    })
+  }))

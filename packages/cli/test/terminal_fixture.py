@@ -10,6 +10,12 @@ import uuid
 
 from terminal_inspection import owned_ps
 
+# Deadlines detect a stuck process, not a slow host. Terminal.test.ts reads the same file.
+DEADLINES = json.loads((Path(__file__).resolve().parent / 'terminal-deadlines.json').read_text())
+STALL_SECONDS = DEADLINES['stallSeconds']
+RUN_SECONDS = DEADLINES['runSeconds']
+CLEANUP_SECONDS = DEADLINES['cleanupSeconds']
+
 
 def write(path, value):
     temporary = path.with_suffix('.tmp')
@@ -48,8 +54,8 @@ def close(root, nonce):
         return
     if json.loads(owner.read_text()) != nonce:
         raise RuntimeError('Fixture ownership changed; cleanup refused')
-    deadline = time.monotonic() + 48
-    phase_deadline = deadline - 24
+    deadline = time.monotonic() + CLEANUP_SECONDS
+    phase_deadline = deadline - CLEANUP_SECONDS / 2
     records = {}
     refused = []
     signals = []
@@ -231,7 +237,7 @@ class Fixture:
             for child in self.children:
                 if child.returncode is None:
                     child.kill()
-                child.wait(timeout=5)
+                child.wait(timeout=STALL_SECONDS)
             for descriptor in self.descriptors:
                 os.close(descriptor)
             signal.signal(signal.SIGTERM, self.previous_signal)
@@ -256,10 +262,10 @@ class Fixture:
             )
             self.children.append(child)
             path = self.root / f'terminal-child-{child.pid}.json'
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + STALL_SECONDS
             while not path.exists():
                 if child.poll() is not None or time.monotonic() > deadline:
-                    raise RuntimeError('Fixture launcher did not register within 5 seconds')
+                    raise RuntimeError(f'Fixture launcher did not register within {STALL_SECONDS} seconds')
                 time.sleep(.01)
             os.write(release, b'1')
             return child
@@ -270,7 +276,7 @@ class Fixture:
 
 def launch(root, nonce, gate, args):
     command = [args[0], f'--conditions=agentrun-terminal-{nonce}', *args[1:]]
-    row = table()[os.getpid()]
+    row = table(STALL_SECONDS)[os.getpid()]
     write(root / f'terminal-child-{os.getpid()}.json',
           dict(row, nonce=nonce, commands=[row['command'], ' '.join(command)]))
     if os.read(gate, 1) != b'1':

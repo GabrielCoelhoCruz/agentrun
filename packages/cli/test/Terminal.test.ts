@@ -4,9 +4,38 @@ import { accessSync, constants, existsSync, mkdtempSync, readFileSync, statSync,
 import { tmpdir } from "node:os"
 import { isAbsolute, join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { expect, onTestFinished, test } from "vitest"
+import { test } from "vitest"
 
 const python = process.env.AGENTRUN_TERMINAL_PYTHON ?? "python3"
+// The Python driver fails a run that is silent for `stallSeconds` or longer than `runSeconds`.
+// These outer limits only stop a driver that is itself stuck.
+const deadlines = JSON.parse(readFileSync(new URL("./terminal-deadlines.json", import.meta.url), "utf8")) as {
+  stallSeconds: number
+  runSeconds: number
+  cleanupSeconds: number
+}
+const cleanupTimeoutMs = (deadlines.cleanupSeconds + deadlines.stallSeconds) * 1000
+const demoTimeoutMs = (scenario: string) =>
+  ((scenario === "resume" ? 2 : 1) * deadlines.runSeconds + deadlines.stallSeconds) * 1000 + cleanupTimeoutMs
+const fixture = fileURLToPath(new URL("./terminal_fixture.py", import.meta.url))
+const demo = fileURLToPath(new URL("./terminal-demo.py", import.meta.url))
+// Async so that the PTY tests can run at the same time; each one mostly waits for real processes.
+const runPython = (args: ReadonlyArray<string>, timeoutMs: number, env: NodeJS.ProcessEnv = process.env) =>
+  new Promise<{ status: number | null; message: string }>((resolve) => {
+    const child = spawn(python, args, { env, stdio: ["ignore", "ignore", "pipe"] })
+    let stderr = ""
+    let timedOut = false
+    child.stderr.setEncoding("utf8").on("data", (part: string) => (stderr += part))
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill("SIGKILL")
+    }, timeoutMs)
+    child.on("error", (error) => stderr += String(error))
+    child.on("close", (status) => {
+      clearTimeout(timer)
+      resolve({ status, message: timedOut ? `${args[1]} exceeded ${timeoutMs} ms\n${stderr}` : stderr })
+    })
+  })
 if (process.env.AGENTRUN_TERMINAL_PYTHON !== undefined) {
   try {
     if (!isAbsolute(python) || !statSync(python).isFile()) throw new Error("Expected an absolute file")
@@ -17,30 +46,19 @@ if (process.env.AGENTRUN_TERMINAL_PYTHON !== undefined) {
 }
 
 for (const scenario of ["success", "failed", "interrupted", "resize", "resume", "json", "pipe"]) {
-  test(`real PTY: ${scenario} preserves output and exit semantics`, () => {
+  const harnessTimeoutMs = demoTimeoutMs(scenario)
+  test.concurrent(`real PTY: ${scenario} preserves output and exit semantics`, async ({ expect, onTestFinished }) => {
     const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
     const nonce = randomUUID().replaceAll("-", "")
-    onTestFinished(() => {
-      const cleanup = spawnSync(python, [
-        fileURLToPath(new URL("./terminal_fixture.py", import.meta.url)),
-        "close",
-        root,
-        nonce,
-      ], { encoding: "utf8", timeout: 55000 })
-      expect(cleanup.status, cleanup.stderr).toBe(0)
-    }, 60000)
-    const result = spawnSync(python, [
-      fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
-      scenario,
-      root,
-      process.execPath,
-    ], {
-      encoding: "utf8",
-      timeout: 30000,
-      killSignal: "SIGKILL",
-      env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce },
+    onTestFinished(async () => {
+      const cleanup = await runPython([fixture, "close", root, nonce], cleanupTimeoutMs)
+      expect(cleanup.status, cleanup.message).toBe(0)
+    }, cleanupTimeoutMs + 5000)
+    const result = await runPython([demo, scenario, root, process.execPath], harnessTimeoutMs, {
+      ...process.env,
+      AGENTRUN_TERMINAL_NONCE: nonce,
     })
-    expect(result.status, result.stderr).toBe(0)
+    expect(result.status, result.message).toBe(0)
     const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
     const output = readFileSync(join(root, "capture.ansi"), "utf8")
     expect(saved.exitCode).toBe(scenario === "failed" ? 1 : scenario === "interrupted" ? 130 : 0)
@@ -72,52 +90,68 @@ for (const scenario of ["success", "failed", "interrupted", "resize", "resume", 
         scenario === "interrupted" ? "interrupted" : scenario === "failed" ? "failed" : "succeeded",
       )
       if (scenario === "resume") expect(output).toContain("saved failure")
+      if (scenario === "resize") {
+        expect(readFileSync(join(root, "running.ansi"), "utf8")).toContain(
+          "task0 [running] Task 0 界 👩‍💻 long title for narrow terminals",
+        )
+        expect(existsSync(join(root, "resize-wait-error.txt")), "Resize did not redraw while workers were paused")
+          .toBe(false)
+        const resize = saved.frames.find((frame: { name: string; bytes: number }) => frame.name === "resize")
+        expect(resize).toBeDefined()
+        const afterResize = readFileSync(join(root, "capture.ansi")).subarray(resize.bytes).toString().replaceAll(
+          "\r",
+          "",
+        )
+        const liveOutput = afterResize.split("agentrun: finished")[0]?.split("\x1b[?1049l")[0]
+        expect(liveOutput).toContain(
+          "\x1b[H\x1b[2Jagentrun: running | 0/3 succeed\n"
+            + "task0 [running] Task 0 界 👩‍💻 \n",
+        )
+        const finalLines = output.split("\x1b[?1049l")[1]?.replaceAll("\r", "").split("\n")
+        expect(finalLines?.slice(0, 2)).toEqual([
+          "agentrun: finished | 3/3 succee",
+          "task0 [succeeded] Task 0 界 ",
+        ])
+      }
     }
-  }, 35000)
+  }, harnessTimeoutMs + 5000)
 }
 
 for (const scenario of ["retry", "timeout"]) {
-  test(`real PTY: ${scenario} renders runner retries and timeout failures`, () => {
-    const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
-    const nonce = randomUUID().replaceAll("-", "")
-    onTestFinished(() => {
-      const cleanup = spawnSync(python, [
-        fileURLToPath(new URL("./terminal_fixture.py", import.meta.url)),
-        "close",
-        root,
-        nonce,
-      ], { encoding: "utf8", timeout: 55000 })
-      expect(cleanup.status, cleanup.stderr).toBe(0)
-    }, 60000)
-    const result = spawnSync(python, [
-      fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
-      scenario,
-      root,
-      process.execPath,
-    ], {
-      encoding: "utf8",
-      timeout: 30000,
-      killSignal: "SIGKILL",
-      env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce },
-    })
-    expect(result.status, result.stderr).toBe(0)
-    const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
-    const output = readFileSync(join(root, "capture.ansi"), "utf8")
-    expect(saved.exitCode).toBe(scenario === "retry" ? 0 : 1)
-    expect(output).toContain(scenario === "retry" ? "Runner retry 2" : "AgentTimedOut")
-    expect(output).toContain("\x1b[?25h")
-    expect(Object.values(saved.savedStatus).map((s) => (s as { _tag: string })._tag)).toEqual(
-      Array(3).fill(scenario === "retry" ? "succeeded" : "failed"),
-    )
-    for (let n = 0; n < 3; n++) {
-      const starts = readFileSync(join(root, `starts-task${n}`), "utf8").trim().split("\n")
-      expect(starts).toHaveLength(scenario === "retry" ? 3 : 1)
-      if (scenario === "timeout") {
-        expect(saved.savedStatus[`task${n}`].reason).toMatch(/^AgentTimedOut:/)
+  const harnessTimeoutMs = demoTimeoutMs(scenario)
+  test.concurrent(
+    `real PTY: ${scenario} renders runner retries and timeout failures`,
+    async ({ expect, onTestFinished }) => {
+      const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), `terminal-${scenario}-`))
+      const nonce = randomUUID().replaceAll("-", "")
+      onTestFinished(async () => {
+        const cleanup = await runPython([fixture, "close", root, nonce], cleanupTimeoutMs)
+        expect(cleanup.status, cleanup.message).toBe(0)
+      }, cleanupTimeoutMs + 5000)
+      const result = await runPython([demo, scenario, root, process.execPath], harnessTimeoutMs, {
+        ...process.env,
+        AGENTRUN_TERMINAL_NONCE: nonce,
+      })
+      expect(result.status, result.message).toBe(0)
+      const saved = JSON.parse(readFileSync(join(root, "result.json"), "utf8"))
+      const output = readFileSync(join(root, "capture.ansi"), "utf8")
+      expect(saved.exitCode).toBe(scenario === "retry" ? 0 : 1)
+      expect(output).toContain(scenario === "retry" ? "Runner retry 2" : "AgentTimedOut")
+      expect(output).toContain("\x1b[?25h")
+      expect(Object.values(saved.savedStatus).map((s) => (s as { _tag: string })._tag)).toEqual(
+        Array(3).fill(scenario === "retry" ? "succeeded" : "failed"),
+      )
+      for (let n = 0; n < 3; n++) {
+        const starts = readFileSync(join(root, `starts-task${n}`), "utf8").trim().split("\n")
+        expect(starts).toHaveLength(scenario === "retry" ? 3 : 1)
+        if (scenario === "timeout") {
+          expect(saved.savedStatus[`task${n}`].reason).toMatch(/^AgentTimedOut:/)
+        }
       }
-    }
-    if (scenario === "timeout") expect(output).toContain("alive")
-  }, 35000)
+      if (scenario === "timeout") expect(output).toContain("alive")
+    },
+    harnessTimeoutMs + 5000,
+  )
 }
 
 const processTable = () =>
@@ -133,63 +167,63 @@ const processTable = () =>
       }
     })
 
-test("fixture cleanup removes the whole tree after the driver is killed while ps fails", async () => {
-  const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), "terminal-killed-driver-"))
-  const nonce = randomUUID().replaceAll("-", "")
-  const fixture = fileURLToPath(new URL("./terminal_fixture.py", import.meta.url))
-  const driver = spawn(python, [
-    fileURLToPath(new URL("./terminal-demo.py", import.meta.url)),
-    "timeout",
-    root,
-    process.execPath,
-  ], { stdio: "ignore", env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce } })
-  onTestFinished(() => {
-    driver.kill("SIGKILL")
-    const cleanup = spawnSync(python, [fixture, "close", root, nonce], { encoding: "utf8", timeout: 55000 })
-    expect(cleanup.status, cleanup.stderr).toBe(0)
-  }, 60000)
+test.concurrent(
+  "fixture cleanup removes the whole tree after the driver is killed while ps fails",
+  async ({ expect, onTestFinished }) => {
+    const root = mkdtempSync(join(process.env.AGENTRUN_TEST_EVIDENCE ?? tmpdir(), "terminal-killed-driver-"))
+    const nonce = randomUUID().replaceAll("-", "")
+    const driver = spawn(python, [demo, "timeout", root, process.execPath], {
+      stdio: "ignore",
+      env: { ...process.env, AGENTRUN_TERMINAL_NONCE: nonce },
+    })
+    onTestFinished(async () => {
+      driver.kill("SIGKILL")
+      const cleanup = await runPython([fixture, "close", root, nonce], cleanupTimeoutMs)
+      expect(cleanup.status, cleanup.message).toBe(0)
+    }, cleanupTimeoutMs + 5000)
 
-  const deadline = Date.now() + 25000
-  while (!existsSync(join(root, "starts-task2"))) {
-    if (driver.exitCode !== null || Date.now() > deadline) throw new Error("The workers did not start")
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
-  const tree = new Map<number, ReturnType<typeof processTable>[number]>()
-  const collect = () => {
-    const rows = processTable()
-    for (const row of rows) {
-      if (row.command.includes(nonce) || row.command.includes(root) || tree.has(row.parent)) tree.set(row.pid, row)
+    const deadline = Date.now() + deadlines.runSeconds * 1000
+    while (!existsSync(join(root, "starts-task2"))) {
+      if (driver.exitCode !== null || Date.now() > deadline) throw new Error("The workers did not start")
+      await new Promise((resolve) => setTimeout(resolve, 50))
     }
-  }
-  collect()
-  driver.kill("SIGKILL")
-  await new Promise((resolve) => driver.once("exit", resolve))
-  collect()
-  expect(tree.size).toBeGreaterThan(3)
+    const tree = new Map<number, ReturnType<typeof processTable>[number]>()
+    const collect = () => {
+      const rows = processTable()
+      for (const row of rows) {
+        if (row.command.includes(nonce) || row.command.includes(root) || tree.has(row.parent)) tree.set(row.pid, row)
+      }
+    }
+    collect()
+    driver.kill("SIGKILL")
+    await new Promise((resolve) => driver.once("exit", resolve))
+    collect()
+    expect(tree.size).toBeGreaterThan(3)
 
-  // `ps` fails on every second call, as it does when the host is overloaded.
-  const shim = mkdtempSync(join(tmpdir(), "flaky-ps-"))
-  writeFileSync(
-    join(shim, "ps"),
-    [
-      "#!/bin/bash",
-      `n=$(( $(cat ${shim}/count 2>/dev/null || echo 0) + 1 ))`,
-      `echo $n > ${shim}/count`,
-      "if [ $((n % 2)) -eq 0 ]; then echo 'ps: simulated failure' >&2; exit 1; fi",
-      "exec /bin/ps \"$@\"",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  )
-  const cleanup = spawnSync(python, [fixture, "close", root, nonce], {
-    encoding: "utf8",
-    timeout: 55000,
-    env: { ...process.env, PATH: `${shim}:${process.env.PATH}` },
-  })
-  const survivors = processTable().filter((row) => {
-    const before = tree.get(row.pid)
-    return before !== undefined && before.start === row.start && !row.zombie
-  })
-  expect(survivors.map((row) => `${row.pid} ${row.command}`)).toEqual([])
-  expect(cleanup.status, cleanup.stderr).toBe(0)
-}, 60000)
+    // `ps` fails on every second call, as it does when the host is overloaded.
+    const shim = mkdtempSync(join(tmpdir(), "flaky-ps-"))
+    writeFileSync(
+      join(shim, "ps"),
+      [
+        "#!/bin/bash",
+        `n=$(( $(cat ${shim}/count 2>/dev/null || echo 0) + 1 ))`,
+        `echo $n > ${shim}/count`,
+        "if [ $((n % 2)) -eq 0 ]; then echo 'ps: simulated failure' >&2; exit 1; fi",
+        "exec /bin/ps \"$@\"",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    )
+    const cleanup = await runPython([fixture, "close", root, nonce], cleanupTimeoutMs, {
+      ...process.env,
+      PATH: `${shim}:${process.env.PATH}`,
+    })
+    const survivors = processTable().filter((row) => {
+      const before = tree.get(row.pid)
+      return before !== undefined && before.start === row.start && !row.zombie
+    })
+    expect(survivors.map((row) => `${row.pid} ${row.command}`)).toEqual([])
+    expect(cleanup.status, cleanup.message).toBe(0)
+  },
+  (deadlines.runSeconds + deadlines.stallSeconds) * 1000 + 2 * cleanupTimeoutMs,
+)

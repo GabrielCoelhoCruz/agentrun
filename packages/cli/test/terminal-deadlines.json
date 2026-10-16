@@ -1,0 +1,5 @@
+{
+  "stallSeconds": 30,
+  "runSeconds": 120,
+  "cleanupSeconds": 48
+}

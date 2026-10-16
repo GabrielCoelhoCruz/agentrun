@@ -20,6 +20,7 @@ export { Reconciled, type Worktree, Worktrees } from "./Worktrees.js"
 
 export { diagnostics } from "./Diagnostics.js"
 export { stopProcessGroup } from "./ProcessGroup.js"
+export { subprocessFailure } from "./SubprocessFailure.js"
 
 export * as OwnershipRecords from "./OwnershipRecords.js"
 
