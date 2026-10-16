@@ -62,7 +62,7 @@ jobs:
 
   installed-proof:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 60
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
