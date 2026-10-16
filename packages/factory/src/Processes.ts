@@ -20,6 +20,24 @@ export const Launch = Schema.Struct({
   command: CommandSpec,
   timeoutMs: Schema.Int.check(Schema.isGreaterThan(0)),
 })
+export const CommandGroup = Schema.Struct({
+  version: Schema.Literal(1),
+  attemptId: Id,
+  token: Schema.String,
+  commandHash: Schema.String,
+  pid: Schema.Int.check(Schema.isGreaterThan(1)),
+  pgid: Schema.Int.check(Schema.isGreaterThan(1)),
+})
+const alive = (pid: number) =>
+  io("process", () => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (cause) {
+      if (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ESRCH") return false
+      throw cause
+    }
+  })
 export const receipt = (owned: OwnedProcess, attemptId: string) =>
   io("process", () => {
     const file = join(owned.directory, "result.json")
@@ -39,6 +57,28 @@ export const stop = (store: Store, attemptId: string, owned: OwnedProcess, reaso
         error,
       )
     ))
+    const commandGroup = yield* io("process-ownership", () => {
+      const file = join(owned.directory, "command-group.json")
+      if (!existsSync(file)) {
+        if (existsSync(join(owned.directory, "started.json")) && !existsSync(join(owned.directory, "result.json"))) {
+          throw failure("process-ownership", "Command group identity is missing; cleanup refused")
+        }
+        return undefined
+      }
+      const group = Schema.decodeUnknownSync(CommandGroup, { onExcessProperty: "error" })(readJson(file))
+      if (
+        group.pid !== owned.pid || group.token !== owned.token || group.commandHash !== owned.commandHash
+        || group.attemptId !== attemptId || group.pgid === owned.pid
+      ) throw failure("process-ownership", "Command group identity differs from its owner; cleanup refused")
+      return group
+    })
+    if (commandGroup !== undefined) {
+      yield* stopProcessGroup(commandGroup.pgid, owned.token, "factory").pipe(
+        Effect.mapError((error) =>
+          ownershipFailure("Command group ownership could not be verified; cleanup refused", error)
+        ),
+      )
+    }
     const state = yield* store.read()
     if (
       state.current?.attempt.id === attemptId && state.current.process?.pid === owned.pid
@@ -120,16 +160,7 @@ export const runProcess = (
       while (true) {
         const found = yield* receipt(owned, attemptId)
         if (found !== undefined) return found
-        const alive = yield* io("process", () => {
-          try {
-            process.kill(owned.pid, 0)
-            return true
-          } catch (cause) {
-            if (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ESRCH") return false
-            throw cause
-          }
-        })
-        if (!alive) {
+        if (!(yield* alive(owned.pid))) {
           return yield* failure(
             "unknown-outcome",
             "Command supervisor exited without a terminal receipt. Its effects are unknown.",
@@ -179,6 +210,9 @@ export const recoverProcess = (store: Store, current: AttemptState) =>
         yield* collectProcess(store, current, result)
         return "completed" as const
       }
+    }
+    if (!current.stopped && !(yield* alive(owned.pid))) {
+      yield* stop(store, current.attempt.id, owned, "Recovered dead supervisor")
     }
     return "unknown" as const
   })

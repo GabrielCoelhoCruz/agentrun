@@ -436,6 +436,40 @@ try {
     assert.ok(journey.some((entry) => entry.event === "migration-verified"))
     assert.equal(c.git("status", "--porcelain", "--", ":(top)", ":(top,exclude).agentrun/"), "")
   })
+  for (const change of ["modified", "staged", "deleted", "renamed", "untracked", "ignored"]) {
+    await scenario(`state-checkout-${change}`, async () => {
+      const c = setup(`state-checkout-${change}`, "happy", (_p, repo) => {
+        mkdirSync(join(repo, ".agentrun"))
+        writeFileSync(join(repo, ".agentrun/tracked.txt"), "committed\n")
+        if (change === "ignored") writeFileSync(join(repo, ".gitignore"), ".agentrun/state/\n")
+      })
+      const tracked = join(c.repo, ".agentrun/tracked.txt")
+      if (change === "modified" || change === "staged") writeFileSync(tracked, "changed\n")
+      if (change === "staged") c.git("add", ".agentrun/tracked.txt")
+      if (change === "deleted") rmSync(tracked)
+      if (change === "renamed") c.git("mv", ".agentrun/tracked.txt", ".agentrun/renamed.txt")
+      if (change === "untracked" || change === "ignored") {
+        mkdirSync(join(c.repo, ".agentrun/state"))
+        writeFileSync(join(c.repo, ".agentrun/state/run.json"), "{}\n")
+        assertHuman(c.start())
+      } else {
+        const result = c.run(process.execPath, [
+          cli,
+          "start",
+          "--profile",
+          "factory.json",
+          "--goal",
+          "test",
+          "--id",
+          c.id,
+          "--json",
+        ])
+        assert.equal(result.code, 2, result.stderr)
+        assert.match(result.stderr, /clean project checkout/)
+        assert.equal(existsSync(c.stateDirectory), false)
+      }
+    })
+  }
   await scenario("second-start", async () => {
     const c = setup("second-start")
     assertHuman(c.start())
@@ -1157,6 +1191,69 @@ ${boundary.endsWith("exit") ? "exit 23" : "exec node -e 'setInterval(()=>{},1000
     assertHuman(c.command(["resume", c.id]))
     assert.equal(readFileSync(c.env.FACTORY_FIXTURE_CHECK_LOG, "utf8").trim().split("\n").length, 1)
   })
+  for (const recovery of ["cancel", "live-cancel", "resume", "invalid-owner", "foreign-owner"]) {
+    await scenario(`supervisor-crash-${recovery}`, async () => {
+      const c = setup(`supervisor-crash-${recovery}`, "happy", () => {}, "cancel-check")
+      const running = c.startAsync()
+      const check = await waitFor(() => activeCheck(c), "executed check and its child")
+      const registration = c.events().filter((event) => event.fact._tag === "ProcessRegistered").at(-1).fact
+      const owned = registration.process
+      const group = processRow(check.pid).group
+      note(c, "crash-processes", { supervisor: owned.pid, group, ...check })
+      let sentinel
+      let sentinelEnded
+      try {
+        if (recovery !== "live-cancel") {
+          running.child.kill("SIGKILL")
+          assert.equal((await running.completed).signal, "SIGKILL")
+        }
+        process.kill(owned.pid, "SIGKILL")
+        await waitFor(() => processRow(owned.pid) === undefined, "dead supervisor")
+        if (recovery === "live-cancel") assert.equal((await running.completed).code, 1)
+        if (recovery === "invalid-owner" || recovery === "foreign-owner") {
+          let record = {}
+          if (recovery === "foreign-owner") {
+            sentinel = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { detached: true, stdio: "ignore" })
+            sentinelEnded = new Promise((done) => sentinel.once("close", done))
+            record = {
+              version: 1,
+              attemptId: registration.attemptId,
+              token: owned.token,
+              commandHash: owned.commandHash,
+              pid: owned.pid,
+              pgid: sentinel.pid,
+            }
+          }
+          writeFileSync(join(owned.directory, "command-group.json"), JSON.stringify(record))
+          c.command(["cancel", c.id, "--expected-version", String(c.status().version)], 1)
+          assert.notEqual(c.status().stage, "cancelled")
+          assert.ok(processRow(check.pid), "Unverified check must not receive a signal")
+          if (sentinel) assert.ok(processRow(sentinel.pid), "Foreign group must not receive a signal")
+        } else {
+          if (recovery === "resume") assertBlocked(c.command(["resume", c.id], 1), /unknown|active/i)
+          else {assert.equal(
+              c.command(["cancel", c.id, "--expected-version", String(c.status().version)]).stage,
+              "cancelled",
+            )}
+          assertExited(check.pid)
+          assertExited(check.child)
+          if (recovery === "resume") c.command(["cancel", c.id, "--expected-version", String(c.status().version)])
+          assert.equal(c.status().stage, "cancelled")
+        }
+      } finally {
+        if (sentinel) {
+          sentinel.kill("SIGKILL")
+          await sentinelEnded
+        }
+        // This scenario owns this group, including the deliberately unverified test case.
+        if (processRow(check.pid) !== undefined || processRow(check.child) !== undefined) {
+          try {
+            process.kill(-group, "SIGKILL")
+          } catch {}
+        }
+      }
+    })
+  }
   await scenario("crash-check", async () => {
     const c = setup("crash-check", "happy", () => {}, "cancel-check")
     const running = c.startAsync()
