@@ -393,6 +393,11 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
           const elapsedBeforeMs = priorData?.durationMs ?? 0
           let priorCost = priorData?.costUsd
           let attemptCost: number | undefined
+          // maxBudgetUsd caps all adapter tries of this attempt together.
+          const costBeforeAttempt = priorCost ?? 0
+          const remainingBudget = () =>
+            task.maxBudgetUsd === undefined ? undefined : task.maxBudgetUsd - ((priorCost ?? 0) - costBeforeAttempt)
+          let budgetSpent = false
           const retryable = (error: TaskError | PlatformError | ReportError) =>
             adapterAttempt < 3 && !toolsStarted && (state.setup === undefined || setupDone)
             && (error._tag === "AgentCrashed" || (error._tag === "AgentSpawnError" && retryableSpawnError(error)))
@@ -481,7 +486,7 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                     cwd: worktree.path,
                     model: Option.fromUndefinedOr(task.model),
                     maxTurns: Option.fromUndefinedOr(task.maxTurns),
-                    maxBudgetUsd: Option.fromUndefinedOr(task.maxBudgetUsd),
+                    maxBudgetUsd: Option.fromUndefinedOr(remainingBudget()),
                   }).pipe(
                     Stream.tapError((error) =>
                       isTaskError(error) && !retryable(error) ? recordFailure(task.id, error) : Effect.void
@@ -574,28 +579,41 @@ const make = Effect.fn("Runner.make")(function*(options: Options) {
                   isTaskError(error) && !retryable(error) ? recordFailure(task.id, error) : Effect.void
                 ))
               ).pipe(Effect.scoped)
-              const summary = yield* execute.pipe(Effect.retry({
-                schedule: Schedule.exponential("1 second").pipe(Schedule.jittered, Schedule.upTo({ times: 2 })),
-                while: (error) =>
-                  Effect.gen(function*() {
-                    if (!isTaskError(error) || !retryable(error)) return false
-                    if (attemptCost !== undefined) priorCost = (priorCost ?? 0) + attemptCost
-                    yield* checkpoint(task.id, {
-                      ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
-                      phase: "unfinished",
-                      durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
-                    })
-                    const event: AgentEvent = {
-                      _tag: "Retry",
-                      source: "runner",
-                      attempt: adapterAttempt + 1,
-                      reason: `${error._tag}: ${detail(error)}`,
-                    }
-                    yield* report.append(state, task.id, event)
-                    yield* PubSub.publish(pubsub, { _tag: "TaskAgentEvent", taskId: task.id, event })
-                    return true
-                  }),
-              }))
+              const summary = yield* execute.pipe(
+                Effect.retry({
+                  schedule: Schedule.exponential("1 second").pipe(Schedule.jittered, Schedule.upTo({ times: 2 })),
+                  while: (error) =>
+                    Effect.gen(function*() {
+                      if (!isTaskError(error) || !retryable(error)) return false
+                      if (attemptCost !== undefined) priorCost = (priorCost ?? 0) + attemptCost
+                      // A crashed try that reported no cost may have spent any part of the budget.
+                      if (
+                        task.maxBudgetUsd !== undefined && error._tag === "AgentCrashed" && attemptCost === undefined
+                      ) {
+                        return false
+                      }
+                      budgetSpent = (remainingBudget() ?? 1) <= 0
+                      if (budgetSpent) return false
+                      yield* checkpoint(task.id, {
+                        ...(yield* SynchronizedRef.get(current)).taskReports?.[task.id],
+                        phase: "unfinished",
+                        durationMs: elapsedBeforeMs + Math.floor((yield* Clock.currentTimeMillis) - start),
+                      })
+                      const event: AgentEvent = {
+                        _tag: "Retry",
+                        source: "runner",
+                        attempt: adapterAttempt + 1,
+                        reason: `${error._tag}: ${detail(error)}`,
+                      }
+                      yield* report.append(state, task.id, event)
+                      yield* PubSub.publish(pubsub, { _tag: "TaskAgentEvent", taskId: task.id, event })
+                      return true
+                    }),
+                }),
+                Effect.mapError((error) =>
+                  budgetSpent ? new AgentTaskFailed({ agent: task.agent, reason: "error_max_budget_usd" }) : error
+                ),
+              )
               if (Option.isNone(summary.last) || summary.last.value._tag !== "Completed") {
                 return yield* Effect.die(`Adapter ${task.agent} ended the stream without Completed or Failed`)
               }
