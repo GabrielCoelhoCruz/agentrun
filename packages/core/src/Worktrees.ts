@@ -281,18 +281,19 @@ process.stdin.once('data',()=>{
           yield* fs.makeDirectory(path.dirname(worktree.path), { recursive: true }).pipe(Effect.orDie)
           if (existing.dir) return worktree
           yield* onCreate?.() ?? Effect.void
-          yield* git(
-            existing.branch
-              ? ["worktree", "add", worktree.path, worktree.branch]
-              : ["worktree", "add", "-b", worktree.branch, worktree.path, baseSha],
-            repo,
-          ).pipe(semaphore.withPermits(1))
+          // Save the receipt first: a stop during `git worktree add` then leaves resources this run can prove it owns.
           if (!existing.owned) {
             yield* fs.makeDirectory(ownership, { recursive: true, mode: 0o700 }).pipe(Effect.mapError(processError))
             yield* fs.writeFileString(receipt(worktree), owner(worktree), { flag: "wx", mode: 0o600 }).pipe(
               Effect.mapError(() => refusal(worktree, "creation receipt could not be saved")),
             )
           }
+          yield* git(
+            existing.branch
+              ? ["worktree", "add", worktree.path, worktree.branch]
+              : ["worktree", "add", "-b", worktree.branch, worktree.path, baseSha],
+            repo,
+          ).pipe(semaphore.withPermits(1))
           return worktree
         }),
         (worktree, exit) =>
