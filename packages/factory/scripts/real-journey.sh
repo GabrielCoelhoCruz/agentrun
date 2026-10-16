@@ -64,16 +64,14 @@ exits=$work/exits.txt
 finish() {
   local code=$?
   trap - EXIT
-  python3 "$helper" summarize "$work" "$out" "$code" || code=1
+  local prepared=yes
+  python3 "$helper" summarize "$work" "$out" "$code" || prepared=no
   # Factory state can contain provider transcripts. Never retain or upload it.
   rm -rf "$work"
-  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    if ! python3 "$helper" scan "$out"; then
-      code=1
-      echo 'RESULT FAIL' > "$out/report.txt"
-    fi
+  if [ "$prepared" != yes ] || ! python3 "$helper" summary "$out"; then
+    code=1
+    echo 'RESULT FAIL'
   fi
-  cat "$out/exits.txt" "$out/report.txt"
   exit "$code"
 }
 trap finish EXIT

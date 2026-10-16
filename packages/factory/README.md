@@ -178,15 +178,20 @@ bash packages/factory/scripts/real-journey.sh --factory "$PWD" --out /path/to/ne
 `--example` selects another example directory, `--check` another profile check, and `--goal` another goal.
 The output directory contains only public evidence: exit codes, toolchain versions, the factory commit,
 start/decide/export summaries, manifest digests, the check result summary, and a report.
-Each file is limited to 64 KiB. Summaries omit goals, paths, review messages, and provider text.
+Each file is limited to 64 KiB. The script generates public content from fixed verdicts, numbers, hashes, and validated versions.
+It does not copy raw tool output, goals, paths, review messages, or provider text into public files.
 The script redacts the exact `ANTHROPIC_API_KEY` value from captured command output before writing it.
 It uses a private home directory and deletes the temporary repository, factory state, exports, and databases when it exits.
 Provider code can write raw data inside that temporary directory while the journey runs.
 
 The `Real provider journey` GitHub Actions workflow runs the same script on Linux. Start it by hand from the Actions tab.
 It reads `ANTHROPIC_API_KEY` from the `real-provider` environment, so a required reviewer can approve each run before it spends.
-Before upload, a separate step reads `ANTHROPIC_API_KEY` from its environment and scans each evidence file for its exact value.
-The step also rejects extra files, links, and files over 64 KiB. A failed scan blocks upload and fails the job.
+Factory processes and their provider children do not receive Actions file-command paths, runtime tokens, or upload endpoints.
+Before upload, a separate step scans the final evidence and generates a fixed summary from the scanned result.
+Only that trusted step writes to the Actions summary. The scan blocks the key, whitespace splits, base64 at each byte offset,
+URL encoding, hex, and private key fragments of 16 or more characters.
+The step also rejects missing or extra files, read errors, links, nested paths, empty keys, and files over 64 KiB.
+A failed scan blocks the summary and upload and fails the job.
 Only the approved evidence is uploaded, including when the journey fails.
 Provider transcripts, prompts, agent logs, target repositories, factory state, and databases are excluded.
 
@@ -196,7 +201,8 @@ After `pnpm build`, prove this boundary without paid calls:
 node packages/factory/scripts/real-journey-e2e.mjs /path/to/new-fixture-proof
 ```
 
-The fixture provider echoes a fake key. The proof checks that the key does not remain in the output,
-then deliberately adds leaking files and checks that the upload scan fails without printing the key.
+The fixture provider echoes a fake key, adds raw and encoded tool text, and attempts to write to Actions publication paths.
+The proof checks the final artifact, the scrubbed child environment, and the trusted summary writer.
+It then adds encoded leaks and unsafe files and checks that publication fails without printing the key.
 
 Observed cost for notes-ts: $0.26 to $0.83 per run. These are observed values, not a limit. `--budget` sets the limit.

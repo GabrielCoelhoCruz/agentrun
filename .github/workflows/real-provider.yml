@@ -51,7 +51,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          python3 packages/factory/scripts/journey-evidence.py scan "$RUNNER_TEMP/real-journey"
+          python3 packages/factory/scripts/journey-evidence.py summary "$RUNNER_TEMP/real-journey" >> "$GITHUB_STEP_SUMMARY"
           echo 'safe=true' >> "$GITHUB_OUTPUT"
       - name: Save public evidence
         if: ${{ always() && steps.evidence.outputs.safe == 'true' }}

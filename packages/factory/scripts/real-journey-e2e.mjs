@@ -50,9 +50,25 @@ const env = {
   ANTHROPIC_API_KEY: secret,
   NODE_OPTIONS: `--import=${pathToFileURL(join(factory, "packages/factory/test/fixtures/provider-hooks.mjs")).href}`,
   FACTORY_FIXTURE_ECHO_SECRET: "1",
+  FACTORY_FIXTURE_PUBLICATION_ATTACK: "1",
   FACTORY_FIXTURE_LOG: join(root, "providers.jsonl"),
   FACTORY_FIXTURE_DURABLE: join(factory, "packages/factory/test/fixtures/server-durable.ts"),
 }
+const channels = ["GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_STATE"]
+for (const name of channels) env[name] = join(root, name)
+for (
+  const name of [
+    "ACTIONS_RUNTIME_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "ACTIONS_CACHE_URL",
+    "ACTIONS_RESULTS_URL",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "RUNNER_TEMP",
+    "INPUT_TOKEN",
+  ]
+) env[name] = "fixture-token"
 mkdirSync(env.HOME)
 mkdirSync(env.TMPDIR)
 const scanner = join(factory, "packages/factory/scripts/journey-evidence.py")
@@ -85,7 +101,21 @@ for (const mode of ["happy", "no-change"]) {
   }
 }
 assert.ok(readFileSync(env.FACTORY_FIXTURE_LOG, "utf8").includes("\"kind\":\"secret-echo\""))
+const publications = readFileSync(env.FACTORY_FIXTURE_LOG, "utf8").trim().split("\n").map(JSON.parse)
+  .filter((row) => row.kind === "publication-environment")
+assert.ok(publications.length >= 2, "Both provider stages must attempt publication")
+assert.ok(publications.every((row) => row.channels.length === 0), "Provider must not inherit publication channels")
+for (const name of channels) assert.ok(!readdirSync(root).includes(name), `${name} must remain unwritten`)
 const good = join(root, "happy")
+assert.ok(!readFileSync(join(good, "toolchain.txt"), "utf8").includes("PROVIDER_FREE_TEXT"))
+assert.equal(
+  run(
+    "python3",
+    [join(factory, "packages/factory/scripts/journey-evidence-e2e.py"), good, join(root, "boundaries")],
+    env,
+  ).status,
+  0,
+)
 for (const name of ["report.txt", "extra.txt"]) {
   const bad = join(root, `leak-${name}`)
   cpSync(good, bad, { recursive: true })

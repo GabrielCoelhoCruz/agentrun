@@ -1,5 +1,6 @@
 """Keep public journey evidence small and separate from private provider data."""
 
+import base64
 import json
 import math
 import os
@@ -7,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from urllib.parse import unquote_to_bytes
 
 
 ALLOWED = {
@@ -91,38 +93,80 @@ def summarize(work, out, code):
     safe = [line for line in lines if re.fullmatch(
         r"(?:start|decide|export|independent-check|negative-control)=(?:[0-9]+|missing-source)|patch=(?:equal|DIFFERENT)", line)]
     write(out / "exits.txt", "\n".join(safe) + "\n")
-    for name in ("toolchain.txt", "factory-head.txt"):
-        write(out / name, (work / name).read_text())
+    versions = (work / "toolchain.txt").read_text().splitlines()
+    save("toolchain.txt", {
+        "nodeVersion": next((line[5:] for line in versions if re.fullmatch(r"node v[0-9]+\.[0-9]+\.[0-9]+", line)), None),
+        "pythonVersion": next((line[7:] for line in versions if re.fullmatch(r"Python [0-9]+\.[0-9]+\.[0-9]+", line)), None),
+    })
+    head = digest((work / "factory-head.txt").read_text().strip(), 40)
+    write(out / "factory-head.txt", (head or "unavailable") + "\n")
     write(out / "report.txt", "RESULT PASS\n" if code == 0 else "RESULT FAIL\n")
 
 
-def scan(out):
+def check_secret(data):
     secret = os.environ.get("ANTHROPIC_API_KEY", "").encode()
     if not secret:
         raise EvidenceError("Secret scan requires ANTHROPIC_API_KEY")
+    private = secret.removeprefix(b"sk-ant-")
+    patterns = {secret}
+    patterns.update(private[index:index + 16] for index in range(len(private) - 15))
+    for offset in range(3):
+        # Keep only complete base64 characters made from secret bytes. Adjacent
+        # bytes and padding must not affect a match in a larger encoded string.
+        start, end = (offset * 8 + 5) // 6, (offset + len(secret)) * 8 // 6
+        for encode in (base64.b64encode, base64.urlsafe_b64encode):
+            patterns.add(encode(b"\0" * offset + secret)[start:end])
+    for value in (data, unquote_to_bytes(data)):
+        compact = re.sub(rb"\s+", b"", value)
+        if secret.hex().encode() in compact.lower() or any(pattern and pattern in compact for pattern in patterns):
+            raise EvidenceError("Secret detected; upload blocked")
+
+
+def scan(out):
+    check_secret(b"")
     if out.is_symlink() or not out.is_dir():
         raise EvidenceError("Evidence directory is missing or linked")
     entries = list(out.rglob("*"))
+    contents = {}
     for path in entries:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
             raise EvidenceError("Evidence must contain small regular files only")
-        if secret in path.read_bytes() or secret in path.name.encode():
-            raise EvidenceError("Secret detected; upload blocked")
+        contents[path.name] = path.read_bytes()
+        check_secret(contents[path.name])
+        check_secret(path.name.encode())
     if {path.name for path in entries} != ALLOWED or len(entries) != len(ALLOWED):
         raise EvidenceError("Evidence contains missing or unapproved files")
+    return contents
+
+
+def summary(out):
+    contents = scan(out)
+    report = contents["report.txt"]
+    if report not in (b"RESULT PASS\n", b"RESULT FAIL\n"):
+        raise EvidenceError("Invalid journey result; publication blocked")
+    data = b"### Real provider journey\n\n" + report
+    check_secret(data)
+    sys.stdout.buffer.write(data)
 
 
 def main():
     action = sys.argv[1]
     if action == "capture":
         # Capture in memory, redact before writing, and discard child diagnostics.
-        result = subprocess.run(sys.argv[4:], cwd=sys.argv[3], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        # Children can run provider tools. Keep CI file commands, runtime tokens,
+        # and upload endpoints in the trusted wrapper, outside that process tree.
+        env = {name: value for name, value in os.environ.items()
+               if not name.startswith(("GITHUB_", "ACTIONS_", "RUNNER_", "GH_", "INPUT_"))}
+        result = subprocess.run(sys.argv[4:], cwd=sys.argv[3], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         Path(sys.argv[2]).write_bytes(redact(result.stdout))
         return result.returncode if result.returncode >= 0 else 1
     if action == "summarize":
         summarize(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]))
     elif action == "scan":
         scan(Path(sys.argv[2]))
+    elif action == "summary":
+        summary(Path(sys.argv[2]))
     else:
         raise EvidenceError("Unknown evidence command")
     return 0
