@@ -143,6 +143,13 @@ def main():
         # Keep raw streams private; never execute or print their contents.
         (work / name).write_bytes(evidence.redact(result.stdout))
         (work / (name + ".stderr")).write_bytes(evidence.redact(result.stderr))
+        if os.environ.get("FACTORY_JOURNEY_FIXTURE") == "1":
+            diagnostic = evidence.redact(result.stderr)
+            try:
+                evidence.check_secret(diagnostic)
+            except evidence.EvidenceError:
+                diagnostic = b"Credential-bearing stderr withheld"
+            print(f"Fixture {name}: exit={result.returncode}; stderr={diagnostic[:4096].decode(errors='replace')!r}", file=sys.stderr)
         return result.returncode if result.returncode >= 0 else 1
 
     try:
@@ -222,7 +229,7 @@ for root in sys.argv[1:]:
         for directory in (agent / "home", agent / "tmp"):
             directory.mkdir()
         agent.chmod(0o700)
-        trusted([sudo, "-n", "chown", "-R", f"{uid}:{account.pw_gid}", str(agent)])
+        trusted([sudo, "-n", "chown", "-hR", f"{uid}:{account.pw_gid}", str(agent)])
         bin_path = str(factory / "packages/factory/dist/bin.mjs")
         checkpoint = "factory-start"
         status = run_agent([node, bin_path, "start", "--profile", "factory.json", "--goal", args.goal,
@@ -257,7 +264,7 @@ for root in sys.argv[1:]:
         checkpoint = "stop-and-copy"
         # End the whole agent UID before any trusted read of its repository.
         stop()
-        trusted([sudo, "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(agent)])
+        trusted([sudo, "-n", "chown", "-hR", f"{os.getuid()}:{os.getgid()}", str(agent)])
         trusted(["chmod", "-R", "u+rwX", str(agent)])
         objects = target / ".git/objects"
         require(not target.is_symlink() and not (target / ".git").is_symlink() and not objects.is_symlink())
@@ -319,7 +326,7 @@ for root in sys.argv[1:]:
         record("patch", "derived")
         for name in ("artifacts", "base-artifacts"):
             (verify / name).mkdir()
-        trusted([sudo, "-n", "chown", "-R", f"{uid}:{account.pw_gid}", str(agent)])
+        trusted([sudo, "-n", "chown", "-hR", f"{uid}:{account.pw_gid}", str(agent)])
         checkpoint = "checks"
         for name, directory, commit, artifacts in [("independent-check", "src", candidate, "artifacts"),
                                                     ("negative-control", "base", base, "base-artifacts")]:
