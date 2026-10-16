@@ -87,7 +87,7 @@ for case in ['host-path', 'checkout', 'host-pid', 'channels', 'background']:
         try:
             container.start()
             run = container.run(['/usr/local/bin/node', '--input-type=module', '-e',
-                                 "import {probe} from '/opt/proof/container-probe.mjs'; probe()"], '/work')
+                                 "import {probe} from 'file:///opt/proof/container-probe.mjs'; probe()"], '/work')
             assert run.returncode == 0, run.stderr.decode()
             result = json.loads((work / 'probe.json').read_text())
             alive = case == 'background' and container.run(['/bin/kill', '-0', str(result['pid'])], '/work').returncode == 0
@@ -112,7 +112,7 @@ case.mkdir()
 hook = case / 'hook.mjs'
 source = (factory / 'packages/factory/test/fixtures/provider-hooks.mjs').read_text()
 marker = "  record({ kind: 'provider', stage: task.stage,"
-source = source.replace("import assert from 'node:assert/strict';", "import assert from 'node:assert/strict';\nimport {probe} from '/opt/proof/container-probe.mjs';")
+source = source.replace("import assert from 'node:assert/strict';", "import assert from 'node:assert/strict';\nimport {probe} from 'file:///opt/proof/container-probe.mjs';")
 hook.write_text(source.replace(marker, '  probe();\n' + marker))
 for example, extension in [('notes-ts', 'ts'), ('notes-py', 'py')]:
     env = dict(os.environ, ANTHROPIC_API_KEY=key, FACTORY_JOURNEY_FIXTURE='1',
