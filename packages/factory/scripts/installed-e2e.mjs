@@ -130,11 +130,16 @@ export const proveFreshResolve = (evidence, dependencies) => {
      console.log('Packed package imports passed');`,
   ])
   assert.equal(output.trim(), "Packed package imports passed")
-  for (const [name, file, expected] of [
-    ["cli", "agentrun", "agentrun"],
-    ["factory", "@agentrun/factory", "agentrun-factory"],
-  ]) {
-    const help = run(`fresh-${name}-start`, process.execPath, [join(consumer, "node_modules", file, "dist/bin.mjs"), "--help"])
+  for (
+    const [name, file, expected] of [
+      ["cli", "agentrun", "agentrun"],
+      ["factory", "@agentrun/factory", "agentrun-factory"],
+    ]
+  ) {
+    const help = run(`fresh-${name}-start`, process.execPath, [
+      join(consumer, "node_modules", file, "dist/bin.mjs"),
+      "--help",
+    ])
     assert.ok(help.includes(expected), `Missing ${expected} help`)
   }
   const seconds = (performance.now() - started) / 1000
