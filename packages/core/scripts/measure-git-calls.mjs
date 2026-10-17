@@ -1,7 +1,7 @@
 import { NodeServices } from "@effect/platform-node"
 import { Effect, Layer, ManagedRuntime, Schema } from "effect"
 import { execFileSync } from "node:child_process"
-import { appendFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { freemem, loadavg } from "node:os"
 import { join, resolve } from "node:path"
@@ -17,7 +17,7 @@ const { values } = parseArgs({
 })
 if (values.output === undefined) throw new Error("Pass --output with a new directory")
 const repo = fileURLToPath(new URL("../../../", import.meta.url))
-const expectedNode = `v${readFileSync(join(repo, ".nvmrc"), "utf8").trim().replace(/^v/, "")}`
+const expectedNode = "v24.21.0"
 if (process.version !== expectedNode) throw new Error(`Use Node ${expectedNode}; got ${process.version}`)
 const output = resolve(values.output)
 mkdirSync(output)
