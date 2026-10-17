@@ -81,10 +81,11 @@ test("exclusive write refuses a different existing file and keeps its bytes", as
 })
 
 const writerScript = fileURLToPath(new URL("./fixtures/exclusive-writer.mjs", import.meta.url))
+const writerTimeout = 30000
 const writer = (directory: string, mode: string) =>
   spawnSync(process.execPath, [writerScript, directory, mode], {
     encoding: "utf8",
-    timeout: 30000,
+    timeout: writerTimeout,
   })
 
 test("exclusive retry preserves a matching user file", async () => {
@@ -116,7 +117,7 @@ test("exclusive write preserves a temporary file when exclusive creation collide
   expect(result.status, result.stderr).toBe(1)
   expect(result.stdout).toContain("EEXIST")
   expect(readFileSync(userFile, "utf8")).toBe("user-owned bytes")
-})
+}, writerTimeout)
 
 test("exclusive write retries a temporary name collision without changing the existing file", () => {
   const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-collision-retry-"))
@@ -127,7 +128,7 @@ test("exclusive write retries a temporary name collision without changing the ex
   expect(readFileSync(join(directory, "result.json"), "utf8")).toBe("complete")
   expect(readFileSync(join(directory, stale), "utf8")).toBe("user-owned bytes")
   expect(readdirSync(directory).sort()).toEqual([stale, "result.json"])
-})
+}, writerTimeout)
 
 test("exclusive write syncs publication while the complete temporary file still exists", () => {
   const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-sync-"))
@@ -135,7 +136,7 @@ test("exclusive write syncs publication while the complete temporary file still 
   expect(result.status, result.stderr + result.stdout).toBe(0)
   expect(result.stdout).toContain(JSON.stringify({ published: "complete", temporary: "complete" }))
   expect(readdirSync(directory)).toEqual(["result.json"])
-})
+}, writerTimeout)
 
 test.each([
   ["fail-directory-sync", "EIO"],
@@ -151,7 +152,7 @@ test.each([
   expect(readFileSync(file, "utf8")).toBe("complete")
   await writeExclusive(file, "complete")
   expect(readFileSync(file, "utf8")).toBe("complete")
-})
+}, writerTimeout)
 
 test.each(["root", "ancestor", "parent"])(
   "exclusive write rolls back its link when the %s becomes a symlink at publication",
@@ -173,6 +174,7 @@ test.each(["root", "ancestor", "parent"])(
     expect(existsSync(join(outside, "result.json"))).toBe(false)
     expect(readFileSync(join(outside, "user.txt"), "utf8")).toBe("user-owned bytes")
   },
+  writerTimeout,
 )
 
 test("exclusive write detects a different real parent and removes only its published link", () => {
@@ -183,7 +185,7 @@ test("exclusive write detects a different real parent and removes only its publi
   expect(result.stdout).toContain("\"code\":\"path\"")
   expect(existsSync(join(directory, "owned/artifacts/nested/result.json"))).toBe(false)
   expect(readFileSync(join(directory, "owned/artifacts/nested/user.txt"), "utf8")).toBe("user-owned bytes")
-})
+}, writerTimeout)
 
 test.each(["replacement", "existing-same", "existing-different"])(
   "exclusive write preserves the %s artifact when publication detects a changed parent",
@@ -197,6 +199,7 @@ test.each(["replacement", "existing-same", "existing-different"])(
       mode === "existing-same" ? "complete" : "user-owned artifact",
     )
   },
+  writerTimeout,
 )
 
 test("exclusive write cleans its own temporary file after a failed write", () => {
@@ -207,7 +210,7 @@ test("exclusive write cleans its own temporary file after a failed write", () =>
   expect(result.status, result.stderr).toBe(1)
   expect(result.stdout).toContain("injected write failure")
   expect(readdirSync(directory)).toEqual([userFile])
-})
+}, writerTimeout)
 
 test("exclusive write refuses a parent symlink before publication and cleanup", () => {
   const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-swap-"))
@@ -219,7 +222,7 @@ test("exclusive write refuses a parent symlink before publication and cleanup", 
   const temporary = readdirSync(join(directory, "outside")).find((name) => name.startsWith(".result.json.partial-"))
   expect(temporary).toBeDefined()
   expect(readFileSync(join(directory, "outside", temporary!), "utf8")).toBe("complete")
-})
+}, writerTimeout)
 
 test("exclusive retry completes after a crash before publication and preserves the stale temporary file", async () => {
   const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-crash-"))
@@ -232,7 +235,7 @@ test("exclusive retry completes after a crash before publication and preserves t
   await writeExclusive(join(directory, "result.json"), "complete")
   expect((await readBytes(join(directory, "result.json"))).toString()).toBe("complete")
   expect(readFileSync(join(directory, temporary!), "utf8")).toBe("complete")
-})
+}, writerTimeout)
 
 test("exclusive writers in two processes preserve each other's active temporary files", async () => {
   const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-processes-"))
