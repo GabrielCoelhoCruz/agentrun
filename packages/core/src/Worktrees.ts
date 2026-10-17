@@ -115,7 +115,8 @@ process.stdin.once('data',()=>{
  child.on('close',code=>{
   done=true;
   process.stdout.end(()=>process.stderr.end(()=>{
-   const probe=execFile('ps',['-axo','pid=,pgid=,stat='],{timeout:5000,env:{...process.env,LC_ALL:'C'}},(error,stdout)=>{
+   // A detached wrapper leads its session. Linux selects sessions; macOS selects groups.
+   const probe=execFile('ps',['-o','pid=,pgid=,stat=',process.platform==='darwin'?'-g':'-s',String(process.pid)],{timeout:5000,env:{...process.env,LC_ALL:'C'}},(error,stdout)=>{
     const rows=stdout.trim().split(/\\r?\\n/).map(line=>/^\\s*(\\d+)\\s+(\\d+)\\s+(\\S+)\\s*$/.exec(line));
     const valid=!error && rows.every(row=>row!==null)
      && rows.some(row=>Number(row[1])===process.pid && Number(row[2])===process.pid)
