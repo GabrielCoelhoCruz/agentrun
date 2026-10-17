@@ -81,7 +81,7 @@ The CLI refuses special files, symbolic links, malformed records, and observed c
 See [ADR 006](docs/adr/006-bounded-ownership-records.md) for the read checks and race boundary.
 
 An empty reservation, missing creation proof, or legacy run without ownership records requires inspection. Automatic resume refuses these cases and preserves the files.
-This includes Git failures after resource creation, before the CLI saves its creation receipt. Existing reports remain readable.
+Unproved resources from older builds and unsafe partial creation still require inspection. Existing reports remain readable.
 Use a different run ID for new work. Keep the reservation and state while you inspect the original run.
 A directory with missing or corrupt state requires inspection; the CLI does not replace it.
 The commands without an ID retain their current defaults. Automation must not guess its attempt from the latest run.
@@ -101,9 +101,19 @@ If both versions have touched the repository, inspect the histories before furth
 ## Inspect incomplete creation
 
 A creation receipt is the record that binds a run to its workspace and branch name.
-`git worktree add -b` can create a branch or workspace and then fail.
+Git can create a branch or workspace and then fail.
 Triggers include a failed `post-checkout` hook, checkout or Git LFS errors, the sixty-second Git limit, and the task deadline.
-A crash, interruption, or failed receipt write can also leave resources without valid proof.
+A pending receipt records the expected owner, path, branch and base before Git starts.
+Both receipt kinds are published from a complete temporary file through an exclusive link.
+A stop during writing cannot expose an empty or partial pending record.
+A successful Git checkout can run user hooks and create files. The process that receives that success accepts those files.
+Crash recovery cannot prove which files a hook wrote. It still refuses changed or extra files, including ignored files.
+Git records a run-specific creation message with the new branch. Resume requires that single history entry, the exact base tip,
+the expected workspace identity, and a clean workspace including ignored files before saving final proof.
+A stop before Git permits a fresh creation attempt only while the expected resources remain absent.
+During crash recovery, changed commits, changed or extra files, and missing or invalid creation history require inspection.
+A proved branch with a missing workspace can be recreated. Recovery first removes only its stale Git registration.
+Locked registrations and unrelated workspaces remain intact.
 The CLI preserves those resources. `resume --retry-failed` refuses reuse or cleanup while ownership is unproved, even after the original error is fixed.
 A Git failure after resource creation can block automatic retry.
 
@@ -118,7 +128,8 @@ Inspect the saved run and Git state before recovery:
 7. Compare the saved identities with the reservation and receipt in the resolved common directory.
 
 Reservations are at `agentrun/ownership/runs/<lowercase-run-id>/owner.json` under that common directory.
-Receipts are at `agentrun/ownership/branches/<sha256-of-lowercase-branch>.json`. The hash uses the branch name without `refs/heads/`.
+Final receipts are at `agentrun/ownership/branches/<sha256-of-lowercase-branch>.json`.
+Pending receipts append `.pending` to that path and cannot authorize staging, publication or cleanup. The hash uses the branch name without `refs/heads/`.
 On macOS, calculate the hash with the exact branch name:
 
 ```sh
@@ -126,9 +137,15 @@ printf '%s' 'agentrun/<task-id>-<suffix>' | tr '[:upper:]' '[:lower:]' | shasum 
 ```
 
 On Linux, replace `shasum -a 256` with `sha256sum`. Do not use `echo`; its newline changes the hash.
-A branch or workspace without its receipt has incomplete ownership. Missing, unreadable, mismatched, or partial records also require inspection.
+A branch or workspace without its final receipt has incomplete ownership unless resume validates its pending proof. Missing, unreadable, mismatched, or partial records also require inspection.
 Check file type and size before reading a record. Do not read a pipe or device as JSON.
 A matching name alone does not prove creation. Do not create, rewrite, or copy receipts to bypass refusal. Do not delete an invalid receipt to make a retry pass.
+
+For a dirty pending workspace, preview extra files with `git -C <workspace> clean --dry-run -d -x`.
+Inspect tracked changes with `git diff --binary` and `git diff --cached --binary` in that workspace.
+Move only confirmed disposable files to your backup. Preserve files whose source is uncertain.
+Repeat the status command. Retry resume only when the status output is empty.
+Do not use force cleanup to bypass ownership checks.
 
 If any identity or dirtiness check is uncertain, retain the resources.
 For new work, use a different run ID and unused branch suffix.

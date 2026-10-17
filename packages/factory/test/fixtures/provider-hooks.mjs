@@ -62,6 +62,8 @@ export function query({ prompt, options }) {
   }
   record({ kind: 'provider', stage: task.stage, attemptId: task.attemptId, inputSha: task.inputSha, pid: process.pid, cwd: options.cwd, review, maxBudgetUsd: options.maxBudgetUsd });
   return Object.assign((async function* () {
+    // Check cancellation must allow implementation startup longer than the old readiness limit.
+    if (mode === 'cancel-check' && !review) await new Promise(done => setTimeout(done, 31000));
     yield { type: 'system', subtype: 'init', session_id: 'local-fixture' };
     if (process.env.FACTORY_FIXTURE_ECHO_SECRET === '1') {
       assert.ok(process.env.ANTHROPIC_API_KEY);

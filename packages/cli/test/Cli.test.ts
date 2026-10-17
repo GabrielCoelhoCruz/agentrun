@@ -324,7 +324,7 @@ test("doctor exposes SDK versions and honest auth outcomes without prompt", asyn
   expect(existsSync(join(f.repo, ".agentrun"))).toBe(false)
 }, 30000)
 
-test("intent crash and missing worktree become failed until explicit retry", async () => {
+test("intent crash after proved branch creation resumes without manual cleanup", async () => {
   const f = fixture(1)
   mkdirSync(join(f.root, "bin"))
   writeFileSync(
@@ -346,16 +346,19 @@ exec /usr/bin/git "$@"
   const gitPid = Number(readFileSync(join(f.root, "intent-stop"), "utf8"))
   c.p.kill("SIGKILL")
   await c.done
-  process.kill(gitPid, "SIGKILL")
+  try {
+    process.kill(gitPid, "SIGKILL")
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error
+  }
   await wait(() => !alive(gitPid))
-  expect(await child(f, ["resume", "--json"]).done).toBe(1)
-  expect(state(f).status.task0?._tag).toBe("failed")
-  expect(state(f).status.task0?.attempt).toBe(1)
   expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
-  expect(await child(f, ["resume", "--retry-failed", "--json"]).done).toBe(0)
+  expect(await child(f, ["resume", "--json"]).done).toBe(0)
   expect(state(f).status.task0?._tag).toBe("succeeded")
+  expect(JSON.parse(readFileSync(statePath(f), "utf8")).taskReports.task0.attempt).toBe(2)
+  expect(starts(f)).toBe(1)
   expect(state(f).worktrees.task0?.branch).toBe(before.worktrees.task0?.branch)
-}, 30000)
+}, 60000)
 
 test("setup background child stays in the recorded worker group and is stopped", async () => {
   const f = fixture(1, "hold")
@@ -760,7 +763,7 @@ for (const window of ["commit", "artifacts"]) {
         `#!${process.execPath}\n`
           + `const {spawnSync}=require('node:child_process'); const fs=require('node:fs');\n`
           + `const r=spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:'inherit'});\n`
-          + `if(process.argv.includes('update-ref') && !fs.existsSync(${
+          + `if(process.argv.includes('update-ref') && !process.argv.includes('--create-reflog') && !fs.existsSync(${
             JSON.stringify(join(f.root, "crashed"))
           })){fs.writeFileSync(${
             JSON.stringify(join(f.root, "crashed"))
@@ -1004,7 +1007,9 @@ test("resume publishes the recorded commit after a crash before branch update", 
     join(f.root, "bin/git"),
     `#!${process.execPath}
 const {spawnSync}=require('node:child_process'); const fs=require('node:fs');
-if(process.argv.includes('update-ref') && !fs.existsSync(${JSON.stringify(join(f.root, "prepared-crash"))})) {
+if(process.argv.includes('update-ref') && !process.argv.includes('--create-reflog') && !fs.existsSync(${
+      JSON.stringify(join(f.root, "prepared-crash"))
+    })) {
  fs.writeFileSync(${
       JSON.stringify(join(f.root, "prepared-crash"))
     },'before publish'); process.kill(Number(spawnSync('ps',['-p',String(process.ppid),'-o','ppid='],{encoding:'utf8'}).stdout.trim()),'SIGKILL'); process.exit(1);
@@ -1403,7 +1408,9 @@ const hangingGit = (f: Fixture, operation: "acquire" | "delivery") => {
     join(f.root, "bin/git"),
     `#!/bin/sh
 if [ ! -e ${quote(join(f.root, "git-hang"))} ] && ${
-      operation === "acquire" ? "[ \"$1\" = worktree ] && [ \"$2\" = add ]" : "[ \"$1\" = update-ref ]"
+      operation === "acquire"
+        ? "[ \"$1\" = worktree ] && [ \"$2\" = add ]"
+        : "[ \"$1\" = update-ref ] && [ \"$2\" != --create-reflog ]"
     }; then
  exec ${quote(process.execPath)} ${quote(handler)} "$@"
 fi
@@ -1417,7 +1424,9 @@ exec ${quote(realGit)} "$@"
 const {spawn,spawnSync}=require('node:child_process'); const fs=require('node:fs');
 const args=process.argv.slice(2); const marker=${JSON.stringify(join(f.root, "git-hang"))};
 if(!fs.existsSync(marker) && (${
-      operation === "acquire" ? "args[0]==='worktree' && args[1]==='add'" : "args[0]==='update-ref'"
+      operation === "acquire"
+        ? "args[0]==='worktree' && args[1]==='add'"
+        : "args[0]==='update-ref' && !args.includes('--create-reflog')"
     })) {
  ${
       operation === "acquire"
@@ -1470,9 +1479,15 @@ for (const dirty of [false, true]) {
       expect(existsSync(join(f.repo, ".agentrun/runs", state(f).runId, "report.json"))).toBe(true)
       const refused = child(f, ["resume", "--json"])
       expect(await refused.done).toBe(1)
-      expect(refused.stderr()).toMatch(/[Oo]wnership/)
-      expect(existsSync(partial)).toBe(true)
-      if (dirty) expect(readFileSync(join(partial, "partial-user-work"), "utf8")).toBe("preserve this\n")
+      if (dirty) {
+        expect(refused.stderr()).toMatch(/[Oo]wnership/)
+        expect(existsSync(partial)).toBe(true)
+        expect(readFileSync(join(partial, "partial-user-work"), "utf8")).toBe("preserve this\n")
+      } else {
+        expect(refused.stderr()).not.toMatch(/[Oo]wnership/)
+        expect(existsSync(partial)).toBe(false)
+        expect(state(f).status.task0?.reason).toBe("AgentTimedOut: Exceeded 5000ms")
+      }
       expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
     } finally {
       if (alive(c.p.pid!)) c.p.kill("SIGKILL")
@@ -1482,7 +1497,7 @@ for (const dirty of [false, true]) {
         for (const pid of [owned.pid, owned.child]) if (alive(pid)) process.kill(pid, "SIGKILL")
       }
     }
-  }, 30000)
+  }, 60000)
 }
 
 for (const crash of [false, true]) {
@@ -1873,10 +1888,12 @@ for (const mode of ["failed retry", "interrupted", "linked checkout"] as const) 
     const second = mode === "linked checkout" ? { ...f, repo: join(f.root, "linked") } : f
     if (second !== f) git(f.repo, ["worktree", "add", "-b", "linked", second.repo, "HEAD"])
     writeFileSync(join(second.repo, "SECOND.md"), "## task0: Foreign delivery\nreport-bytes\n")
-    expect(await child(second, ["run", "SECOND.md", "--run-id", "second-0001", "--json"]).done).toBe(0)
+    expect(await child(second, ["run", "SECOND.md", "--run-id", "second-0002", "--json"]).done).toBe(0)
+    // Pending intent reserves 0001. Move a completed foreign delivery into that name outside the runner.
+    git(f.repo, ["branch", "-m", "agentrun/task0-0002", branch])
     const before = readFileSync(file)
     const refs = git(f.repo, ["show-ref"])
-    const otherReport = readFileSync(join(second.repo, ".agentrun/runs/second-0001/report.json"))
+    const otherReport = readFileSync(join(second.repo, ".agentrun/runs/second-0002/report.json"))
     const resumed = child(f, ["resume", id, ...(mode === "interrupted" ? [] : ["--retry-failed"]), "--json"])
     expect(await resumed.done).toBe(1)
     expect(resumed.stderr()).toMatch(/[Oo]wnership/)
@@ -1884,9 +1901,9 @@ for (const mode of ["failed retry", "interrupted", "linked checkout"] as const) 
     expect(starts(f)).toBe(1)
     expect(readFileSync(file)).toEqual(before)
     expect(git(f.repo, ["show-ref"])).toBe(refs)
-    expect(readFileSync(join(second.repo, ".agentrun/runs/second-0001/report.json"))).toEqual(otherReport)
+    expect(readFileSync(join(second.repo, ".agentrun/runs/second-0002/report.json"))).toEqual(otherReport)
     expect(existsSync(initial.worktrees.task0.path)).toBe(false)
-  }, 30000)
+  }, 60000)
 }
 
 for (const packed of [false, true]) {
@@ -1996,3 +2013,87 @@ for (const record of ["reservation", "receipt"]) {
     expect(await child(f, ["run", "TASKS.md", "--run-id", "fresh-0099", "--json"]).done).toBe(0)
   }, 30000)
 }
+
+test("review fresh run accepts ignored checkout hook output", async () => {
+  const f = fixture(1)
+  writeFileSync(join(f.repo, ".git", "info", "exclude"), ".hook-output\n")
+  writeFileSync(join(f.repo, ".git", "hooks", "post-checkout"), "#!/bin/sh\nprintf 'hook output\\n' > .hook-output\n", {
+    mode: 0o755,
+  })
+  const run = child(f, ["run", "TASKS.md", "--keep-worktrees", "--json"])
+  expect(await run.done).toBe(0)
+  const saved = state(f)
+  expect(saved.status.task0?._tag).toBe("succeeded")
+  expect(starts(f)).toBe(1)
+  expect(readFileSync(join(saved.worktrees.task0!.path, ".hook-output"), "utf8")).toBe("hook output\n")
+}, 60000)
+
+test("review SIGKILL before pending bytes leaves the run retryable", async () => {
+  const f = fixture(1)
+  const marker = join(f.root, "pending-write-crash")
+  writeFileSync(
+    join(f.root, "crash.cjs"),
+    `
+const fs = require('node:fs');
+const {syncBuiltinESMExports} = require('node:module');
+const original = fs.writeFile;
+fs.writeFile = function(target, data, ...args) {
+  if (String(target).includes('/ownership/branches/') && Buffer.from(data).toString('utf8').includes('"baseSha":') && !fs.existsSync(${
+      JSON.stringify(marker)
+    })) {
+    fs.writeFileSync(target, '');
+    fs.writeFileSync(${JSON.stringify(marker)}, String(target));
+    process.kill(process.pid, 'SIGKILL');
+  }
+  return original.call(this, target, data, ...args);
+};
+syncBuiltinESMExports();
+`,
+  )
+  expect(await child(f, ["run", "TASKS.md", "--json"]).done).toBe(null)
+  expect(existsSync(marker)).toBe(true)
+  const branch = state(f).worktrees.task0!.branch
+  const pending = join(
+    f.repo,
+    ".git",
+    "agentrun",
+    "ownership",
+    "branches",
+    `${createHash("sha256").update(branch.toLowerCase()).digest("hex")}.json.pending`,
+  )
+  expect(existsSync(pending)).toBe(false)
+  expect(statSync(readFileSync(marker, "utf8")).size).toBe(0)
+  expect(git(f.repo, ["branch", "--list", branch])).toBe("")
+  expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
+  expect(await child(f, ["resume", "--retry-failed", "--json"]).done).toBe(0)
+  expect(state(f).status.task0?._tag).toBe("succeeded")
+  expect(starts(f)).toBe(1)
+}, 60000)
+
+test("review pending intent reserves a suffix after failed branch creation", async () => {
+  const f = fixture(1, "report-nochange")
+  const branch = "agentrun/task0-0043"
+  const lock = join(f.repo, ".git", "refs", "heads", `${branch}.lock`)
+  mkdirSync(join(f.repo, ".git", "refs", "heads", "agentrun"), { recursive: true })
+  writeFileSync(lock, "fixture ref lock")
+  expect(await child(f, ["run", "TASKS.md", "--run-id", "first-0043", "--json"]).done).toBe(1)
+  unlinkSync(lock)
+  const file = join(f.repo, ".agentrun", "runs", "first-0043", "state.json")
+  const before = readFileSync(file)
+  const pending = join(
+    f.repo,
+    ".git",
+    "agentrun",
+    "ownership",
+    "branches",
+    `${createHash("sha256").update(branch).digest("hex")}.json.pending`,
+  )
+  const receipt = readFileSync(pending)
+  const second = child(f, ["run", "TASKS.md", "--run-id", "second-0043", "--json"])
+  expect(await second.done).toBe(2)
+  expect(second.stderr()).toContain("Worktree collision")
+  expect(readFileSync(file)).toEqual(before)
+  expect(readFileSync(pending)).toEqual(receipt)
+  expect(git(f.repo, ["branch", "--list", branch])).toBe("")
+  expect(existsSync(join(f.root, "starts-task0"))).toBe(false)
+}, 60000)
