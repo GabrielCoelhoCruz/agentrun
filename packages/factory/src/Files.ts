@@ -6,12 +6,13 @@ import {
   closeSync,
   constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
   openSync,
-  rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
@@ -78,39 +79,86 @@ export const safePath = (root: string, file: string) => {
 export const writeExclusive = async (file: string, bytes: string | Uint8Array, root = dirname(file)) => {
   safePath(root, file)
   const directory = dirname(file)
-  const accept = async () => {
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const parents: Array<{ path: string; dev: bigint; ino: bigint }> = []
+  let current = resolve(root)
+  const rel = relative(current, resolve(directory))
+  for (const component of ["", ...(rel === "" ? [] : rel.split(sep))]) {
+    current = join(current, component)
+    const stat = lstatSync(current, { bigint: true })
+    if (!stat.isDirectory()) throw failure("path", `Expected a real directory: ${current}`)
+    parents.push({ path: current, dev: stat.dev, ino: stat.ino })
+  }
+  const checkParents = () => {
     safePath(root, file)
+    for (const parent of parents) {
+      const stat = lstatSync(parent.path, { bigint: true, throwIfNoEntry: false })
+      if (stat === undefined || !stat.isDirectory() || stat.dev !== parent.dev || stat.ino !== parent.ino) {
+        throw failure("path", `Owned directory changed during publication: ${parent.path}`)
+      }
+    }
+  }
+  const accept = async () => {
+    checkParents()
     if (sha256(await readBytes(file, 64 * 1024 * 1024)) !== sha256(bytes)) {
       throw failure("artifact", `Existing artifact differs; preserve and inspect: ${file}`)
     }
-    safePath(root, file)
+    checkParents()
     syncDirectory(directory)
+    checkParents()
   }
   if (existsSync(file)) return accept()
-  mkdirSync(directory, { recursive: true, mode: 0o700 })
-  const temporary = join(directory, `.${basename(file)}.partial-${randomBytes(8).toString("hex")}`)
-  safePath(root, temporary)
-  const fd = openSync(temporary, "wx", 0o600)
+  let temporary: string
+  let fd: number
+  for (let attempt = 0;; attempt++) {
+    temporary = join(directory, `.${basename(file)}.partial-${randomBytes(8).toString("hex")}`)
+    checkParents()
+    safePath(root, temporary)
+    try {
+      fd = openSync(temporary, "wx", 0o600)
+      break
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST" || attempt === 9) throw cause
+    }
+  }
   try {
+    const identity = fstatSync(fd, { bigint: true })
+    const removeOwnLink = (path: string) => {
+      const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false })
+      if (stat?.isFile() && stat.dev === identity.dev && stat.ino === identity.ino) unlinkSync(path)
+    }
+    let published = false
+    const checkPublishedParents = () => {
+      try {
+        checkParents()
+      } catch (cause) {
+        // Path-based checks narrow the race; Node has no atomic directory-relative unlink.
+        if (published) removeOwnLink(file)
+        throw cause
+      }
+    }
     try {
       writeFileSync(fd, bytes)
       fsyncSync(fd)
+      checkParents()
+      safePath(root, temporary)
+      try {
+        linkSync(temporary, file)
+        published = true
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === "EEXIST") return await accept()
+        throw cause
+      }
+      checkPublishedParents()
+      syncDirectory(directory)
     } finally {
-      closeSync(fd)
-    }
-    safePath(root, temporary)
-    safePath(root, file)
-    try {
-      linkSync(temporary, file)
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code === "EEXIST") return accept()
-      throw cause
+      checkPublishedParents()
+      safePath(root, temporary)
+      removeOwnLink(temporary)
     }
   } finally {
-    safePath(root, temporary)
-    rmSync(temporary, { force: true })
+    closeSync(fd)
   }
-  syncDirectory(directory)
 }
 export const inside = (root: string, name: string) => {
   Schema.decodeUnknownSync(RelativePath)(name)

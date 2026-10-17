@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { spawn, spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { availableParallelism } from "node:os"
 import { isAbsolute, join, relative, resolve } from "node:path"
@@ -90,10 +90,63 @@ const saveReceipt = (evidence, name, executable, argv, cwd, started, result) => 
   return result.stdout
 }
 
-export const runCommand = (evidence, name, executable, argv, cwd, timeout = 900000) => {
+export const runCommand = (evidence, name, executable, argv, cwd, timeout = 900000, env = process.env) => {
   const started = new Date().toISOString()
-  const result = spawnSync(executable, argv, { cwd, encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 })
+  const result = spawnSync(executable, argv, { cwd, env, encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 })
   return saveReceipt(evidence, name, executable, argv, cwd, started, result)
+}
+
+// Issue #48 escaped the locked proof. Resolve registry dependencies without lock-derived overrides.
+export const proveFreshResolve = (evidence, dependencies) => {
+  const started = performance.now()
+  const consumer = join(evidence, "fresh-consumer")
+  const home = join(evidence, "fresh-home")
+  const cache = join(evidence, "fresh-cache")
+  for (const directory of [consumer, home, cache]) mkdirSync(directory)
+  save(join(consumer, "package.json"), {
+    name: "factory-fresh-resolve-proof",
+    packageManager: read(join(source, "package.json")).packageManager,
+    private: true,
+    type: "module",
+    dependencies,
+    // Only workspace packages use overrides; their registry dependencies resolve freely.
+    pnpm: { overrides: dependencies },
+  })
+  assert.equal(existsSync(join(consumer, "pnpm-lock.yaml")), false)
+  const env = { ...process.env, HOME: home, XDG_CACHE_HOME: cache, npm_config_cache: join(cache, "npm") }
+  const run = (name, executable, argv) => runCommand(evidence, name, executable, argv, consumer, 900000, env)
+  run("fresh-package-manager", "pnpm", ["--version"])
+  run("fresh-install", "pnpm", ["install", "--ignore-scripts", "--store-dir", join(cache, "pnpm")])
+  run("fresh-dependencies", "pnpm", ["list", "--depth", "Infinity", "--json"])
+  const output = run("fresh-import", process.execPath, [
+    "--input-type=module",
+    "-e",
+    `import assert from 'node:assert/strict';
+     const core = await import('@agentrun/core');
+     const cli = await import('agentrun');
+     const factory = await import('@agentrun/factory');
+     assert.equal(core.version, '0.1.0');
+     assert.equal(cli.version, '0.1.0');
+     assert.equal(typeof core.Pi.adapter.run, 'function');
+     assert.equal(typeof factory.handle, 'function');
+     console.log('Packed package imports passed');`,
+  ])
+  assert.equal(output.trim(), "Packed package imports passed")
+  for (
+    const [name, file, expected] of [
+      ["cli", "agentrun", "agentrun"],
+      ["factory", "@agentrun/factory", "agentrun-factory"],
+    ]
+  ) {
+    const help = run(`fresh-${name}-start`, process.execPath, [
+      join(consumer, "node_modules", file, "dist/bin.mjs"),
+      "--help",
+    ])
+    assert.ok(help.includes(expected), `Missing ${expected} help`)
+  }
+  const seconds = (performance.now() - started) / 1000
+  save(join(evidence, "fresh-summary.json"), { result: "passed", seconds, paidProviderCalls: 0 })
+  console.log(`Fresh dependency resolve, imports and command startup passed in ${seconds.toFixed(1)}s`)
 }
 
 const runCommandAsync = (evidence, { name, executable, argv, cwd, timeout = 900000 }) =>
@@ -231,6 +284,9 @@ const main = async (directory, selected = "all") => {
       if (!version.startsWith("link:")) overrides[name] = version.split("(")[0]
     }
   }
+  proveFreshResolve(evidence, dependencies)
+  if (selected === "fresh") return
+
   save(join(consumer, "package.json"), {
     name: "factory-installed-proof",
     private: true,

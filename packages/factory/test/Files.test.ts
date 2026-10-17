@@ -118,6 +118,87 @@ test("exclusive write preserves a temporary file when exclusive creation collide
   expect(readFileSync(userFile, "utf8")).toBe("user-owned bytes")
 })
 
+test("exclusive write retries a temporary name collision without changing the existing file", () => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-collision-retry-"))
+  const stale = ".result.json.partial-0123456789abcdef"
+  writeFileSync(join(directory, stale), "user-owned bytes")
+  const result = writer(directory, "collision-once")
+  expect(result.status, result.stderr + result.stdout).toBe(0)
+  expect(readFileSync(join(directory, "result.json"), "utf8")).toBe("complete")
+  expect(readFileSync(join(directory, stale), "utf8")).toBe("user-owned bytes")
+  expect(readdirSync(directory).sort()).toEqual([stale, "result.json"])
+})
+
+test("exclusive write syncs publication while the complete temporary file still exists", () => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-sync-"))
+  const result = writer(directory, "observe-sync")
+  expect(result.status, result.stderr + result.stdout).toBe(0)
+  expect(result.stdout).toContain(JSON.stringify({ published: "complete", temporary: "complete" }))
+  expect(readdirSync(directory)).toEqual(["result.json"])
+})
+
+test.each([
+  ["fail-directory-sync", "EIO"],
+  ["fail-temporary-unlink", "EBUSY"],
+])("exclusive write preserves an accepted artifact after %s", async (mode, code) => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-published-error-"))
+  const result = writer(directory, mode)
+  expect(result.status, result.stderr + result.stdout).toBe(1)
+  expect(result.stdout).toContain(JSON.stringify({ read: "complete", accepted: true }))
+  expect(result.stdout).toContain(`"code":"${code}"`)
+  const file = join(directory, "result.json")
+  expect(existsSync(file)).toBe(true)
+  expect(readFileSync(file, "utf8")).toBe("complete")
+  await writeExclusive(file, "complete")
+  expect(readFileSync(file, "utf8")).toBe("complete")
+})
+
+test.each(["root", "ancestor", "parent"])(
+  "exclusive write rolls back its link when the %s becomes a symlink at publication",
+  (component) => {
+    const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-publish-symlink-"))
+    mkdirSync(join(directory, "owned/artifacts/nested"), { recursive: true })
+    const result = writer(directory, `publish-symlink-${component}`)
+    const outside = join(
+      directory,
+      "outside",
+      ...(component === "root"
+        ? ["artifacts", "nested"]
+        : component === "ancestor"
+        ? ["nested"]
+        : []),
+    )
+    expect(result.status, result.stderr + result.stdout).toBe(1)
+    expect(result.stdout).toContain("\"code\":\"path\"")
+    expect(existsSync(join(outside, "result.json"))).toBe(false)
+    expect(readFileSync(join(outside, "user.txt"), "utf8")).toBe("user-owned bytes")
+  },
+)
+
+test("exclusive write detects a different real parent and removes only its published link", () => {
+  const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-publish-directory-"))
+  mkdirSync(join(directory, "owned/artifacts/nested"), { recursive: true })
+  const result = writer(directory, "publish-directory")
+  expect(result.status, result.stderr + result.stdout).toBe(1)
+  expect(result.stdout).toContain("\"code\":\"path\"")
+  expect(existsSync(join(directory, "owned/artifacts/nested/result.json"))).toBe(false)
+  expect(readFileSync(join(directory, "owned/artifacts/nested/user.txt"), "utf8")).toBe("user-owned bytes")
+})
+
+test.each(["replacement", "existing-same", "existing-different"])(
+  "exclusive write preserves the %s artifact when publication detects a changed parent",
+  (mode) => {
+    const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-publish-preserve-"))
+    mkdirSync(join(directory, "owned/artifacts/nested"), { recursive: true })
+    const result = writer(directory, `publish-${mode}`)
+    expect(result.status, result.stderr + result.stdout).toBe(1)
+    expect(result.stdout).toContain("\"code\":\"path\"")
+    expect(readFileSync(join(directory, "outside/result.json"), "utf8")).toBe(
+      mode === "existing-same" ? "complete" : "user-owned artifact",
+    )
+  },
+)
+
 test("exclusive write cleans its own temporary file after a failed write", () => {
   const directory = mkdtempSync(join(tmpdir(), "factory-exclusive-failure-"))
   const userFile = ".user-note.partial-0123456789abcdef"
