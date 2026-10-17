@@ -110,7 +110,13 @@ process.stdin.once('data',()=>{
  child.stdout.pipe(process.stdout,{end:false});
  child.stderr.pipe(process.stderr,{end:false});
  child.on('error',e=>console.error(e.message));
- child.on('close',code=>{done=true;process.send(code ?? -1);process.stdout.end();process.stderr.end()});
+ child.on('close',code=>{
+  done=true;
+  process.send(code ?? -1);
+  process.disconnect();
+  process.stdin.destroy();
+  process.stdout.end();process.stderr.end();
+ });
 });
 `,
               "--",
@@ -128,6 +134,14 @@ process.stdin.once('data',()=>{
           }),
       )
       child.on("error", () => {})
+      let status: unknown
+      let closed = false
+      child.once("message", (code) => {
+        status = code
+      })
+      child.once("close", () => {
+        closed = true
+      })
       const { stdin, stdout: output, stderr: errors } = child
       if (stdin === null || output === null || errors === null) return yield* error("Git pipes did not start")
       stdin.on("error", () => {})
@@ -138,14 +152,19 @@ process.stdin.once('data',()=>{
         stdin.write("start\n")
       }).pipe(Effect.uninterruptible, Effect.mapError(error))
       const exit = Effect.callback<number, GitError>((resume) => {
-        const done = (code: unknown) =>
-          resume(typeof code === "number" ? Effect.succeed(code) : Effect.fail(error("Invalid Git exit status")))
+        // Wait for wrapper exit so completed Git calls use the dead-group cleanup path.
+        const done = () =>
+          resume(
+            typeof status === "number"
+              ? Effect.succeed(status)
+              : Effect.fail(error("Git wrapper exited without status")),
+          )
         const failed = (cause: Error) => resume(Effect.fail(error(cause)))
-        child.once("message", done)
+        child.once("close", done)
         child.once("error", failed)
-        if (child.exitCode !== null) done(child.exitCode)
+        if (closed) done()
         return Effect.sync(() => {
-          child.off("message", done)
+          child.off("close", done)
           child.off("error", failed)
         })
       })
