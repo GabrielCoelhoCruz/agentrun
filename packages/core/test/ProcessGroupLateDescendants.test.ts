@@ -181,7 +181,11 @@ if((!command||commands>1)&&outcome==='reused parent'){
 }
 if(command&&commands===1){
  writeFileSync(dir+'/initial.txt',output);
- if(!['escalation fork','reused leader','moved group'].includes(outcome))writeFileSync(dir+'/fork-'+(depth-1),'go');
+ if(!['escalation fork','reused leader','moved group'].includes(outcome)){
+  writeFileSync(dir+'/fork-'+(depth-1),'go');
+  const deadline=Date.now()+3000;
+  while(!existsSync(dir+'/ready-'+depth)&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);
+ }
 }else if(command&&commands===2&&outcome==='escalation fork'){
  writeFileSync(dir+'/escalation.txt',output);
  writeFileSync(dir+'/exit-0','exit');
