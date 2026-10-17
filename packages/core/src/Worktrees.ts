@@ -11,6 +11,8 @@ import * as OwnershipRecords from "./OwnershipRecords.js"
 import { stopProcessGroup } from "./ProcessGroup.js"
 import { repoIdentity } from "./RepoHash.js"
 
+const GitStatus = Schema.Struct({ code: Schema.Int, cleanup: Schema.Boolean })
+
 export interface Worktree {
   readonly taskId: TaskId
   readonly path: string
@@ -99,7 +101,7 @@ const make = Effect.fn("Worktrees.make")(function*(options: Options) {
             spawn(process.execPath, [
               "-e",
               `
-const {spawn}=require('node:child_process');
+const {spawn,execFile}=require('node:child_process');
 let done=false;
 process.on('SIGTERM',()=>{if(done) process.exit(0)});
 for(const stream of [process.stdout,process.stderr]) stream.on('error',e=>{if(e.code!=='EPIPE') throw e});
@@ -112,10 +114,20 @@ process.stdin.once('data',()=>{
  child.on('error',e=>console.error(e.message));
  child.on('close',code=>{
   done=true;
-  process.send(code ?? -1);
-  process.disconnect();
-  process.stdin.destroy();
-  process.stdout.end();process.stderr.end();
+  process.stdout.end(()=>process.stderr.end(()=>{
+   const probe=execFile('ps',['-axo','pid=,pgid=,stat='],{timeout:5000,env:{...process.env,LC_ALL:'C'}},(error,stdout)=>{
+    const rows=stdout.trim().split(/\\r?\\n/).map(line=>/^\\s*(\\d+)\\s+(\\d+)\\s+(\\S+)\\s*$/.exec(line));
+    const valid=!error && rows.every(row=>row!==null)
+     && rows.some(row=>Number(row[1])===process.pid && Number(row[2])===process.pid)
+     && new Set(rows.map(row=>row[1])).size===rows.length;
+    const cleanup=!valid || rows.some(row=>Number(row[2])===process.pid
+     && Number(row[1])!==process.pid && Number(row[1])!==probe.pid
+     && !row[3].includes('Z') && !(process.platform==='darwin' && row[3].includes('E')));
+    process.send({code:code ?? -1,cleanup},()=>{
+     if(!cleanup){process.disconnect();process.stdin.destroy()}
+    });
+   });
+  }));
  });
 });
 `,
@@ -134,10 +146,10 @@ process.stdin.once('data',()=>{
           }),
       )
       child.on("error", () => {})
-      let status: unknown
+      let status: typeof GitStatus.Type | undefined
       let closed = false
-      child.once("message", (code) => {
-        status = code
+      child.once("message", (message) => {
+        if (Schema.is(GitStatus)(message)) status = message
       })
       child.once("close", () => {
         closed = true
@@ -152,19 +164,20 @@ process.stdin.once('data',()=>{
         stdin.write("start\n")
       }).pipe(Effect.uninterruptible, Effect.mapError(error))
       const exit = Effect.callback<number, GitError>((resume) => {
-        // Wait for wrapper exit so completed Git calls use the dead-group cleanup path.
-        const done = () =>
-          resume(
-            typeof status === "number"
-              ? Effect.succeed(status)
-              : Effect.fail(error("Git wrapper exited without status")),
-          )
+        const done = () => {
+          if (status !== undefined) {
+            // A live member needs the verified leader until scoped cleanup stops the group.
+            if (status.cleanup || closed) resume(Effect.succeed(status.code))
+          } else if (closed) resume(Effect.fail(error("Git wrapper exited without status")))
+        }
         const failed = (cause: Error) => resume(Effect.fail(error(cause)))
         child.once("close", done)
+        child.once("message", done)
         child.once("error", failed)
-        if (closed) done()
+        done()
         return Effect.sync(() => {
           child.off("close", done)
+          child.off("message", done)
           child.off("error", failed)
         })
       })
