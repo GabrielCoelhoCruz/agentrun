@@ -85,10 +85,10 @@ test.each(probes)("both ownership paths make the same exit decision: $name", asy
       writeFileSync(
         join(directory, "ps"),
         `#!${process.execPath}
-const {readFileSync,writeFileSync}=require('node:fs');
+const {readFileSync,renameSync,writeFileSync}=require('node:fs');
 const dir=${JSON.stringify(directory)},tables=${JSON.stringify(tables)};
 let poll=Number(readFileSync(dir+'/poll','utf8'));
-if(!process.argv.some(arg=>arg.includes('command=')))writeFileSync(dir+'/poll',String(++poll));
+if(!process.argv.some(arg=>arg.includes('command='))){writeFileSync(dir+'/poll.'+process.pid,String(++poll));renameSync(dir+'/poll.'+process.pid,dir+'/poll')}
 process.stdout.write(tables[Math.min(poll,tables.length-1)]+'\\n');
 `,
         { mode: 0o755 },
@@ -117,7 +117,7 @@ process.stdout.write(tables[Math.min(poll,tables.length-1)]+'\\n');
             JSON.stringify({ name, maySignal, result, polls, signals, snapshots }, null, 2),
           )
         }
-        if (expected === "Failure") expect(polls).toBe(80)
+        if (expected === "Failure") expect(polls, JSON.stringify(result)).toBe(80)
       } finally {
         spy.mockRestore()
       }
